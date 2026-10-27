@@ -14,11 +14,20 @@
 #
 # Requires Xcode and: brew install bison flex mingw-w64 autoconf automake
 #   meson ninja glslang cmake pkgconf
+#
+# Downloads MoltenVK and freetype (git), GMP, nettle and GnuTLS (release
+# tarballs, checked against pinned SHA-256 sums).
 
 set -euo pipefail
 
 MOLTENVK_TAG=v1.4.2
 FREETYPE_TAG=VER-2-14-3
+GMP_URL=https://ftpmirror.gnu.org/gmp/gmp-6.3.0.tar.xz
+GMP_SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
+NETTLE_URL=https://ftpmirror.gnu.org/nettle/nettle-4.0.tar.gz
+NETTLE_SHA256=3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094
+GNUTLS_URL=https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz
+GNUTLS_SHA256=ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e
 
 proton=$(cd "$(dirname "$0")/.." && pwd)
 build=$(mkdir -p "${1:-$proton/../build-macos}" && cd "${1:-$proton/../build-macos}" && pwd)
@@ -96,6 +105,73 @@ do_freetype() {
         > "$deps/lib/pkgconfig/bzip2.pc"
 }
 
+# fetch URL SHA256: download and unpack a release tarball into $deps_src,
+# prints the source directory
+fetch() {
+    local url=$1 sha256=$2 file dir
+    file=$deps_src/tarballs/$(basename "$url")
+    dir=$deps_src/$(basename "$url" | sed -E 's/\.tar\.(gz|xz)$//')
+    mkdir -p "$deps_src/tarballs"
+    [ -f "$file" ] || curl -fL --retry 3 -o "$file" "$url" >&2
+    if [ "$(shasum -a 256 "$file" | cut -d' ' -f1)" != "$sha256" ]; then
+        echo "checksum mismatch for $file" >&2
+        exit 1
+    fi
+    [ -d "$dir" ] || tar -xf "$file" -C "$deps_src"
+    echo "$dir"
+}
+
+# autotools_build SRC OBJ [CONFIGURE_ARGS...]: x86_64 build into $deps
+autotools_build() {
+    local src=$1 obj=$2
+    shift 2
+    mkdir -p "$obj"
+    (cd "$obj" && PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" "$src/configure" \
+        --build=x86_64-apple-darwin --host=x86_64-apple-darwin \
+        CC="clang -arch x86_64" CPPFLAGS="-I$deps/include" LDFLAGS="-L$deps/lib -Wl,-rpath,$deps/lib" \
+        --prefix="$deps" --enable-shared --disable-static "$@" \
+        && make -j"$jobs" && make install)
+}
+
+# Give libraries in $deps relocatable @rpath install names; Wine dlopens
+# them by leaf name and run.sh points DYLD_FALLBACK_LIBRARY_PATH at them.
+# The build-time rpath to $deps (needed by configure test programs of the
+# next library) is dropped again.
+fix_install_names() {
+    local lib dep
+    for lib in "$deps"/lib/*.dylib; do
+        [ -L "$lib" ] && continue
+        if otool -l "$lib" | grep -q "path $deps/lib "; then
+            install_name_tool -delete_rpath "$deps/lib" "$lib"
+        fi
+        install_name_tool -id "@rpath/$(basename "$(otool -D "$lib" | tail -1)")" "$lib"
+        for dep in $(otool -L "$lib" | awk 'NR > 1 {print $1}' | grep "^$deps/lib/"); do
+            install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$lib"
+        done
+        otool -l "$lib" | grep -q "path @loader_path/ " || install_name_tool -add_rpath @loader_path/ "$lib"
+    done
+}
+
+do_gmp() {
+    autotools_build "$(fetch "$GMP_URL" "$GMP_SHA256")" "$build/gmp" ABI=64
+    fix_install_names
+}
+
+do_nettle() {
+    autotools_build "$(fetch "$NETTLE_URL" "$NETTLE_SHA256")" "$build/nettle" \
+        --disable-documentation --libdir="$deps/lib"
+    fix_install_names
+}
+
+do_gnutls() {
+    autotools_build "$(fetch "$GNUTLS_URL" "$GNUTLS_SHA256")" "$build/gnutls" \
+        --with-included-libtasn1 --with-included-unistring --without-p11-kit \
+        --without-idn --without-brotli --without-zstd --without-zlib \
+        --without-tpm --without-tpm2 --disable-tools --disable-doc --disable-tests \
+        --disable-cxx --disable-guile --disable-nls
+    fix_install_names
+}
+
 do_wine_source() {
     cd "$proton/wine"
     XDG_CACHE_HOME="$build/cache" python3 dlls/winevulkan/make_vulkan -x vk.xml -X video.xml
@@ -113,7 +189,7 @@ do_wine_configure() {
         --build=x86_64-apple-darwin --host=x86_64-apple-darwin \
         CC="clang -arch x86_64" LDFLAGS="-L$deps/lib -Wl,-rpath,$deps/lib" \
         --prefix="$dist" --enable-archs=i386,x86_64 \
-        --without-x --without-wayland --without-gnutls --without-sdl --without-gstreamer \
+        --without-x --without-wayland --without-sdl --without-gstreamer \
         --without-pulse --without-alsa --without-oss --without-udev --without-dbus --without-v4l2
 }
 
@@ -126,7 +202,7 @@ do_wine_build() {
 
 do_wine_install() {
     make -C "$build/wine" install-lib
-    cp "$deps/lib/libMoltenVK.dylib" "$deps"/lib/libfreetype*.dylib "$dist/lib/"
+    cp -a "$deps"/lib/*.dylib "$dist/lib/"
 
     # The build tree rpath lets build tools like sfnt2fon find freetype
     # (DYLD_* variables do not survive make's /bin/sh). Drop it from the
@@ -195,6 +271,9 @@ step check_tools
 step submodules
 step moltenvk
 step freetype
+step gmp
+step nettle
+step gnutls
 step wine_source
 step wine_configure
 step wine_build

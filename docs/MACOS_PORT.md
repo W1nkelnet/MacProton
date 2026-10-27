@@ -45,7 +45,11 @@ Bisherige Wine-Anpassungen für macOS (alle per `#ifdef` bzw. configure, Linux-V
 | `configure.ac` | `loader64` auf Darwin deaktiviert |
 | `server/token.c` | Benutzer-SID aus Hardware-UUID (`gethostuuid`) statt `/etc/machine-id` |
 | `include/wine/server_protocol.h` u. a. | per `tools/make_requests` neu erzeugt |
-- [ ] x86_64-Abhängigkeiten nachziehen (FreeType, GnuTLS, MoltenVK, SDL2), z. B. über ein x86_64-Homebrew unter `/usr/local` oder eigene Builds
+- [x] x86_64-Abhängigkeiten selbst gebaut (Homebrew bietet keine Intel-Bottles mehr): MoltenVK, FreeType, GMP, nettle, GnuTLS – alle in `macos/build.sh`, Tarballs gegen feste SHA-256-Summen geprüft
+- [x] GnuTLS: ohne es scheitern in Wine die Signaturprüfung von Zertifikaten (`bcrypt: key_asymmetric_create no encryption support`) und HTTPS über schannel. Folge im Spiel war `Curl error 60: Cert verify failed` (UnityTls nutzt den Windows-Zertifikatsspeicher und dessen Prüfung). Test: `docs/macos/tls-check.c`
+- [ ] SDL2 (Controller) nachziehen
+
+Hinweis zum Testen: `DYLD_*`-Variablen überleben den Start SIP-geschützter Programme nicht (`/bin/sh`, `/usr/bin/timeout`, `/usr/bin/env`). Sie müssen nach solchen Programmen gesetzt werden – `run.sh` tut das selbst.
 
 ### Phase 2 – Build-System
 - [ ] `configure.sh` / `Makefile.in`: Ziel `darwin` ergänzen, Docker-Pfad umgehen
