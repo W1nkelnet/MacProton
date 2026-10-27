@@ -7,6 +7,7 @@ struct AppInfo {
     var executable: String
     var arguments: String
     var sizeBytes: Int64
+    var hasNativeMac = false
 }
 
 enum SteamCMDError: LocalizedError {
@@ -81,10 +82,7 @@ enum SteamCMD {
                     "+login", account, "+app_update", String(appID), "validate", "+quit"]
         let output = try await run("/usr/bin/script", args) { line in
             if let value = parseProgress(line) { progress(value, line) }
-            let lower = line.lowercased()
-            if lower.contains("password:") || lower.contains("steam guard") || lower.contains("two-factor") {
-                throw SteamCMDError.loginRequired(account)
-            }
+            try checkLogin(line, account: account)
         }
         if output.contains("Success! App '\(appID)'") { return }
         if output.contains("No subscription") {
@@ -95,6 +93,16 @@ enum SteamCMD {
         }
         let last = output.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
         throw SteamCMDError.failed("Download fehlgeschlagen: \(last)")
+    }
+
+    /// steamcmd prints "Cached credentials not found." before prompting for a
+    /// password; stop there, so it never attempts a login with an empty one.
+    static func checkLogin(_ line: String, account: String) throws {
+        let lower = line.lowercased()
+        if lower.contains("cached credentials not found") || lower.contains("password:")
+            || lower.contains("steam guard") || lower.contains("two-factor") {
+            throw SteamCMDError.loginRequired(account)
+        }
     }
 
     /// "Update state (0x61) downloading, progress: 38.63 (1428051780 / 3696370087)"
@@ -111,6 +119,9 @@ enum SteamCMD {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = Paths.steamcmdHome.path
+        process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe

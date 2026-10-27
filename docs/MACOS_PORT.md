@@ -157,6 +157,14 @@ Ziel: Nutzer laden ein Release von GitHub herunter, entpacken es und starten
 - [ ] Installationsskript, das das Paket an einen festen Ort legt
       (z. B. `~/Library/Application Support/MacProton/<version>`)
 
+### Offene Punkte (To-do)
+
+- [ ] **Spielstand-Sync (Steam Cloud):** Spiele mit Auto-Cloud haben pro Betriebssystem eigene Speicherpfade (`ufs/rootoverrides` in den App-Infos). Mac-Steam synchronisiert nur den Mac-Pfad (z. B. `~/Library/Application Support/Massive Monster/Cult Of The Lamb/saves`), die Windows-Version speichert im Prefix (`AppData/LocalLow/...`). Plan: Gibt es eine Windows- und eine MacOS-Regel, leitet MacProton den Prefix-Ordner auf den Mac-Pfad um – vorher Backup beider Seiten. Spiele mit ISteamRemoteStorage sollten bereits über lsteamclient synchronisieren (ungetestet). Reine Windows-Spiele mit Auto-Cloud: offen.
+- [ ] **Controller-Unterstützung:** SDL2 als x86_64-Abhängigkeit bauen und Wine (winebus/dinput/xinput) damit konfigurieren.
+- [x] **Bibliothek-Sync** (MacProton-App): `licenses_print` → abgekürzte Pakete per `package_info_print` → `app_info_print` je App in einer interaktiven steamcmd-Sitzung (über die Kommandozeile gereihte Abfragen liefert steamcmd asynchron und gibt nur die erste aus). Filter: Typ `game` mit Windows-Startdatei; Paket 0 (Steams Werkzeuge/Server) ausgenommen. Testkonto: 312 Apps → 70 Windows-Spiele, davon 28 auch nativ für Mac, ~26 s.
+- [ ] Spiele mit Anti-Cheat (EasyAntiCheat, BattlEye) und Fremd-Launchern (Ubisoft Connect, EA App) erkennen und kennzeichnen
+- [ ] **Steam-Overlay:** Shop/Profil öffnen sich derzeit im Steam-Fenster.
+
 ## Speicherplatz
 
 Auf dem Entwicklungs-Mac sind nur rund 37 GB frei. Ein vollständiger

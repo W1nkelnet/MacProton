@@ -10,6 +10,8 @@ struct Game: Codable, Identifiable, Hashable {
     var arguments: String = ""
     var sizeBytes: Int64 = 0
     var lastPlayed: Date?
+    /// The game also has a native macOS version, no need for Proton
+    var hasNativeMac: Bool?
 
     var id: Int { appID }
 
@@ -54,6 +56,15 @@ enum Paths {
 
     static let steamcmd: String? = ["/opt/homebrew/bin/steamcmd", "/usr/local/bin/steamcmd"]
         .first { FileManager.default.isExecutableFile(atPath: $0) }
+
+    /// HOME for steamcmd. Its default data directory is the Steam client's
+    /// (~/Library/Application Support/Steam), and the client overwrites
+    /// config.vdf there, dropping steamcmd's cached login.
+    static let steamcmdHome: URL = {
+        let dir = support.appendingPathComponent("steamcmd-home", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
 
     static var steamRunning: Bool {
         let task = Process()

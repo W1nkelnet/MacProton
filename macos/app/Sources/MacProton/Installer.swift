@@ -54,7 +54,7 @@ final class Installer: ObservableObject {
         let text = """
         #!/bin/bash
         echo "Anmeldung für MacProton. Gib Passwort und ggf. Steam-Guard-Code ein."
-        '\(steamcmd)' +login '\(quotedAccount)' +quit
+        HOME='\(Paths.steamcmdHome.path)' '\(steamcmd)' +login '\(quotedAccount)' +quit
         echo
         echo "Fertig. Dieses Fenster kann geschlossen werden."
         """

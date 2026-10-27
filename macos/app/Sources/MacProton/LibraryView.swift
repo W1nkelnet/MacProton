@@ -5,41 +5,78 @@ struct LibraryView: View {
     @EnvironmentObject private var library: Library
     @EnvironmentObject private var runner: Runner
     @EnvironmentObject private var installer: Installer
+    @EnvironmentObject private var sync: LibrarySync
     @State private var showAdd = false
     @State private var steamRunning = Paths.steamRunning
+    @AppStorage("libraryFilter") private var filter = Filter.all
+
+    enum Filter: String, CaseIterable {
+        case all = "Alle", installed = "Installiert"
+    }
+
+    private var shownGames: [Game] {
+        filter == .installed ? library.games.filter(\.isInstalled) : library.games
+    }
 
     private let columns = [GridItem(.adaptive(minimum: 230, maximum: 320), spacing: 16)]
 
     var body: some View {
         VStack(spacing: 0) {
             banners
+            if sync.running {
+                ProgressView(value: sync.progress) { Text(sync.status).font(.caption) }
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+            }
             if library.games.isEmpty {
                 ContentUnavailableView {
                     Label("Noch keine Spiele", systemImage: "gamecontroller")
                 } description: {
-                    Text("Füge ein Windows-Spiel aus deiner Steam-Bibliothek über seine App-ID oder den Shop-Link hinzu.")
+                    Text("Übernimm deine Windows-Spiele aus Steam oder füge eines über seine App-ID hinzu.")
                 } actions: {
+                    Button("Bibliothek synchronisieren") { sync.sync(library: library, account: installer.account) }
+                        .disabled(sync.running)
                     Button("Spiel hinzufügen") { showAdd = true }
                 }
             } else {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 16) {
-                        ForEach(library.games) { GameCard(game: $0) }
+                        ForEach(shownGames) { GameCard(game: $0) }
                     }
                     .padding(16)
                 }
             }
         }
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                Picker("Filter", selection: $filter) {
+                    ForEach(Filter.allCases, id: \.self) { Text($0.rawValue) }
+                }
+                .pickerStyle(.segmented)
+            }
+            ToolbarItem {
+                Button { sync.sync(library: library, account: installer.account) } label: {
+                    Label("Bibliothek synchronisieren", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(sync.running)
+                .help("Windows-Spiele aus deinem Steam-Konto übernehmen")
+            }
             ToolbarItem {
                 Button { showAdd = true } label: { Label("Spiel hinzufügen", systemImage: "plus") }
             }
         }
         .sheet(isPresented: $showAdd) { AddGameView() }
         .alert("Fehler", isPresented: errorBinding) {
-            Button("OK") { runner.lastError = nil; installer.lastError = nil }
+            Button("OK") { runner.lastError = nil; installer.lastError = nil; sync.lastError = nil }
         } message: {
-            Text(runner.lastError ?? installer.lastError ?? "")
+            Text(runner.lastError ?? installer.lastError ?? sync.lastError ?? "")
+        }
+        .alert("Bibliothek synchronisiert", isPresented: resultBinding) {
+            Button("OK") { sync.lastResult = nil }
+        } message: {
+            Text(sync.lastResult ?? "")
+        }
+        .onChange(of: sync.loginRequired) { _, account in
+            if let account { installer.loginRequired = account; sync.loginRequired = nil }
         }
         .alert("Steam-Anmeldung nötig", isPresented: loginBinding) {
             Button("Terminal öffnen") {
@@ -69,8 +106,12 @@ struct LibraryView: View {
     }
 
     private var errorBinding: Binding<Bool> {
-        Binding(get: { runner.lastError != nil || installer.lastError != nil },
-                set: { if !$0 { runner.lastError = nil; installer.lastError = nil } })
+        Binding(get: { runner.lastError != nil || installer.lastError != nil || sync.lastError != nil },
+                set: { if !$0 { runner.lastError = nil; installer.lastError = nil; sync.lastError = nil } })
+    }
+
+    private var resultBinding: Binding<Bool> {
+        Binding(get: { sync.lastResult != nil }, set: { if !$0 { sync.lastResult = nil } })
     }
 
     private var loginBinding: Binding<Bool> {
@@ -108,7 +149,15 @@ struct GameCard: View {
             .clipped()
 
             VStack(alignment: .leading, spacing: 8) {
-                Text(game.name).font(.headline).lineLimit(1)
+                HStack {
+                    Text(game.name).font(.headline).lineLimit(1)
+                    Spacer()
+                    if game.hasNativeMac == true {
+                        Image(systemName: "apple.logo")
+                            .foregroundStyle(.secondary)
+                            .help("Es gibt eine native Mac-Version, die direkt in Steam läuft.")
+                    }
+                }
                 status
                 action
             }
