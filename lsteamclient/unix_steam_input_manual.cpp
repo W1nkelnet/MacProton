@@ -8,6 +8,8 @@
 
 #ifdef __linux__
 #include <X11/keysym.h>
+#elif defined(__APPLE__)
+#include "winuser.h"
 #endif
 
 #ifdef __linux__
@@ -191,6 +193,79 @@ uint32_t manual_convert_nNativeKeyCode( uint32_t win_vk )
     if(win_vk < sizeof(vk_to_xkeysym) / sizeof(*vk_to_xkeysym))
         return vk_to_xkeysym[win_vk];
     return 0;
+}
+#elif defined(__APPLE__)
+/* macOS virtual key codes (kVK_* from Carbon's HIToolbox/Events.h) */
+uint32_t manual_convert_nNativeKeyCode( uint32_t win_vk )
+{
+    static const uint8_t letters[26] =
+    {
+        0x00, 0x0b, 0x08, 0x02, 0x0e, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2e, /* A-M */
+        0x2d, 0x1f, 0x23, 0x0c, 0x0f, 0x01, 0x11, 0x20, 0x09, 0x0d, 0x07, 0x10, 0x06, /* N-Z */
+    };
+    static const uint8_t digits[10] = { 0x1d, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1a, 0x1c, 0x19 };
+    static const uint8_t numpad[10] = { 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5b, 0x5c };
+    static const uint8_t fkeys[20] =
+    {
+        0x7a, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6d, /* F1-F10 */
+        0x67, 0x6f, 0x69, 0x6b, 0x71, 0x6a, 0x40, 0x4f, 0x50, 0x5a, /* F11-F20 */
+    };
+
+    if (win_vk >= 'A' && win_vk <= 'Z') return letters[win_vk - 'A'];
+    if (win_vk >= '0' && win_vk <= '9') return digits[win_vk - '0'];
+    if (win_vk >= VK_NUMPAD0 && win_vk <= VK_NUMPAD9) return numpad[win_vk - VK_NUMPAD0];
+    if (win_vk >= VK_F1 && win_vk <= VK_F20) return fkeys[win_vk - VK_F1];
+
+    switch (win_vk)
+    {
+    case VK_BACK:       return 0x33; /* kVK_Delete */
+    case VK_TAB:        return 0x30;
+    case VK_CLEAR:      return 0x47; /* kVK_ANSI_KeypadClear */
+    case VK_RETURN:     return 0x24;
+    case VK_SHIFT:      return 0x38;
+    case VK_CONTROL:    return 0x3b;
+    case VK_MENU:       return 0x3a; /* kVK_Option */
+    case VK_CAPITAL:    return 0x39;
+    case VK_ESCAPE:     return 0x35;
+    case VK_SPACE:      return 0x31;
+    case VK_PRIOR:      return 0x74; /* kVK_PageUp */
+    case VK_NEXT:       return 0x79; /* kVK_PageDown */
+    case VK_END:        return 0x77;
+    case VK_HOME:       return 0x73;
+    case VK_LEFT:       return 0x7b;
+    case VK_UP:         return 0x7e;
+    case VK_RIGHT:      return 0x7c;
+    case VK_DOWN:       return 0x7d;
+    case VK_INSERT:     return 0x72; /* kVK_Help, Insert on PC keyboards */
+    case VK_DELETE:     return 0x75; /* kVK_ForwardDelete */
+    case VK_LWIN:       return 0x37; /* kVK_Command */
+    case VK_RWIN:       return 0x36; /* kVK_RightCommand */
+    case VK_MULTIPLY:   return 0x43;
+    case VK_ADD:        return 0x45;
+    case VK_SUBTRACT:   return 0x4e;
+    case VK_DECIMAL:    return 0x41;
+    case VK_DIVIDE:     return 0x4b;
+    case VK_LSHIFT:     return 0x38;
+    case VK_RSHIFT:     return 0x3c;
+    case VK_LCONTROL:   return 0x3b;
+    case VK_RCONTROL:   return 0x3e;
+    case VK_LMENU:      return 0x3a;
+    case VK_RMENU:      return 0x3d;
+    case VK_OEM_1:      return 0x29; /* ;: */
+    case VK_OEM_PLUS:   return 0x18;
+    case VK_OEM_COMMA:  return 0x2b;
+    case VK_OEM_MINUS:  return 0x1b;
+    case VK_OEM_PERIOD: return 0x2f;
+    case VK_OEM_2:      return 0x2c; /* /? */
+    case VK_OEM_3:      return 0x32; /* `~ */
+    case VK_OEM_4:      return 0x21; /* [{ */
+    case VK_OEM_5:      return 0x2a; /* \| */
+    case VK_OEM_6:      return 0x1e; /* ]} */
+    case VK_OEM_7:      return 0x27; /* '" */
+    }
+
+    /* kVK_ANSI_A is 0, so use a value no key maps to */
+    return 0xffff;
 }
 #else
 #error You must implement VK<->Native keysym conversion for this platform.

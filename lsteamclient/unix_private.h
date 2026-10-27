@@ -3,14 +3,16 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+/* include before winbase.h, which poisons wcsncpy & co with __WINESRC__;
+ * glibc pulls in wchar.h earlier, the macOS SDK only from stdlib.h */
+#include <stdlib.h>
+#include <wchar.h>
 
 #include <windef.h>
 #include <winbase.h>
 
 #include "steamclient_structs.h"
 #include "unixlib.h"
-
-#include <stdlib.h>
 
 #include "wine/debug.h"
 #include "wine/unixlib.h"

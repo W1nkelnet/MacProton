@@ -54,6 +54,45 @@ Bisherige Wine-Anpassungen für macOS (alle per `#ifdef` bzw. configure, Linux-V
 - [ ] Ausgabe als portabler Ordner bzw. `.app`-Bundle
 
 ### Phase 3 – Grafik D3D9–11
+
+Gemessen (Apple M3, MoltenVK 1.4.2, Vulkan 1.3.357): MoltenVK erfüllt
+Vulkan 1.3 fast vollständig, für **DXVK 2.7.1** fehlen aber Pflicht-Features –
+DXVK lehnt das Gerät damit komplett ab:
+
+| Fehlt in MoltenVK | Verwendung in DXVK | Pflicht ab |
+|---|---|---|
+| `geometryShader` | Geometry Shader | D3D9-Baseline |
+| `shaderCullDistance` | Cull Distances | D3D9-Baseline |
+| `nullDescriptor`, `robustBufferAccess2` | ungebundene Ressourcen | D3D9-Baseline |
+| `VK_EXT_depth_clip_enable` | Depth Clipping | alle |
+| `transformFeedback` | Stream Output | D3D11 |
+
+Prüfprogramme: `docs/macos/mvkcheck.c` (Features), `docs/macos/d3d11-nulltest.c` (ungebundene Ressourcen, Swapchain), `docs/macos/d3d11-blendtest.c` (Blending, Texturen, Sampler, Constant Buffer), `docs/macos/d3d11-geomtest.c` (Vertex-/Index-Buffer, Reversed-Z auf D16/D24S8/D32/D32S8).
+
+**DXVK-Anpassungen** (aktiv nur auf Portability-Geräten: `VK_KHR_portability_subset`
+oder Treiber-ID `VK_DRIVER_ID_MOLTENVK` – Wine reicht die Erweiterung nicht an
+Windows-Programme durch; auf Linux bleibt DXVK unverändert streng):
+
+| Feature | Ersatzlösung |
+|---|---|
+| `geometryShader`, `shaderCullDistance` | optional; nur Shader, die sie nutzen, schlagen fehl |
+| `depthClipEnable` | Näherung über `depthClampEnable = !depthClip` (wie DXVK 1.x) |
+| `nullDescriptor`, `robustBufferAccess2` | `DxvkNullResources`: null-initialisierte Platzhalter (Puffer, Texel-Views, 1D/2D/3D/Cube-Bilder) pro Kontext, initialisiert im Init-Kommandopuffer |
+| `transformFeedback` | war in D3D11 schon optional |
+
+Ergebnis (Apple M3): DXVK erzeugt ein D3D11-Gerät mit **Feature Level 11_0**
+(11_1 scheitert an `logicOp`, das Metal nicht hat). Testprogramm
+`docs/macos/d3d11-nulltest.c`: ungebundene Textur/Constant Buffer lesen exakt 0,
+120 Frames über die Swapchain – alles bestanden.
+
+**wined3d** (Wines eigene D3D-Übersetzung über Apples OpenGL 4.1):
+D3D9-Visual-Tests 211.215 Prüfungen mit 47 (64 Bit) bzw. 48 (32 Bit) Fehlern,
+D3D11-Tests 4.006 Prüfungen mit 15 Fehlern. **Feature Level 11_0 erreicht
+wined3d auf macOS nicht** – für D3D11-Spiele ist DXVK nötig.
+
+Wines eigene D3D11-Testsuite ist für DXVK nicht aussagekräftig: Sie stürzt im
+D3D10-Interop-Pfad (`ID3D10Texture3D_GetDevice`) ab – unabhängig von MoltenVK.
+
 - [ ] winevulkan → MoltenVK (x86_64-Build von MoltenVK nötig)
 - [ ] DXVK mit MinGW für macOS bauen, MoltenVK-Fehlstellen per Konfiguration abfangen
 - [ ] Testspiele aus DX9, DX10, DX11 festlegen und Kompatibilität protokollieren
@@ -67,7 +106,19 @@ Optionen, zu bewerten:
 ### Phase 5 – Steam-Integration
 - [x] `lsteamclient`: Es gibt schon einen `__APPLE__`-Zweig in `lsteamclient/unixlib.cpp`, der `steamclient.dylib` lädt. Geprüft: Der macOS-Steam-Client liefert `steamclient.dylib` als Universal Binary (x86_64 + arm64), der Rosetta-Wineprozess kann sie also laden.
 - [x] `Steam_IsKnownInterface` und `Steam_NotifyMissingInterface` fehlen in der macOS-dylib → auf macOS optional geladen (Fallback: `false` bzw. nichts tun), damit `steamclient_init` nicht abbricht
-- [ ] lsteamclient für macOS bauen und mit einem echten Spiel testen
+- [x] lsteamclient und steam_helper (`steam.exe`) für macOS bauen – `macos/makedep-module.py` ersetzt die GNU-sed-basierten Makedep-Regeln
+- [x] `steamclient64.dll`/`steamclient.dll` im Prefix sind Kopien von `lsteamclient.dll`: Mac-Steam liefert keine Windows-Versionen, Wines Loader leitet sie per Trampolin auf lsteamclient um
+- [x] **Cult of the Lamb** (Unity, D3D11) läuft mit Steamworks über den laufenden Mac-Steam-Client bis ins Hauptmenü, 60 FPS (Apple M3) – Start über `macos/dev-run.sh`
+
+Anpassungen dafür:
+
+| Datei | Änderung |
+|---|---|
+| `lsteamclient/unix_private.h` | `stdlib.h`/`wchar.h` vor `winbase.h`, das `wcsncpy` & Co. mit `__WINESRC__` sperrt (macOS-SDK lädt `wchar.h` später als glibc) |
+| `lsteamclient/unixlib.cpp` | `(std::max)` gegen Wines `max()`-Makro |
+| `lsteamclient/unix_steam_input_manual.cpp` | VK→macOS-Tastencodes (`kVK_*`) für ISteamHTMLSurface |
+| `dxvk/src/dxvk/dxvk_presenter.cpp` | MoltenVK: `VK_PRESENT_SCALING_STRETCH` anfordern, sonst `VK_SUBOPTIMAL_KHR` bei jedem Present und Swapchain-Neuerzeugung in Dauerschleife (Flackern) |
+| `wine/dlls/win32u/{vulkan,opengl}.c` | Protons Fullscreen-Hack auf macOS standardmäßig aus (`WINE_DISABLE_FULLSCREEN_HACK=0` schaltet ihn ein): mit ihm erreicht das Bild das Fenster nicht, sichtbar war nur die Hintergrundfarbe |
 - [ ] Steam für macOS bietet keine Kompatibilitätstools an → Starten über eigenes Startprogramm oder Windows-Steam im Prefix als Notlösung
 - [ ] `vrclient_x64`, `wineopenxr`: auf macOS weglassen
 
