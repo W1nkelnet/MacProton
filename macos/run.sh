@@ -1,0 +1,70 @@
+#!/bin/bash
+# Run a Windows game from Steam with Proton for macOS. Steam must be
+# running and logged in; lsteamclient bridges the game to it.
+#
+# usage: run.sh APPID GAME_DIR GAME_EXE [ARGS...]
+#
+# Environment:
+#   WINEPREFIX  prefix to use (default: one per app id under
+#               ~/Library/Application Support/MacProton/prefixes)
+#   MACPROTON_DIST  dist directory with files/ (default: next to this script)
+
+set -eu
+
+if [ $# -lt 3 ]; then
+    sed -n '2,11p' "$0"
+    exit 1
+fi
+
+appid=$1 game_dir=$2 game_exe=$3
+shift 3
+
+dist=${MACPROTON_DIST:-$(cd "$(dirname "$0")" && pwd)}/files
+wine=$dist/bin/wine
+wineserver=$dist/bin/wineserver
+steam_macos="$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS"
+
+if [ ! -x "$wine" ]; then
+    echo "Proton build not found in $dist" >&2
+    exit 1
+fi
+if ! pgrep -q steam_osx; then
+    echo "Steam is not running, start and log in to Steam first." >&2
+    exit 1
+fi
+
+export WINEPREFIX="${WINEPREFIX:-$HOME/Library/Application Support/MacProton/prefixes/$appid}"
+export DYLD_FALLBACK_LIBRARY_PATH="$dist/lib"
+export WINEDLLOVERRIDES="steam.exe=b;mscoree,mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi=n,b;${WINEDLLOVERRIDES-}"
+export SteamAppId=$appid SteamGameId=$appid SteamOverlayGameId=$appid
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="$steam_macos"
+
+# Create or update the prefix. mscoree/mshtml stay disabled above so that
+# wineboot does not wait on the Mono/Gecko install dialog.
+if [ ! -f "$WINEPREFIX/system.reg" ]; then
+    mkdir -p "$WINEPREFIX"
+    echo "Creating prefix in $WINEPREFIX" >&2
+    "$wine" wineboot -i
+    "$wineserver" -w
+fi
+
+windows="$WINEPREFIX/drive_c/windows"
+cp -f "$dist/lib/wine/dxvk/x86_64-windows/"*.dll "$windows/system32/"
+cp -f "$dist/lib/wine/dxvk/i386-windows/"*.dll "$windows/syswow64/"
+
+# The game's steam_api loads steamclient(64).dll from SteamPath; Wine's
+# loader redirects their exports to lsteamclient. macOS Steam ships no
+# Windows versions, so use stub DLLs exporting the same names. Copies of
+# lsteamclient itself do not work: Wine then takes the copy for the
+# lsteamclient module and redirects to itself.
+steam_dir="$WINEPREFIX/drive_c/Program Files (x86)/Steam"
+mkdir -p "$steam_dir"
+cp -f "$dist/lib/wine/steamclient/x86_64-windows/steamclient64.dll" "$steam_dir/"
+cp -f "$dist/lib/wine/steamclient/i386-windows/steamclient.dll" "$steam_dir/"
+
+# steam.exe needs a full Windows path to the game, like Proton passes it
+game_dir=$(cd "$game_dir" && pwd)
+game_path="Z:${game_dir//\//\\}\\$game_exe"
+
+cd "$game_dir"
+exec "$wine" "$dist/lib/wine/x86_64-windows/steam.exe" "$game_path" "$@"

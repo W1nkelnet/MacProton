@@ -107,8 +107,8 @@ Optionen, zu bewerten:
 - [x] `lsteamclient`: Es gibt schon einen `__APPLE__`-Zweig in `lsteamclient/unixlib.cpp`, der `steamclient.dylib` lädt. Geprüft: Der macOS-Steam-Client liefert `steamclient.dylib` als Universal Binary (x86_64 + arm64), der Rosetta-Wineprozess kann sie also laden.
 - [x] `Steam_IsKnownInterface` und `Steam_NotifyMissingInterface` fehlen in der macOS-dylib → auf macOS optional geladen (Fallback: `false` bzw. nichts tun), damit `steamclient_init` nicht abbricht
 - [x] lsteamclient und steam_helper (`steam.exe`) für macOS bauen – `macos/makedep-module.py` ersetzt die GNU-sed-basierten Makedep-Regeln
-- [x] `steamclient64.dll`/`steamclient.dll` im Prefix sind Kopien von `lsteamclient.dll`: Mac-Steam liefert keine Windows-Versionen, Wines Loader leitet sie per Trampolin auf lsteamclient um
-- [x] **Cult of the Lamb** (Unity, D3D11) läuft mit Steamworks über den laufenden Mac-Steam-Client bis ins Hauptmenü, 60 FPS (Apple M3) – Start über `macos/dev-run.sh`
+- [x] `steamclient64.dll`/`steamclient.dll` im Prefix sind Stub-DLLs (`macos/steamclient-stub.py`), die nur die Namen aus `lsteamclient.spec` exportieren: Mac-Steam liefert keine Windows-Versionen, Wines Loader biegt die Exporte per Trampolin auf lsteamclient um. Kopien von `lsteamclient.dll` funktionieren nicht zuverlässig – Wine hält die Kopie dann selbst für lsteamclient und leitet auf sich selbst um (Endlosschleife in `CreateInterface`)
+- [x] **Cult of the Lamb** (Unity, D3D11) läuft mit Steamworks über den laufenden Mac-Steam-Client bis ins Hauptmenü, 60 FPS (Apple M3) – Start über `macos/run.sh`, auch mit frischem Prefix aus `macos/build.sh`
 
 Anpassungen dafür:
 
@@ -159,25 +159,28 @@ Auf dem Entwicklungs-Mac sind nur rund 37 GB frei. Ein vollständiger
 Proton-Build (alle Submodule, alle Architekturen) braucht deutlich mehr. Bis
 mehr Platz da ist, werden nur die Kernkomponenten geholt und gebaut.
 
-## Build (Stand Phase 1)
+## Build und Start
 
 ```bash
 # einmalig
-brew install bison flex mingw-w64 autoconf automake molten-vk vulkan-loader gnutls
-git submodule update --init --depth 1 wine dxvk vkd3d-proton vkd3d Vulkan-Headers SPIRV-Headers glslang
-cd wine && python3 dlls/winevulkan/make_vulkan -x vk.xml -X video.xml && tools/make_specfiles \
-  && tools/make_requests && autoreconf -fi && cd ..
+brew install bison flex mingw-w64 autoconf automake meson ninja glslang cmake pkgconf
 
-# Konfigurieren und bauen (außerhalb des Quellbaums)
-mkdir -p ../build/wine64 && cd ../build/wine64
-export PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PATH"
-# Architektur explizit setzen: ohne --build/--host erkennt configure auf
-# Apple Silicon "aarch64" (z. B. bei config.status --recheck)
-../../Proton/wine/configure --build=x86_64-apple-darwin --host=x86_64-apple-darwin \
-  CC="clang -arch x86_64" --enable-archs=i386,x86_64 \
-  --without-x --without-wayland --without-freetype --without-gnutls --without-vulkan \
-  --without-sdl --without-gstreamer --without-pulse --without-alsa --without-oss \
-  --without-udev --without-dbus --without-v4l2
-# nativ bauen – NICHT mit "arch -x86_64", sonst laufen Compiler unter Rosetta
-make -j"$(sysctl -n hw.ncpu)"
+# alles bauen (Wine, MoltenVK, FreeType, DXVK 64/32 Bit, lsteamclient, steam.exe)
+macos/build.sh ../build-macos
+
+# Spiel starten (Steam muss laufen und angemeldet sein)
+../build-macos/dist/run.sh 1313140 /pfad/zu/CultOfTheLamb "Cult Of The Lamb.exe"
 ```
+
+`build.sh` überspringt fertige Schritte (Stempel in `BUILD_DIR/stamps`),
+`DEPS_SRC` verweist auf vorhandene MoltenVK-/FreeType-Klone. Ergebnis ist
+`BUILD_DIR/dist` mit `files/` im Proton-Layout und dem Starter `run.sh`, der
+pro App-ID einen Prefix unter `~/Library/Application Support/MacProton/prefixes`
+anlegt, DXVK und die `steamclient`-Kopien einrichtet und das Spiel über
+`steam.exe` startet.
+
+Fallstricke, die die Skripte abfangen:
+- `configure` braucht `--build/--host=x86_64-apple-darwin`, sonst erkennt es auf Apple Silicon `aarch64`
+- `make` nativ ausführen, nicht mit `arch -x86_64` (sonst laufen die Compiler unter Rosetta)
+- Wines generierte Dateien vorab erzeugen: `make_vulkan`, `make_specfiles`, `make_requests`, `autoreconf`
+- `pkg-config` auf die x86_64-Abhängigkeiten beschränken (`PKG_CONFIG_LIBDIR`), sonst findet es arm64-Homebrew-Bibliotheken
