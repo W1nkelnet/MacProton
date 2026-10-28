@@ -8,6 +8,8 @@ struct MacProtonApp: App {
     @StateObject private var sync = LibrarySync()
     @StateObject private var login = SteamLogin()
     @StateObject private var steamcmdSetup = SteamCMDSetup()
+    @StateObject private var updates = UpdateChecker()
+    @StateObject private var appUpdates = AppUpdateChecker()
 
     var body: some Scene {
         WindowGroup("MacProton") {
@@ -18,6 +20,8 @@ struct MacProtonApp: App {
                 .environmentObject(sync)
                 .environmentObject(login)
                 .environmentObject(steamcmdSetup)
+                .environmentObject(updates)
+                .environmentObject(appUpdates)
                 .frame(minWidth: 720, minHeight: 480)
         }
         Settings {

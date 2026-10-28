@@ -19,6 +19,23 @@ enum SteamClient {
         return paths.isEmpty ? [steamDir.path] : paths
     }
 
+    /// Whether Steam never synced the game's cloud saves on this Mac: it
+    /// keeps a remotecache.vdf per account and app with the change number
+    /// it synced to. Nil if no account is known.
+    static func cloudNeverSynced(_ appID: Int) -> Bool? {
+        let file = steamDir.appendingPathComponent("config/loginusers.vdf")
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        let users = VDF.parse(text)["users"]?.entries ?? []
+        guard let user = users.first(where: { $0.1["MostRecent"]?.string == "1" }) ?? users.first,
+              let steamID = UInt64(user.0) else { return nil }
+        let accountID = steamID - 76561197960265728  // the account part of a SteamID64
+
+        let cache = steamDir.appendingPathComponent("userdata/\(accountID)/\(appID)/remotecache.vdf")
+        guard let cacheText = try? String(contentsOf: cache, encoding: .utf8) else { return true }
+        let change = VDF.parse(cacheText)[String(appID), "ChangeNumber"]?.string.flatMap(Int.init) ?? 0
+        return change <= 0
+    }
+
     /// Whether the client has the game fully installed, i.e. its macOS version
     static func isInstalled(_ appID: Int) -> Bool {
         libraryFolders.contains { folder in

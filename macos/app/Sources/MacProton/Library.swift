@@ -15,6 +15,9 @@ struct Game: Codable, Identifiable, Hashable {
     var hasNativeMac: Bool?
     var issues: [CompatibilityIssue]?
     var cloudSaves: [CloudSaveLocation]?
+    /// Saves live in Steam Cloud, which macOS Steam does not download
+    /// before a Windows game starts
+    var steamCloud: Bool?
 
     var id: Int { appID }
 
@@ -45,6 +48,7 @@ struct Game: Codable, Identifiable, Hashable {
         hasNativeMac = info.hasNativeMac
         issues = info.issues
         cloudSaves = info.cloudSaves
+        steamCloud = info.steamCloud
     }
 
     var headerImageURL: URL? {
@@ -66,6 +70,13 @@ struct Game: Codable, Identifiable, Hashable {
     var runsNatively: Bool { hasNativeMac == true }
 
     var isInstalledNatively: Bool { runsNatively && SteamClient.isInstalled(appID) }
+
+    /// Build steamcmd installed, from its app manifest
+    var installedBuildID: String? {
+        let manifest = (installDir as NSString).appendingPathComponent("steamapps/appmanifest_\(appID).acf")
+        guard let text = try? String(contentsOfFile: manifest, encoding: .utf8) else { return nil }
+        return VDF.parse(text)["AppState", "buildid"]?.string
+    }
 
     /// Launched through another store's client, e.g. "steam2ea://launchgame/…"
     var launchesViaURL: Bool { executable.contains("://") }

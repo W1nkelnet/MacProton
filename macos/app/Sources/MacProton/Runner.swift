@@ -8,6 +8,8 @@ final class Runner: ObservableObject {
     @Published var notice: String?
     /// Game the user started while the Steam client was offline
     @Published var offlineGame: Game?
+    /// Game whose Steam Cloud saves this Mac never synced
+    @Published var cloudWarningGame: Game?
     @Published private(set) var reconnecting = false
     /// What a starting game waits for, e.g. its install scripts
     @Published private(set) var preparing: [Int: String] = [:]
@@ -17,6 +19,18 @@ final class Runner: ObservableObject {
     private var processes: [Int: Process] = [:]
 
     func isRunning(_ game: Game) -> Bool { running.contains(game.appID) }
+
+    /// Games the user was told about their Steam Cloud saves
+    private static var cloudWarned: Set<Int> {
+        get { Set(UserDefaults.standard.array(forKey: "cloudWarnedApps") as? [Int] ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: "cloudWarnedApps") }
+    }
+
+    /// Starts the game after the Steam Cloud notice.
+    func playAfterCloudNotice(_ game: Game) {
+        Self.cloudWarned.insert(game.appID)
+        play(game)
+    }
 
     func play(_ game: Game, allowOffline: Bool = false) {
         guard !isRunning(game), !reconnecting else { return }
@@ -30,6 +44,12 @@ final class Runner: ObservableObject {
         }
         guard Paths.steamRunning else {
             lastError = "Steam läuft nicht. Starte Steam und melde dich an."
+            return
+        }
+        // macOS Steam does not download cloud saves before a Windows game starts
+        if game.steamCloud == true, !Self.cloudWarned.contains(game.appID),
+           SteamClient.cloudNeverSynced(game.appID) == true {
+            cloudWarningGame = game
             return
         }
         guard allowOffline || SteamClient.isOnline != false else {

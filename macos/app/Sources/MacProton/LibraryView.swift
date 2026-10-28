@@ -8,6 +8,8 @@ struct LibraryView: View {
     @EnvironmentObject private var sync: LibrarySync
     @EnvironmentObject private var login: SteamLogin
     @EnvironmentObject private var steamcmdSetup: SteamCMDSetup
+    @EnvironmentObject private var updates: UpdateChecker
+    @EnvironmentObject private var appUpdates: AppUpdateChecker
     @State private var showAdd = false
     @State private var search = ""
     @State private var steamRunning = Paths.steamRunning
@@ -97,6 +99,15 @@ struct LibraryView: View {
         .onChange(of: installer.loginRequired) { _, account in
             if let account { login.present(account: account); installer.loginRequired = nil }
         }
+        .alert("Spielstände in der Steam Cloud", isPresented: cloudWarningBinding) {
+            Button("Spielen") {
+                if let game = runner.cloudWarningGame { runner.playAfterCloudNotice(game) }
+                runner.cloudWarningGame = nil
+            }
+            Button("Abbrechen", role: .cancel) { runner.cloudWarningGame = nil }
+        } message: {
+            Text("\(runner.cloudWarningGame?.name ?? "Dieses Spiel") speichert in der Steam Cloud, und Steam hat die Spielstände auf diesem Mac noch nicht geladen. Für Windows-Spiele lädt Steam sie erst beim Beenden.\n\nHast du auf einem anderen Gerät gespielt: Starte das Spiel nur bis ins Hauptmenü und beende es wieder. Fragt Steam dann nach einem Konflikt, wähle die Cloud-Version. Ab dem nächsten Start sind deine Spielstände da.")
+        }
         .alert("Steam ist offline", isPresented: offlineBinding) {
             Button("Offline spielen") {
                 if let game = runner.offlineGame { runner.play(game, allowOffline: true) }
@@ -111,13 +122,34 @@ struct LibraryView: View {
                 runner.reconnectSteam(automatic: true)
             }
         }
+        .onChange(of: jobIDs) { old, new in
+            for appID in old.subtracting(new) { updates.markUpdated(appID) }
+            installNextUpdate()
+        }
+        .onChange(of: updates.available) { _, _ in installNextUpdate() }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             steamRunning = Paths.steamRunning
             steamOnline = SteamClient.isOnline
+            updates.checkIfDue(library: library, steamcmdBusy: steamcmdBusy || !steamcmdSetup.isComplete)
+            appUpdates.checkIfDue()
         }
     }
 
+    private var jobIDs: Set<Int> { Set(installer.jobs.keys) }
+
+    /// With automatic updates on, downloads one available update at a time
+    /// while no game runs and steamcmd is free.
+    private func installNextUpdate() {
+        guard UpdateChecker.autoUpdate, runner.running.isEmpty, !steamcmdBusy, !updates.checking,
+              let game = library.games.first(where: { updates.available.contains($0.appID) }) else { return }
+        installer.install(game, library: library)
+    }
+
     @ViewBuilder private var banners: some View {
+        if let release = appUpdates.newRelease {
+            Banner(text: "MacProton \(release.version) ist verfügbar.", color: .blue,
+                   action: ("Herunterladen", { NSWorkspace.shared.open(release.url) }))
+        }
         if !Paths.runtimeAvailable {
             Banner(text: "Proton-Laufzeit nicht gefunden (\(Paths.runtime.path)). Lege den Ordner in den Einstellungen fest.",
                    color: .orange)
@@ -151,6 +183,10 @@ struct LibraryView: View {
 
     /// steamcmd's login replaced the Steam client's session
     private var steamcmdBusy: Bool { !installer.jobs.isEmpty || sync.running || login.isPresented }
+
+    private var cloudWarningBinding: Binding<Bool> {
+        Binding(get: { runner.cloudWarningGame != nil }, set: { if !$0 { runner.cloudWarningGame = nil } })
+    }
 
     private var offlineBinding: Binding<Bool> {
         Binding(get: { runner.offlineGame != nil }, set: { if !$0 { runner.offlineGame = nil } })
@@ -194,6 +230,7 @@ struct GameCard: View {
     @EnvironmentObject private var library: Library
     @EnvironmentObject private var runner: Runner
     @EnvironmentObject private var installer: Installer
+    @EnvironmentObject private var updates: UpdateChecker
     @State private var confirmUninstall = false
     @State private var uninstallError: String?
 
@@ -282,6 +319,9 @@ struct GameCard: View {
             } else {
                 Text("Mac-Version · in Steam installiert").font(.caption).foregroundStyle(.secondary)
             }
+        } else if game.isInstalled && updates.available.contains(game.appID) {
+            Label("Update verfügbar", systemImage: "arrow.down.circle.fill")
+                .font(.caption).foregroundStyle(.orange)
         } else if !game.isInstalled {
             Text("Nicht installiert" + sizeText).font(.caption).foregroundStyle(.secondary)
         } else if let played = game.lastPlayed {
@@ -309,13 +349,23 @@ struct GameCard: View {
             .disabled(runner.reconnecting)
             .help("Startet die native Mac-Version über Steam.")
         } else if game.isInstalled {
-            Button {
-                runner.play(game)
-                library.markPlayed(game)
-            } label: {
-                Label("Spielen", systemImage: "play.fill").frame(maxWidth: .infinity)
+            HStack {
+                Button {
+                    runner.play(game)
+                    library.markPlayed(game)
+                } label: {
+                    Label("Spielen", systemImage: "play.fill").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                if updates.available.contains(game.appID) {
+                    Button {
+                        installer.install(game, library: library)
+                    } label: {
+                        Label("Update laden", systemImage: "arrow.down.circle")
+                    }
+                    .help("Lädt die neue Version des Spiels")
+                }
             }
-            .buttonStyle(.borderedProminent)
             .disabled(installer.isBusy(game))
         } else {
             Button {

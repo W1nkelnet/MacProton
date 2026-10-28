@@ -10,6 +10,10 @@ struct AppInfo {
     var hasNativeMac = false
     var issues: [CompatibilityIssue] = []
     var cloudSaves: [CloudSaveLocation] = []
+    /// The game keeps saves in Steam Cloud
+    var steamCloud = false
+    /// Build of the public branch
+    var buildID: String?
 }
 
 enum SteamCMDError: LocalizedError {
@@ -73,7 +77,9 @@ enum SteamCMD {
                        sizeBytes: size,
                        hasNativeMac: app["common", "oslist"]?.string?.contains("macos") ?? false,
                        issues: issues,
-                       cloudSaves: AppAnalysis.cloudSaves(app))
+                       cloudSaves: AppAnalysis.cloudSaves(app),
+                       steamCloud: (Int64(app["ufs", "quota"]?.string ?? "") ?? 0) > 0,
+                       buildID: app["depots", "branches", "public", "buildid"]?.string)
     }
 
     /// Downloads or updates the Windows version of an app.

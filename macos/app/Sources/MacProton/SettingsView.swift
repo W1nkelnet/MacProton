@@ -7,6 +7,7 @@ struct SettingsView: View {
     @AppStorage("runtimePath") private var runtimePath = ""
     @AppStorage("syncSaves") private var syncSaves = true
     @AppStorage("metalHUD") private var metalHUD = false
+    @AppStorage("autoUpdate") private var autoUpdate = false
 
     var body: some View {
         Form {
@@ -23,6 +24,11 @@ struct SettingsView: View {
             Section("Spielstände") {
                 Toggle("Spielstände über Steam Cloud synchronisieren", isOn: $syncSaves)
                 Text("Für Spiele, deren Windows- und Mac-Version dieselben Spielstände nutzen: Der Speicherordner im Prefix wird mit dem Mac-Ordner verknüpft, den Steam synchronisiert. Vorher werden beide gesichert.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Updates") {
+                Toggle("Spiel-Updates automatisch laden", isOn: $autoUpdate)
+                Text("MacProton sucht beim Start und alle vier Stunden nach Updates der installierten Windows-Spiele. Ist das aus, zeigt die Spielkarte „Update verfügbar“. Ist es an, lädt MacProton Updates selbst, wenn kein Spiel läuft. Steam verbindet sich danach kurz neu.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Anzeige") {
