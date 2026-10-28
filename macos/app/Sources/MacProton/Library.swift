@@ -32,11 +32,15 @@ struct Game: Codable, Identifiable, Hashable {
     }
 
     init(info: AppInfo, installDir: String? = nil) {
-        let folder = info.name.components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: " ")
         self.init(appID: info.appID, name: info.name,
-                  installDir: installDir ?? Paths.gamesDir.appendingPathComponent(folder).path,
+                  installDir: installDir ?? Paths.gamesDir.appendingPathComponent(Self.folderName(info.name)).path,
                   executable: info.executable)
         apply(info)
+    }
+
+    /// Folder a new installation gets, named after the game
+    static func folderName(_ name: String) -> String {
+        name.components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: " ")
     }
 
     /// Takes over what Steam's app info says, keeping folder and history.
@@ -80,6 +84,17 @@ struct Game: Codable, Identifiable, Hashable {
 
     /// Launched through another store's client, e.g. "steam2ea://launchgame/…"
     var launchesViaURL: Bool { executable.contains("://") }
+
+    /// Name of the disk holding the game, if that is not the startup disk
+    var externalVolume: String? {
+        let parts = URL(fileURLWithPath: installDir).resolvingSymlinksInPath().pathComponents
+        return parts.count > 2 && parts[1] == "Volumes" ? parts[2] : nil
+    }
+
+    /// False while the disk holding the game is not connected
+    var locationAvailable: Bool {
+        externalVolume.map { FileManager.default.fileExists(atPath: "/Volumes/" + $0) } ?? true
+    }
 }
 
 /// Paths and settings shared by the app.
@@ -190,12 +205,15 @@ final class Library: ObservableObject {
 
     /// Moves the game's folder, and its prefix if asked, to the Trash and
     /// removes it from the library. Only folders MacProton created are
-    /// touched; returns an error message if a folder could not be moved.
+    /// touched: those in its games folder, and elsewhere those steamcmd
+    /// installed the game into. Returns an error message if a folder could
+    /// not be moved.
     func uninstall(_ game: Game, prefix: URL?) -> String? {
         var failed: [String] = []
         let folder = URL(fileURLWithPath: game.installDir).standardizedFileURL
-        if folder.path.hasPrefix(Paths.gamesDir.standardizedFileURL.path + "/"),
-           FileManager.default.fileExists(atPath: folder.path) {
+        let ours = folder.path.hasPrefix(Paths.gamesDir.standardizedFileURL.path + "/")
+            || GameLocation.hasManifest(of: game.appID, in: folder)
+        if ours, FileManager.default.fileExists(atPath: folder.path) {
             do { try FileManager.default.trashItem(at: folder, resultingItemURL: nil) }
             catch { failed.append(folder.path) }
         }

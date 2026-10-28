@@ -249,6 +249,11 @@ struct GameCard: View {
                 HStack {
                     Text(game.name).font(.headline).lineLimit(1)
                     Spacer()
+                    if !game.runsNatively, let volume = game.externalVolume {
+                        Image(systemName: "externaldrive")
+                            .foregroundStyle(.secondary)
+                            .help("Liegt auf „\(volume)“")
+                    }
                     if game.hasNativeMac == true {
                         Image(systemName: "apple.logo")
                             .foregroundStyle(.secondary)
@@ -300,10 +305,30 @@ struct GameCard: View {
         uninstallError = library.uninstall(game, prefix: prefix ? runner.prefix(of: game) : nil)
     }
 
+    private func chooseInstallFolder() {
+        guard let folder = GameLocation.choose(
+            prompt: "Hier installieren",
+            message: "„\(game.name)“ bekommt in diesem Ordner einen eigenen Ordner, zum Beispiel auf einer externen Festplatte.")
+        else { return }
+        installer.install(game, in: folder, library: library)
+    }
+
+    private func chooseMoveTarget() {
+        guard let folder = GameLocation.choose(
+            prompt: "Hierher verschieben",
+            message: "Der Ordner von „\(game.name)“ kommt in den gewählten Ordner. Auf ein anderes Laufwerk wird er kopiert und danach am alten Ort gelöscht.")
+        else { return }
+        installer.move(game, to: folder, library: library)
+    }
+
     @ViewBuilder private var status: some View {
         if let job = installer.jobs[game.appID] {
             ProgressView(value: job.progress) {
                 Text("\(job.status) – \(Int(job.progress * 100)) %").font(.caption)
+            }
+        } else if let moved = installer.moves[game.appID] {
+            ProgressView(value: moved) {
+                Text("Verschiebe – \(Int(moved * 100)) %").font(.caption)
             }
         } else if let step = runner.preparing[game.appID] {
             HStack(spacing: 6) {
@@ -321,6 +346,9 @@ struct GameCard: View {
             } else {
                 Text("Mac-Version · in Steam installiert").font(.caption).foregroundStyle(.secondary)
             }
+        } else if !game.locationAvailable {
+            Label("Laufwerk „\(game.externalVolume ?? "")“ nicht verbunden", systemImage: "externaldrive.badge.exclamationmark")
+                .font(.caption).foregroundStyle(.orange)
         } else if game.isInstalled && updates.available.contains(game.appID) {
             Label("Update verfügbar", systemImage: "arrow.down.circle.fill")
                 .font(.caption).foregroundStyle(.orange)
@@ -393,9 +421,21 @@ struct GameCard: View {
                 installer.install(game, library: library)
             }
             .disabled(installer.isBusy(game) || runner.isRunning(game))
+            Button(game.isInstalled ? "Windows-Version verschieben …" : "Windows-Version installieren in …") {
+                game.isInstalled ? chooseMoveTarget() : chooseInstallFolder()
+            }
+            .disabled(installer.isBusy(game) || runner.isRunning(game))
         } else {
+            if !game.isInstalled {
+                Button("Installieren in …") { chooseInstallFolder() }
+                    .disabled(installer.isBusy(game))
+            }
             Button("Aktualisieren / Dateien prüfen") { installer.install(game, library: library) }
                 .disabled(installer.isBusy(game) || runner.isRunning(game))
+            if game.isInstalled {
+                Button("Verschieben …") { chooseMoveTarget() }
+                    .disabled(installer.isBusy(game) || runner.isRunning(game))
+            }
         }
         Divider()
         Button("Spielordner im Finder zeigen") { reveal(game.installDir) }

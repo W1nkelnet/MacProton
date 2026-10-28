@@ -7,6 +7,8 @@ final class Installer: ObservableObject {
     struct Job { var progress: Double; var status: String }
 
     @Published private(set) var jobs: [Int: Job] = [:]
+    /// Games being moved to another folder, with progress
+    @Published private(set) var moves: [Int: Double] = [:]
     @Published var loginRequired: String?
     @Published var lastError: String?
 
@@ -15,7 +17,7 @@ final class Installer: ObservableObject {
         return saved.isEmpty ? (detectSteamAccount() ?? "") : saved
     }
 
-    func isBusy(_ game: Game) -> Bool { jobs[game.appID] != nil }
+    func isBusy(_ game: Game) -> Bool { jobs[game.appID] != nil || moves[game.appID] != nil }
 
     /// Installs Rosetta 2 in Terminal, where macOS may ask for an admin password.
     func installRosetta() {
@@ -33,7 +35,11 @@ final class Installer: ObservableObject {
     }
 
     func install(_ game: Game, library: Library) {
-        guard jobs[game.appID] == nil else { return }
+        guard !isBusy(game) else { return }
+        guard game.locationAvailable else {
+            lastError = "Das Laufwerk „\(game.externalVolume ?? "")“ mit \(game.name) ist nicht verbunden. Schließ es an oder wähle per Rechtsklick „Installieren in …“ einen anderen Ort."
+            return
+        }
         let account = self.account
         guard !account.isEmpty else {
             loginRequired = ""  // opens the login window
@@ -66,6 +72,52 @@ final class Installer: ObservableObject {
                 lastError = error.localizedDescription
             }
             jobs[appID] = nil
+        }
+    }
+
+    /// Installs the game into its own folder in `folder` from now on.
+    func install(_ game: Game, in folder: URL, library: Library) {
+        let dir = GameLocation.installDir(for: game, in: folder)
+        if let problem = GameLocation.installProblem(game, dir: dir) {
+            lastError = problem
+            return
+        }
+        var updated = library.games.first { $0.appID == game.appID } ?? game
+        updated.installDir = dir.path
+        library.upsert(updated)
+        install(updated, library: library)
+    }
+
+    /// Moves the installed game's folder into `folder`.
+    func move(_ game: Game, to folder: URL, library: Library) {
+        guard !isBusy(game) else { return }
+        let source = URL(fileURLWithPath: game.installDir, isDirectory: true)
+        let target = folder.appendingPathComponent(source.lastPathComponent, isDirectory: true)
+        // Already there
+        guard folder.resolvingSymlinksInPath() != source.deletingLastPathComponent().resolvingSymlinksInPath() else { return }
+        let appID = game.appID
+        moves[appID] = 0
+
+        Task {
+            let progress = GameLocation.Progress()
+            let work = Task.detached {
+                defer { progress.finish() }
+                return try GameLocation.move(source, to: target, progress: progress)
+            }
+            while !progress.isFinished {
+                moves[appID] = progress.value
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            do {
+                if let note = try await work.value { lastError = note }
+                if var moved = library.games.first(where: { $0.appID == appID }) {
+                    moved.installDir = target.path
+                    library.upsert(moved)
+                }
+            } catch {
+                lastError = "\(game.name) wurde nicht verschoben: \(error.localizedDescription)"
+            }
+            moves[appID] = nil
         }
     }
 }
