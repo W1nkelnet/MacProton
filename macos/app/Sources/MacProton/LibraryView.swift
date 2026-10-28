@@ -70,6 +70,11 @@ struct LibraryView: View {
         } message: {
             Text(runner.lastError ?? installer.lastError ?? sync.lastError ?? "")
         }
+        .alert("Hinweis", isPresented: noticeBinding) {
+            Button("OK") { runner.notice = nil }
+        } message: {
+            Text(runner.notice ?? "")
+        }
         .alert("Bibliothek synchronisiert", isPresented: resultBinding) {
             Button("OK") { sync.lastResult = nil }
         } message: {
@@ -108,6 +113,10 @@ struct LibraryView: View {
     private var errorBinding: Binding<Bool> {
         Binding(get: { runner.lastError != nil || installer.lastError != nil || sync.lastError != nil },
                 set: { if !$0 { runner.lastError = nil; installer.lastError = nil; sync.lastError = nil } })
+    }
+
+    private var noticeBinding: Binding<Bool> {
+        Binding(get: { runner.notice != nil }, set: { if !$0 { runner.notice = nil } })
     }
 
     private var resultBinding: Binding<Bool> {
@@ -157,6 +166,11 @@ struct GameCard: View {
                             .foregroundStyle(.secondary)
                             .help("Es gibt eine native Mac-Version, die direkt in Steam läuft.")
                     }
+                }
+                if !(game.cloudSaves ?? []).isEmpty {
+                    Label("Steam Cloud", systemImage: "icloud")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .help("Spielstände werden plattformübergreifend über Steam Cloud synchronisiert (Mac-Speicherort).")
                 }
                 if let issues = game.issues, !issues.isEmpty {
                     HStack(spacing: 6) {
@@ -225,6 +239,13 @@ struct GameCard: View {
         Divider()
         Button("Spielordner im Finder zeigen") { reveal(game.installDir) }
         Button("Prefix im Finder zeigen") { reveal(runner.prefix(of: game).path) }
+        if !(game.cloudSaves ?? []).isEmpty {
+            Button("Spielstand-Backups zeigen") {
+                let dir = SaveSync.backupsDir.appendingPathComponent(String(game.appID))
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                reveal(dir.path)
+            }
+        }
         Button("Protokoll öffnen") {
             NSWorkspace.shared.open(Paths.logsDir.appendingPathComponent("\(game.appID).log"))
         }

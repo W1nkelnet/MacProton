@@ -4,12 +4,18 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage("steamAccount") private var steamAccount = ""
     @AppStorage("runtimePath") private var runtimePath = ""
+    @AppStorage("syncSaves") private var syncSaves = true
 
     var body: some View {
         Form {
             Section("Steam") {
                 TextField("Konto", text: $steamAccount, prompt: Text(detectSteamAccount() ?? "Steam-Kontoname"))
                 Text("Leer lassen, um das zuletzt in Steam angemeldete Konto zu verwenden.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Spielstände") {
+                Toggle("Spielstände über Steam Cloud synchronisieren", isOn: $syncSaves)
+                Text("Für Spiele, deren Windows- und Mac-Version dieselben Spielstände nutzen: Der Speicherordner im Prefix wird mit dem Mac-Ordner verknüpft, den Steam synchronisiert. Vorher werden beide gesichert.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Proton-Laufzeit") {

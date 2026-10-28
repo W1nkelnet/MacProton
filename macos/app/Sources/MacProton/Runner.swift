@@ -5,6 +5,9 @@ import Foundation
 final class Runner: ObservableObject {
     @Published private(set) var running: Set<Int> = []
     @Published var lastError: String?
+    @Published var notice: String?
+
+    static var syncSaves: Bool { UserDefaults.standard.object(forKey: "syncSaves") as? Bool ?? true }
 
     private var processes: [Int: Process] = [:]
 
@@ -21,6 +24,45 @@ final class Runner: ObservableObject {
             return
         }
 
+        running.insert(game.appID)
+        Task {
+            if Self.syncSaves, !(game.cloudSaves ?? []).isEmpty { await linkSaves(game) }
+            launch(game)
+        }
+    }
+
+    /// Links the prefix's save folders to the ones macOS Steam syncs, creating
+    /// the prefix first if needed. Failures only skip the sync.
+    private func linkSaves(_ game: Game) async {
+        let prefix = prefix(of: game)
+        if !FileManager.default.fileExists(atPath: prefix.appendingPathComponent("system.reg").path) {
+            await prepare(game)
+        }
+        do {
+            let report = try SaveSync.link(game, prefix: prefix)
+            if !report.skipped.isEmpty {
+                notice = "Spielstand-Sync für \(game.name) teilweise nicht eingerichtet:\n" + report.skipped.joined(separator: "\n")
+            } else if let backup = report.backup {
+                notice = "Spielstände von \(game.name) werden jetzt mit Steam Cloud synchronisiert. Eine Sicherung der bisherigen Spielstände liegt in \(backup.path)."
+            }
+        } catch {
+            notice = "Spielstand-Sync für \(game.name) fehlgeschlagen, das Spiel startet ohne Sync: \(error.localizedDescription)"
+        }
+    }
+
+    private func prepare(_ game: Game) async {
+        let process = Process()
+        process.executableURL = Paths.runtime.appendingPathComponent("run.sh")
+        process.arguments = ["--prepare", String(game.appID)]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        await withCheckedContinuation { continuation in
+            process.terminationHandler = { _ in continuation.resume() }
+            do { try process.run() } catch { continuation.resume() }
+        }
+    }
+
+    private func launch(_ game: Game) {
         let exe = game.executable as NSString
         let dir = (game.installDir as NSString).appendingPathComponent(exe.deletingLastPathComponent)
 
@@ -55,8 +97,8 @@ final class Runner: ObservableObject {
         do {
             try process.run()
             processes[appID] = process
-            running.insert(appID)
         } catch {
+            running.remove(appID)
             lastError = "Start fehlgeschlagen: \(error.localizedDescription)"
         }
     }

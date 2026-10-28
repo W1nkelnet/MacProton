@@ -3,6 +3,7 @@
 # running and logged in; lsteamclient bridges the game to it.
 #
 # usage: run.sh APPID GAME_DIR GAME_EXE [ARGS...]
+#        run.sh --prepare APPID   (only create/update the prefix)
 #
 # Environment:
 #   WINEPREFIX  prefix to use (default: one per app id under
@@ -11,13 +12,17 @@
 
 set -eu
 
-if [ $# -lt 3 ]; then
-    sed -n '2,11p' "$0"
+prepare_only=
+if [ "${1-}" = "--prepare" ] && [ $# -eq 2 ]; then
+    prepare_only=1 appid=$2
+    shift 2
+elif [ $# -ge 3 ]; then
+    appid=$1 game_dir=$2 game_exe=$3
+    shift 3
+else
+    sed -n '2,12p' "$0"
     exit 1
 fi
-
-appid=$1 game_dir=$2 game_exe=$3
-shift 3
 
 dist=${MACPROTON_DIST:-$(cd "$(dirname "$0")" && pwd)}/files
 wine=$dist/bin/wine
@@ -28,7 +33,7 @@ if [ ! -x "$wine" ]; then
     echo "Proton build not found in $dist" >&2
     exit 1
 fi
-if ! pgrep -q steam_osx; then
+if [ -z "$prepare_only" ] && ! pgrep -q steam_osx; then
     echo "Steam is not running, start and log in to Steam first." >&2
     exit 1
 fi
@@ -61,6 +66,11 @@ steam_dir="$WINEPREFIX/drive_c/Program Files (x86)/Steam"
 mkdir -p "$steam_dir"
 cp -f "$dist/lib/wine/steamclient/x86_64-windows/steamclient64.dll" "$steam_dir/"
 cp -f "$dist/lib/wine/steamclient/i386-windows/steamclient.dll" "$steam_dir/"
+
+if [ -n "$prepare_only" ]; then
+    "$wineserver" -w
+    exit 0
+fi
 
 # steam.exe needs a full Windows path to the game, like Proton passes it
 game_dir=$(cd "$game_dir" && pwd)
