@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct AppInfo {
@@ -82,9 +83,68 @@ enum SteamCMD {
                        buildID: app["depots", "branches", "public", "buildid"]?.string)
     }
 
-    /// Downloads or updates the Windows version of an app.
-    static func install(appID: Int, into dir: String, account: String,
-                        progress: @escaping @Sendable (Double, String) -> Void) async throws {
+    /// What steamcmd reports while it updates an app
+    struct UpdateState: Sendable {
+        var phase: String
+        var progress: Double
+        var bytesDone: Int64 = 0
+        var bytesTotal: Int64 = 0
+        var verifying = false
+        var downloading = false
+    }
+
+    /// "Update state (0x61) downloading, progress: 38.63 (1428051780 / 3696370087)"
+    static func parseUpdateState(_ line: String) -> UpdateState? {
+        guard line.contains("Update state"), let value = parseProgress(line),
+              let close = line.firstIndex(of: ")"), let comma = line[close...].firstIndex(of: ",") else { return nil }
+        let name = line[line.index(after: close)..<comma].trimmingCharacters(in: .whitespaces)
+        var state = UpdateState(phase: "Arbeite", progress: value)
+        if name.contains("verifying") { state.phase = "Prüfe vorhandene Dateien"; state.verifying = true }
+        else if name.contains("downloading") { state.phase = "Lade herunter"; state.downloading = true }
+        else if name.contains("preallocating") { state.phase = "Reserviere Speicherplatz" }
+        else if name.contains("committing") { state.phase = "Übernehme Dateien" }
+        else if name.contains("reconfiguring") { state.phase = "Bereite vor" }
+        if let open = line.lastIndex(of: "("), let end = line.lastIndex(of: ")"), open < end {
+            let numbers = line[line.index(after: open)..<end].split(separator: "/").compactMap {
+                Int64($0.trimmingCharacters(in: .whitespaces))
+            }
+            if numbers.count == 2 { state.bytesDone = numbers[0]; state.bytesTotal = numbers[1] }
+        }
+        return state
+    }
+
+    /// A running steamcmd, so that a download can be stopped
+    final class Handle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pid: pid_t = 0
+        private var stopped = false
+
+        var wasStopped: Bool { lock.withLock { stopped } }
+
+        func started(_ pid: pid_t) {
+            let stop = lock.withLock { self.pid = pid; return stopped }
+            if stop { Self.terminate(pid) }
+        }
+
+        func stop() {
+            let pid = lock.withLock { stopped = true; return self.pid }
+            if pid > 0 { Self.terminate(pid) }
+        }
+
+        /// script(1) starts steamcmd in a session of its own, which a signal
+        /// to script's process group would not reach; stop the whole tree.
+        private static func terminate(_ pid: pid_t) {
+            var children = [pid_t](repeating: 0, count: 64)
+            let count = proc_listchildpids(pid, &children, Int32(children.count * MemoryLayout<pid_t>.size))
+            for child in children.prefix(Int(max(count, 0))) where child > 0 { terminate(child) }
+            kill(pid, SIGTERM)
+        }
+    }
+
+    /// Downloads or updates the Windows version of an app. steamcmd checks
+    /// the files already there first and only loads what is missing.
+    static func install(appID: Int, into dir: String, account: String, handle: Handle? = nil,
+                        progress: @escaping @Sendable (UpdateState) -> Void) async throws {
         guard let steamcmd = Paths.steamcmd else { throw SteamCMDError.notInstalled }
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
@@ -92,8 +152,9 @@ enum SteamCMD {
         let args = ["-q", "/dev/null", steamcmd,
                     "+@sSteamCmdForcePlatformType", "windows", "+force_install_dir", dir,
                     "+login", account, "+app_update", String(appID), "validate", "+quit"]
-        let output = try await run("/usr/bin/script", args) { line in
-            if let value = parseProgress(line) { progress(value, line) }
+        let output = try await run("/usr/bin/script", args, handle: handle) { line in
+            if let state = parseUpdateState(line) { progress(state) }
+            else if line.hasPrefix("Logging in user") { progress(UpdateState(phase: "Melde bei Steam an …", progress: 0)) }
             try checkLogin(line, account: account)
         }
         if output.contains("Success! App '\(appID)'") { return }
@@ -127,7 +188,7 @@ enum SteamCMD {
 
     /// Runs a process, calling onLine for each output line. Throwing from
     /// onLine terminates the process and rethrows.
-    static func run(_ executable: String, _ arguments: [String],
+    static func run(_ executable: String, _ arguments: [String], handle: Handle? = nil,
                     onLine: @escaping @Sendable (String) throws -> Void) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -143,7 +204,7 @@ enum SteamCMD {
         let state = OutputState()
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            guard !data.isEmpty, let text = state.decode(data) else { return }
             for line in state.append(text) {
                 do { try onLine(line) } catch {
                     state.fail(error)
@@ -156,11 +217,14 @@ enum SteamCMD {
             process.terminationHandler = { _ in
                 pipe.fileHandleForReading.readabilityHandler = nil
                 let rest = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let text = String(data: rest, encoding: .utf8) { _ = state.append(text + "\n") }
+                _ = state.append((state.decode(rest, final: true) ?? "") + "\n")
                 if let error = state.error { continuation.resume(throwing: error) }
                 else { continuation.resume(returning: state.output) }
             }
-            do { try process.run() } catch { continuation.resume(throwing: error) }
+            do {
+                try process.run()
+                handle?.started(process.processIdentifier)
+            } catch { continuation.resume(throwing: error) }
         }
     }
 }
@@ -171,6 +235,25 @@ private final class OutputState: @unchecked Sendable {
     private var buffer = ""
     private(set) var output = ""
     private(set) var error: Error?
+    private var pending = Data()
+
+    /// Text of the bytes so far; a character split across reads waits for
+    /// its remaining bytes.
+    func decode(_ data: Data, final: Bool = false) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        pending.append(data)
+        for cut in stride(from: pending.count, through: max(pending.count - 3, 1), by: -1) {
+            if let text = String(data: pending.prefix(cut), encoding: .utf8) {
+                pending.removeFirst(cut)
+                return text
+            }
+        }
+        // Not UTF-8 at all, or the end
+        guard final || pending.count > 3 else { return nil }
+        let text = String(decoding: pending, as: UTF8.self)
+        pending.removeAll()
+        return text
+    }
 
     func append(_ text: String) -> [String] {
         lock.lock(); defer { lock.unlock() }

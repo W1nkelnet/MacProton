@@ -17,7 +17,7 @@ struct LibraryView: View {
     @AppStorage("libraryFilter") private var filter = Filter.all
 
     enum Filter: String, CaseIterable {
-        case all = "Alle", installed = "Installiert"
+        case all = "Alle", installed = "Installiert", downloads = "Downloads"
     }
 
     private var shownGames: [Game] {
@@ -35,7 +35,9 @@ struct LibraryView: View {
                 ProgressView(value: sync.progress) { Text(sync.status).font(.caption) }
                     .padding(.horizontal, 16).padding(.vertical, 8)
             }
-            if library.games.isEmpty {
+            if filter == .downloads {
+                DownloadsView()
+            } else if library.games.isEmpty {
                 ContentUnavailableView {
                     Label("Noch keine Spiele", systemImage: "gamecontroller")
                 } description: {
@@ -61,7 +63,10 @@ struct LibraryView: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Picker("Filter", selection: $filter) {
-                    ForEach(Filter.allCases, id: \.self) { Text($0.rawValue) }
+                    ForEach(Filter.allCases, id: \.self) { item in
+                        let count = installer.downloads.count
+                        Text(item == .downloads && count > 0 ? "Downloads (\(count))" : item.rawValue)
+                    }
                 }
                 .pickerStyle(.segmented)
             }
@@ -122,10 +127,11 @@ struct LibraryView: View {
                 runner.reconnectSteam(automatic: true)
             }
         }
-        .onChange(of: jobIDs) { old, new in
-            for appID in old.subtracting(new) { updates.markUpdated(appID) }
+        .onChange(of: installer.completed) { old, new in
+            for appID in new.dropFirst(old.count) { updates.markUpdated(appID) }
             installNextUpdate()
         }
+        .onAppear { installer.attach(library) }
         .onChange(of: updates.available) { _, _ in installNextUpdate() }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             steamRunning = Paths.steamRunning
@@ -135,12 +141,10 @@ struct LibraryView: View {
         }
     }
 
-    private var jobIDs: Set<Int> { Set(installer.jobs.keys) }
-
     /// With automatic updates on, downloads one available update at a time
     /// while no game runs and steamcmd is free.
     private func installNextUpdate() {
-        guard UpdateChecker.autoUpdate, runner.running.isEmpty, !steamcmdBusy, !updates.checking,
+        guard UpdateChecker.autoUpdate, runner.running.isEmpty, !steamcmdBusy, !installer.hasPendingDownloads, !updates.checking,
               let game = library.games.first(where: { updates.available.contains($0.appID) && $0.locationAvailable }) else { return }
         installer.install(game, library: library)
     }
@@ -182,7 +186,7 @@ struct LibraryView: View {
     }
 
     /// steamcmd's login replaced the Steam client's session
-    private var steamcmdBusy: Bool { !installer.jobs.isEmpty || sync.running || login.isPresented }
+    private var steamcmdBusy: Bool { installer.isDownloading || sync.running || login.isPresented }
 
     private var cloudWarningBinding: Binding<Bool> {
         Binding(get: { runner.cloudWarningGame != nil }, set: { if !$0 { runner.cloudWarningGame = nil } })
@@ -322,9 +326,23 @@ struct GameCard: View {
     }
 
     @ViewBuilder private var status: some View {
-        if let job = installer.jobs[game.appID] {
-            ProgressView(value: job.progress) {
-                Text("\(job.status) – \(Int(job.progress * 100)) %").font(.caption)
+        if let download = installer.download(for: game.appID) {
+            switch download.state {
+            case .running:
+                ProgressView(value: download.progress) {
+                    Text("\(download.phase) – \(Int(download.progress * 100)) %").font(.caption)
+                }
+            case .queued:
+                Label("Wartet auf Download", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+            case .paused:
+                ProgressView(value: download.progress) {
+                    Text("Download pausiert – \(Int(download.progress * 100)) %" + (download.error.map { " · \($0)" } ?? ""))
+                        .font(.caption).foregroundStyle(download.error == nil ? Color.secondary : .orange)
+                }
+            case .failed:
+                Label("Download fehlgeschlagen", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.red)
+                    .help(download.error ?? "")
             }
         } else if let moved = installer.moves[game.appID] {
             ProgressView(value: moved) {
@@ -365,6 +383,19 @@ struct GameCard: View {
     @ViewBuilder private var action: some View {
         if runner.isRunning(game) {
             Button("Beenden", role: .destructive) { runner.stop(game) }
+        } else if !game.runsNatively, let download = installer.download(for: game.appID) {
+            if download.state == .running || download.state == .queued {
+                Button { installer.pause(game.appID) } label: {
+                    Label("Pausieren", systemImage: "pause.fill").frame(maxWidth: .infinity)
+                }
+            } else {
+                Button { installer.resume(game.appID) } label: {
+                    Label(download.state == .failed ? "Erneut versuchen" : "Fortsetzen", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!game.locationAvailable)
+            }
         } else if game.runsNatively {
             let installed = game.isInstalledNatively
             Button {
@@ -464,7 +495,8 @@ struct GameCard: View {
             }
         }
         Button("Deinstallieren …") { confirmUninstall = true }
-            .disabled(!game.isInstalled || runner.isRunning(game) || installer.isBusy(game))
+            .disabled(!(game.isInstalled || FileManager.default.fileExists(atPath: game.installDir))
+                      || runner.isRunning(game) || installer.isBusy(game))
         Button("Aus der Bibliothek entfernen") { library.remove(game) }
             .disabled(runner.isRunning(game) || installer.isBusy(game))
     }
