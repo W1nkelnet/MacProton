@@ -14,6 +14,11 @@ das Vulkan auf Metal umsetzt.
 - **Windows-Spiele:** Lädt sie mit Valves steamcmd und startet sie mit
   Wine. Unterstützt werden Direct3D 9, 10 und 11, Direct3D 12 erst in
   Teilen.
+- **Downloads:** Ein eigener Reiter zeigt die Warteschlange. Downloads
+  lassen sich pausieren und fortsetzen, auch nach einem Neustart.
+- **Speicherort:** Spiele können auf einer externen Festplatte liegen,
+  per Rechtsklick „Installieren in …“ oder als Standardordner in den
+  Einstellungen. „Verschieben …“ zieht installierte Spiele um.
 - **Steam-Funktionen im Spiel:** Die Spiele sprechen mit dem Steam-Client,
   getestet mit Lobbys. Online-Funktionen mit TLS laufen ebenfalls.
 - **Spielstände über Steam Cloud:** Für Spiele, deren Windows- und
