@@ -296,6 +296,18 @@ do_steamclient_stub() {
 }
 
 do_dist() {
+    # Drop debug info from the shipped files; the build trees keep it
+    local f
+    find "$dist/lib/wine/x86_64-windows" "$dist/lib/wine/dxvk/x86_64-windows" "$dist/lib/wine/steamclient/x86_64-windows" \
+        -type f \( -name "*.dll" -o -name "*.exe" -o -name "*.sys" -o -name "*.drv" -o -name "*.ocx" -o -name "*.cpl" \) \
+        -exec x86_64-w64-mingw32-strip --strip-debug {} +
+    find "$dist/lib/wine/i386-windows" "$dist/lib/wine/dxvk/i386-windows" "$dist/lib/wine/steamclient/i386-windows" \
+        -type f \( -name "*.dll" -o -name "*.exe" -o -name "*.sys" -o -name "*.drv" -o -name "*.ocx" -o -name "*.cpl" \) \
+        -exec i686-w64-mingw32-strip --strip-debug {} +
+    for f in "$dist"/bin/* "$dist"/lib/wine/x86_64-unix/*; do
+        [ -L "$f" ] || ! file "$f" | grep -q Mach-O || strip -S "$f"
+    done
+
     cp "$proton/macos/run.sh" "$build/dist/run.sh"
     (cd "$proton" && git describe --always --dirty) > "$build/dist/version"
     log "done: $build/dist"

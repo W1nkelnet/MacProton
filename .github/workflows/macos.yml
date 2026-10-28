@@ -1,0 +1,69 @@
+name: macOS build
+
+# Builds the Proton runtime for macOS and MacProton.app. Tags named v*
+# publish a GitHub release with the zipped app.
+on:
+  push:
+    branches: [macos-port]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Install build tools
+        run: |
+          brew install bison flex mingw-w64 autoconf automake meson ninja glslang pkgconf
+          # The runtime is x86_64; configure runs its test programs under Rosetta
+          softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/build/src
+            ${{ runner.temp }}/build/deps-x86_64
+            ${{ runner.temp }}/build/stamps/moltenvk
+            ${{ runner.temp }}/build/stamps/freetype
+            ${{ runner.temp }}/build/stamps/gmp
+            ${{ runner.temp }}/build/stamps/nettle
+            ${{ runner.temp }}/build/stamps/gnutls
+            ${{ runner.temp }}/build/stamps/sdl2
+          key: deps-${{ hashFiles('macos/build.sh') }}
+
+      - name: Build runtime
+        run: macos/build.sh "$RUNNER_TEMP/build"
+
+      - name: Build MacProton.app
+        run: |
+          macos/app/build-app.sh "$RUNNER_TEMP/app" "$RUNNER_TEMP/build/dist"
+          version=$(git describe --tags --always)
+          # ditto keeps the symlinks in the runtime
+          ditto -c -k --keepParent "$RUNNER_TEMP/app/MacProton.app" "MacProton-$version.zip"
+          shasum -a 256 "MacProton-$version.zip" > "MacProton-$version.zip.sha256"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MacProton-${{ env.VERSION }}
+          path: |
+            MacProton-*.zip
+            MacProton-*.zip.sha256
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" MacProton-*.zip MacProton-*.zip.sha256 \
+            --title "MacProton $GITHUB_REF_NAME" --generate-notes
