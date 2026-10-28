@@ -13,16 +13,29 @@ final class SteamCMDSetup: ObservableObject {
     nonisolated static let requirement = #"anchor apple generic and certificate leaf[subject.OU] = "MXGJJ98X76""#
 
     func setUpIfNeeded() {
-        guard Paths.steamcmd == nil, !running else { return }
+        guard Paths.steamcmd == nil || !Paths.steamRedistAvailable, !running else { return }
         running = true
         error = nil
         Task {
             do {
-                try await Self.install(into: Paths.steamcmdDir)
+                if Paths.steamcmd == nil { try await Self.install(into: Paths.steamcmdDir) }
+                if !Paths.steamRedistAvailable { try await Self.downloadRedist() }
             } catch {
                 self.error = "steamcmd konnte nicht eingerichtet werden: \(error.localizedDescription)"
             }
             running = false
+        }
+    }
+
+    /// Downloads the Steamworks SDK Redist (app 1007) for Windows; anonymous,
+    /// so it does not take over the Steam client's session.
+    nonisolated static func downloadRedist() async throws {
+        guard let steamcmd = Paths.steamcmd else { throw SteamCMDError.notInstalled }
+        let output = try await SteamCMD.run(steamcmd, ["+@sSteamCmdForcePlatformType", "windows",
+                                                       "+force_install_dir", Paths.steamRedistDir.path,
+                                                       "+login", "anonymous", "+app_update", "1007", "validate", "+quit"]) { _ in }
+        guard output.contains("Success! App '1007'") else {
+            throw SteamCMDError.failed("Valves Steamworks-Redist konnte nicht geladen werden.")
         }
     }
 

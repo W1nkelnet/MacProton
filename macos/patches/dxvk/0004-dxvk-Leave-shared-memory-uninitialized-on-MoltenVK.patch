@@ -1,0 +1,61 @@
+From 1674d2ce639bb8819c990574fe2e190eb8b90968 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 09:59:06 +0100
+Subject: [PATCH] dxvk: Leave shared memory uninitialized on MoltenVK.
+
+SPIRV-Cross zero-initializes shared memory for Metal in a loop over an
+undeclared gl_WorkGroupSize, so Metal failed to compile such compute
+shaders, e.g. 25 in Town To City (Unreal Engine 5.7).
+
+Requires the dxbc-spirv option zeroInitLds.
+
+---
+ src/dxvk/dxvk_device.cpp    | 5 +++++
+ src/dxvk/dxvk_shader.h      | 2 ++
+ src/dxvk/dxvk_shader_ir.cpp | 1 +
+ 3 files changed, 8 insertions(+)
+
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index ea7f970..f457283 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -809,6 +809,11 @@ namespace dxvk {
+     if (m_features.nvRawAccessChains.shaderRawAccessChains)
+       m_shaderOptions.spirv.set(DxvkShaderSpirvFlag::SupportsNvRawAccessChains);
+ 
++    // SPIRV-Cross zero-initializes shared memory for Metal in a loop over
++    // gl_WorkGroupSize without declaring it, so such shaders fail to compile
++    if (m_adapter->matchesDriver(VK_DRIVER_ID_MOLTENVK))
++      m_shaderOptions.spirv.set(DxvkShaderSpirvFlag::NoZeroInitSharedMemory);
++
+     // Mesa drivers generally optimize large constant arrays to a buffer, some other
+     // drivers do not and suffer a significant performance loss. Enable lowering on
+     // those drivers.
+diff --git a/src/dxvk/dxvk_shader.h b/src/dxvk/dxvk_shader.h
+index 9be0cd7..bbe5851 100644
+--- a/src/dxvk/dxvk_shader.h
++++ b/src/dxvk/dxvk_shader.h
+@@ -132,6 +132,8 @@ namespace dxvk {
+     /// Whether dynamic non-uniform resource indexing is
+     /// supported. Only applies to typed resources.
+     SupportsResourceIndexing    = 20u,
++    /// Whether to leave shared memory uninitialized
++    NoZeroInitSharedMemory      = 21u,
+   };
+ 
+   using DxvkShaderSpirvFlags = Flags<DxvkShaderSpirvFlag>;
+diff --git a/src/dxvk/dxvk_shader_ir.cpp b/src/dxvk/dxvk_shader_ir.cpp
+index aefdac5..e6ce2b1 100644
+--- a/src/dxvk/dxvk_shader_ir.cpp
++++ b/src/dxvk/dxvk_shader_ir.cpp
+@@ -1740,6 +1740,7 @@ namespace dxvk {
+     options.includeDebugNames = true;
+     options.nvRawAccessChains = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsNvRawAccessChains);
+     options.dualSourceBlending = linkage && linkage->fsDualSrcBlend;
++    options.zeroInitLds = !m_info.options.spirv.test(DxvkShaderSpirvFlag::NoZeroInitSharedMemory);
+ 
+     if (m_info.options.spirv.all(DxvkShaderSpirvFlag::IndependentDenormMode,
+                                DxvkShaderSpirvFlag::SupportsRte32,
+-- 
+2.56.0
+

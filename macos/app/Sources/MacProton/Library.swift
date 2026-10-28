@@ -103,6 +103,14 @@ enum Paths {
     /// The app's own steamcmd, set up on first launch
     static let steamcmdDir = support.appendingPathComponent("steamcmd", isDirectory: true)
 
+    /// Valve's Windows steamclient DLLs from the Steamworks SDK Redist, which
+    /// run.sh puts in each prefix; Steam's DRM needs them
+    static let steamRedistDir = support.appendingPathComponent("steamworks-redist", isDirectory: true)
+
+    static var steamRedistAvailable: Bool {
+        FileManager.default.fileExists(atPath: steamRedistDir.appendingPathComponent("steamclient64.dll").path)
+    }
+
     static var steamcmd: String? {
         let path = steamcmdDir.appendingPathComponent("steamcmd.sh").path
         return FileManager.default.isExecutableFile(atPath: path) ? path : nil

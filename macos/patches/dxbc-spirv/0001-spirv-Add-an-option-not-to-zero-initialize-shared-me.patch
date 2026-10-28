@@ -1,0 +1,51 @@
+From 07304a14be258f3e136adc77ada44c21e6eb3dcc Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 09:59:06 +0100
+Subject: [PATCH] spirv: Add an option not to zero-initialize shared memory.
+
+D3D does not guarantee zero-initialized groupshared memory. SPIRV-Cross
+zero-initializes it for Metal in a loop over gl_WorkGroupSize without
+declaring it, so MoltenVK fails to compile such compute shaders.
+
+---
+ spirv/spirv_builder.cpp | 9 +++++++--
+ spirv/spirv_builder.h   | 3 +++
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/spirv/spirv_builder.cpp b/spirv/spirv_builder.cpp
+index fc4c3a8..68efc2f 100644
+--- a/spirv/spirv_builder.cpp
++++ b/spirv/spirv_builder.cpp
+@@ -819,8 +819,13 @@ void SpirvBuilder::emitDclLds(const ir::Op& op) {
+   auto typeId = getIdForType(op.getType());
+   auto ptrTypeId = getIdForPtrType(typeId, spv::StorageClassWorkgroup);
+ 
+-  pushOp(m_declarations, spv::OpVariable, ptrTypeId, varId,
+-    spv::StorageClassWorkgroup, getIdForConstantNull(op.getType()));
++  if (m_options.zeroInitLds) {
++    pushOp(m_declarations, spv::OpVariable, ptrTypeId, varId,
++      spv::StorageClassWorkgroup, getIdForConstantNull(op.getType()));
++  } else {
++    pushOp(m_declarations, spv::OpVariable, ptrTypeId, varId,
++      spv::StorageClassWorkgroup);
++  }
+ 
+   addEntryPointId(varId);
+ }
+diff --git a/spirv/spirv_builder.h b/spirv/spirv_builder.h
+index e216bf6..7ea00b5 100644
+--- a/spirv/spirv_builder.h
++++ b/spirv/spirv_builder.h
+@@ -55,6 +55,9 @@ public:
+     int32_t maxCbvCount = -1;
+     /** Maximum tessellation factor supported by the device. */
+     float maxTessFactor = 64.0f;
++    /** Whether to zero-initialize shared memory. D3D does not guarantee
++     *  it, but some games rely on it. */
++    bool zeroInitLds = true;
+   };
+ 
+   explicit SpirvBuilder(const ir::Builder& builder, ResourceMapping& mapping, const Options& options);
+-- 
+2.56.0
+

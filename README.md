@@ -77,6 +77,8 @@ Metal umsetzt.
 - 32-Bit-Windows-Spiele stürzen derzeit beim Start ab. Betroffen sind vor
   allem ältere Unity-Spiele.
 - Kein Direct3D 12.
+- Spiele, die OpenGL 4.2 oder neuer brauchen (etwa Foundation), starten
+  nicht. macOS bietet höchstens OpenGL 4.1.
 - Spiele mit Anti-Cheat (Easy Anti-Cheat, BattlEye) funktionieren online
   meist nicht.
 - Fremde Launcher wie die EA-App oder Ubisoft Connect werden nicht

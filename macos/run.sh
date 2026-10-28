@@ -65,13 +65,20 @@ cp -f "$dist/lib/wine/dxvk/i386-windows/"*.dll "$windows/syswow64/"
 
 # The game's steam_api loads steamclient(64).dll from SteamPath; Wine's
 # loader redirects their exports to lsteamclient. macOS Steam ships no
-# Windows versions, so use stub DLLs exporting the same names. Copies of
-# lsteamclient itself do not work: Wine then takes the copy for the
-# lsteamclient module and redirects to itself.
+# Windows versions. Valve's from the Steamworks SDK Redist (app 1007),
+# which MacProton downloads, also satisfy Steam's DRM; without them, stub
+# DLLs exporting the same names do for steam_api. Copies of lsteamclient
+# itself do not work: Wine then takes the copy for the lsteamclient module
+# and redirects to itself.
 steam_dir="$WINEPREFIX/drive_c/Program Files (x86)/Steam"
+redist=${MACPROTON_STEAM_REDIST:-$HOME/Library/Application Support/MacProton/steamworks-redist}
 mkdir -p "$steam_dir"
-cp -f "$dist/lib/wine/steamclient/x86_64-windows/steamclient64.dll" "$steam_dir/"
-cp -f "$dist/lib/wine/steamclient/i386-windows/steamclient.dll" "$steam_dir/"
+if [ -f "$redist/steamclient64.dll" ] && [ -f "$redist/steamclient.dll" ]; then
+    cp -f "$redist/steamclient64.dll" "$redist/steamclient.dll" "$steam_dir/"
+else
+    cp -f "$dist/lib/wine/steamclient/x86_64-windows/steamclient64.dll" "$steam_dir/"
+    cp -f "$dist/lib/wine/steamclient/i386-windows/steamclient.dll" "$steam_dir/"
+fi
 
 # wine returns once the program is done; "wineserver -w" would also wait
 # for anything else running in the prefix, such as the game itself
