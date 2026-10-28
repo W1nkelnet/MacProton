@@ -45,6 +45,11 @@ struct AddGameView: View {
                                 Spacer()
                                 Button("Ändern …", action: chooseFolder).controlSize(.small)
                             }
+                            ForEach(info.issues, id: \.self) { issue in
+                                Label(issue.explanation, systemImage: issue.isBlocking ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(issue.isBlocking ? .red : .orange)
+                            }
                             if alreadyInstalled {
                                 Label("Bereits in diesem Ordner installiert", systemImage: "checkmark.circle.fill")
                                     .font(.caption).foregroundStyle(.green)
@@ -107,8 +112,7 @@ struct AddGameView: View {
 
     private func add() {
         guard let info else { return }
-        let game = Game(appID: info.appID, name: info.name, installDir: installDir,
-                        executable: info.executable, arguments: info.arguments, sizeBytes: info.sizeBytes)
+        let game = Game(info: info, installDir: installDir)
         library.upsert(game)
         if !alreadyInstalled { installer.install(game, library: library) }
         dismiss()

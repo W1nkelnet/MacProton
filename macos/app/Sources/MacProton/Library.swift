@@ -12,8 +12,39 @@ struct Game: Codable, Identifiable, Hashable {
     var lastPlayed: Date?
     /// The game also has a native macOS version, no need for Proton
     var hasNativeMac: Bool?
+    var issues: [CompatibilityIssue]?
+    var cloudSaves: [CloudSaveLocation]?
 
     var id: Int { appID }
+
+    init(appID: Int, name: String, installDir: String, executable: String, arguments: String = "",
+         sizeBytes: Int64 = 0) {
+        self.appID = appID
+        self.name = name
+        self.installDir = installDir
+        self.executable = executable
+        self.arguments = arguments
+        self.sizeBytes = sizeBytes
+    }
+
+    init(info: AppInfo, installDir: String? = nil) {
+        let folder = info.name.components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: " ")
+        self.init(appID: info.appID, name: info.name,
+                  installDir: installDir ?? Paths.gamesDir.appendingPathComponent(folder).path,
+                  executable: info.executable)
+        apply(info)
+    }
+
+    /// Takes over what Steam's app info says, keeping folder and history.
+    mutating func apply(_ info: AppInfo) {
+        name = info.name
+        executable = info.executable
+        arguments = info.arguments
+        sizeBytes = info.sizeBytes
+        hasNativeMac = info.hasNativeMac
+        issues = info.issues
+        cloudSaves = info.cloudSaves
+    }
 
     var headerImageURL: URL? {
         URL(string: "https://cdn.cloudflare.steamstatic.com/steam/apps/\(appID)/header.jpg")

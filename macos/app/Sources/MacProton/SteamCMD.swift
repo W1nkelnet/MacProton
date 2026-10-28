@@ -8,6 +8,8 @@ struct AppInfo {
     var arguments: String
     var sizeBytes: Int64
     var hasNativeMac = false
+    var issues: [CompatibilityIssue] = []
+    var cloudSaves: [CloudSaveLocation] = []
 }
 
 enum SteamCMDError: LocalizedError {
@@ -50,9 +52,7 @@ enum SteamCMD {
         let root = VDF.parse(String(output[start.lowerBound...]))
         guard let app = root[String(appID)], let name = app["common", "name"]?.string else { return nil }
 
-        let launches = app["config", "launch"]?.entries.map(\.1) ?? []
-        let windows = launches.filter { ($0["config", "oslist"]?.string ?? "windows").contains("windows") }
-        let entry = windows.first { $0["type"]?.string == "default" } ?? windows.first
+        let (entry, issues) = AppAnalysis.analyze(app)
         guard let exe = entry?["executable"]?.string else {
             return AppInfo(appID: appID, name: name, executable: "", arguments: "", sizeBytes: 0)
         }
@@ -67,7 +67,10 @@ enum SteamCMD {
         return AppInfo(appID: appID, name: name,
                        executable: exe.replacingOccurrences(of: "\\", with: "/"),
                        arguments: entry?["arguments"]?.string ?? "",
-                       sizeBytes: size)
+                       sizeBytes: size,
+                       hasNativeMac: app["common", "oslist"]?.string?.contains("macos") ?? false,
+                       issues: issues,
+                       cloudSaves: AppAnalysis.cloudSaves(app))
     }
 
     /// Downloads or updates the Windows version of an app.

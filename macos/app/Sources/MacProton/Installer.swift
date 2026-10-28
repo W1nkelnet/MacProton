@@ -35,7 +35,16 @@ final class Installer: ObservableObject {
                         self.jobs[appID] = Job(progress: value, status: status)
                     }
                 }
-                library.upsert(game)
+                var installed = library.games.first { $0.appID == appID } ?? game
+                let exeDir = (installed.installDir as NSString)
+                    .appendingPathComponent((installed.executable as NSString).deletingLastPathComponent)
+                var issues = installed.issues ?? []
+                if issues.allSatisfy({ ![.antiCheat, .antiCheatOffline, .antiCheatFiles].contains($0) }),
+                   AppAnalysis.hasAntiCheatFiles(in: installed.installDir) || AppAnalysis.hasAntiCheatFiles(in: exeDir) {
+                    issues.append(.antiCheatFiles)
+                    installed.issues = issues
+                }
+                library.upsert(installed)
             } catch SteamCMDError.loginRequired(let name) {
                 loginRequired = name
             } catch {

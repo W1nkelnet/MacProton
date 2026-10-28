@@ -158,6 +158,18 @@ struct GameCard: View {
                             .help("Es gibt eine native Mac-Version, die direkt in Steam läuft.")
                     }
                 }
+                if let issues = game.issues, !issues.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(issues, id: \.self) { issue in
+                            Text(issue.title)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background((issue.isBlocking ? Color.red : Color.orange).opacity(0.2), in: Capsule())
+                                .foregroundStyle(issue.isBlocking ? .red : .orange)
+                                .help(issue.explanation)
+                        }
+                    }
+                }
                 status
                 action
             }

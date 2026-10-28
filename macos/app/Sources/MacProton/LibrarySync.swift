@@ -26,13 +26,15 @@ final class LibrarySync: ObservableObject {
             do {
                 let found = try await fetchGames(account: account)
                 var added = 0
-                for info in found where !library.games.contains(where: { $0.appID == info.appID }) {
-                    let folder = info.name.components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: " ")
-                    library.upsert(Game(appID: info.appID, name: info.name,
-                                        installDir: Paths.gamesDir.appendingPathComponent(folder).path,
-                                        executable: info.executable, arguments: info.arguments,
-                                        sizeBytes: info.sizeBytes, hasNativeMac: info.hasNativeMac))
-                    added += 1
+                for info in found {
+                    if var existing = library.games.first(where: { $0.appID == info.appID }) {
+                        // keep the user's folder and play history, refresh what Steam says
+                        existing.apply(info)
+                        library.upsert(existing)
+                    } else {
+                        library.upsert(Game(info: info))
+                        added += 1
+                    }
                 }
                 lastResult = "\(found.count) Windows-Spiele gefunden, \(added) neu in der Bibliothek."
             } catch SteamCMDError.loginRequired {
@@ -72,9 +74,8 @@ final class LibrarySync: ObservableObject {
             guard let text = try await console.block("app_info_print \(appID)", marker: "AppID : \(appID)") else { continue }
             let root = VDF.parse(String(text[(text.firstIndex(of: "\n") ?? text.startIndex)...]))
             guard root[String(appID), "common", "type"]?.string?.lowercased() == "game",
-                  var info = SteamCMD.parseAppInfo(text + "\n", appID: appID),
+                  let info = SteamCMD.parseAppInfo(text + "\n", appID: appID),
                   !info.executable.isEmpty else { continue }
-            info.hasNativeMac = root[String(appID), "common", "oslist"]?.string?.contains("macos") ?? false
             games.append(info)
         }
         progress = 1
