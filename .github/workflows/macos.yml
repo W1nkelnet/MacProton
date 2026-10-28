@@ -65,5 +65,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes=macos/release-notes/$GITHUB_REF_NAME.md
+          if [ -f "$notes" ]; then notes_args=(--notes-file "$notes"); else notes_args=(--generate-notes); fi
           gh release create "$GITHUB_REF_NAME" MacProton-*.zip MacProton-*.zip.sha256 \
-            --title "MacProton $GITHUB_REF_NAME" --generate-notes
+            --title "MacProton $GITHUB_REF_NAME" "${notes_args[@]}"
