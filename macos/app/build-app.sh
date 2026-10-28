@@ -15,7 +15,9 @@ src=$(cd "$(dirname "$0")" && pwd)
 out=${1:-$src/.build/app}
 runtime=${2:-}
 app=$out/MacProton.app
-version=$(git -C "$src" describe --always --dirty 2>/dev/null || echo dev)
+version=$(git -C "$src" describe --always 2>/dev/null || echo dev)
+# The wine and dxvk submodules always differ by the macOS patches
+git -C "$src" diff-index --quiet --ignore-submodules HEAD -- 2>/dev/null || version=$version-dirty
 # Release builds are tagged vX.Y.Z
 short_version=$(git -C "$src" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || true)
 short_version=${short_version:-0.1.0}
