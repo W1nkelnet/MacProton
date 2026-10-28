@@ -1,0 +1,49 @@
+From f93239576d450629db39f9a218f866c06fcb08a3 Mon Sep 17 00:00:00 2001
+From: Mark <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 10:05:46 +0100
+Subject: [PATCH] Honor MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES with residency
+ sets.
+
+With Metal argument buffers, MoltenVK makes command buffers use every
+resource in a bound descriptor set, including ones the app destroyed
+after their last use. Retained command buffers and live resource checks
+prevent that, but were skipped whenever a residency set exists, i.e. on
+macOS 15 and later. Games then lost the device with Metal's "Invalid
+Resource" error.
+
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm | 4 +++-
+ MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm  | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index 9772757..6fc4443 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -5222,7 +5222,9 @@ void MVKDevice::initPerformanceTracking() {
+ 
+ void MVKDevice::initConfiguration() {
+ 	bool needsLiveTrackingForCopy = _physicalDevice->_isUsingMetalArgumentBuffers && _physicalDevice->_metalFeatures.needsArgumentBufferEncoders;
+-	bool needsLiveTrackingForEncode = !hasResidencySet() && (getMVKConfig().liveCheckAllResources || _enabledDescriptorIndexingFeatures.descriptorBindingPartiallyBound);
++	// liveCheckAllResources also applies with a residency set: descriptor sets
++	// can still reference resources the app destroyed after their last use
++	bool needsLiveTrackingForEncode = getMVKConfig().liveCheckAllResources || (!hasResidencySet() && _enabledDescriptorIndexingFeatures.descriptorBindingPartiallyBound);
+ 	_liveResources.enabled = needsLiveTrackingForCopy || needsLiveTrackingForEncode;
+ }
+ 
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
+index dec4b45..64387c7 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
+@@ -486,7 +486,7 @@ VkResult MVKQueueCommandBufferSubmission::execute() {
+ id<MTLCommandBuffer> MVKQueueCommandBufferSubmission::getActiveMTLCommandBuffer() {
+ 	if ( !_activeMTLCommandBuffer ) {
+ 		bool needsRetain = false;
+-		if (!_device->hasResidencySet() && (getEnabledDescriptorIndexingFeatures().descriptorBindingPartiallyBound || getMVKConfig().liveCheckAllResources)) {
++		if (getMVKConfig().liveCheckAllResources || (!_device->hasResidencySet() && getEnabledDescriptorIndexingFeatures().descriptorBindingPartiallyBound)) {
+ 			// Partially bound descriptors will get bound by us even if they're not used at runtime by the shader.
+ 			// The application is free to destroy them even if they're not used at runtime even if we bound them.
+ 			// Metal will be very unhappy if we destroy something we bound, even if it isn't used at runtime.
+-- 
+2.56.0
+

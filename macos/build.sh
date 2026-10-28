@@ -100,6 +100,10 @@ do_moltenvk() {
     if [ ! -d "$src" ]; then
         git clone --depth 1 --branch "$MOLTENVK_TAG" https://github.com/KhronosGroup/MoltenVK.git "$src"
     fi
+    local patch
+    for patch in "$proton/macos/patches/moltenvk"/*.patch; do
+        git -C "$src" apply --reverse --check "$patch" 2>/dev/null || git -C "$src" apply "$patch"
+    done
     (cd "$src" && ./fetchDependencies --macos && make macos)
     cp "$src/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" "$deps/lib/"
 }

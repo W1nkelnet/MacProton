@@ -46,16 +46,28 @@ fi
 
 export WINEPREFIX="${WINEPREFIX:-$HOME/Library/Application Support/MacProton/prefixes/$appid}"
 export DYLD_FALLBACK_LIBRARY_PATH="$dist/lib"
-export WINEDLLOVERRIDES="steam.exe=b;mscoree,mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi=n,b;${WINEDLLOVERRIDES-}"
+export WINEDLLOVERRIDES="steam.exe=b;mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi=n,b;${WINEDLLOVERRIDES-}"
 export SteamAppId=$appid SteamGameId=$appid SteamOverlayGameId=$appid
+# Keep resources alive that bound descriptor sets still reference after the
+# game destroyed them; Metal otherwise loses the device ("Invalid Resource")
+export MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES=${MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES-1}
+# .NET games load ICU for globalization; Wine's icu.dll forwards to an ICU
+# build this runtime does not ship, so .NET would fail fast
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=${DOTNET_SYSTEM_GLOBALIZATION_INVARIANT-1}
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$steam_macos"
 
-# Create or update the prefix. mscoree/mshtml stay disabled above so that
-# wineboot does not wait on the Mono/Gecko install dialog.
+# Create or update the prefix here rather than letting Wine update it on
+# the next start, with mscoree and mshtml disabled so that wineboot does
+# not wait on the Mono/Gecko install dialog. Games need mscoree, though:
+# Wine loads .NET Core assemblies through it.
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
     mkdir -p "$WINEPREFIX"
     echo "Creating prefix in $WINEPREFIX" >&2
-    "$wine" wineboot -i
+    WINEDLLOVERRIDES="mscoree,mshtml=;$WINEDLLOVERRIDES" "$wine" wineboot -i
+    "$wineserver" -w
+elif [ "$dist/share/wine/wine.inf" -nt "$WINEPREFIX/.update-timestamp" ]; then
+    echo "Updating prefix in $WINEPREFIX" >&2
+    WINEDLLOVERRIDES="mscoree,mshtml=;$WINEDLLOVERRIDES" "$wine" wineboot -u
     "$wineserver" -w
 fi
 
