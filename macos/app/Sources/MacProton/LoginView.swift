@@ -15,9 +15,15 @@ struct LoginView: View {
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            TextField("Steam-Benutzername", text: $account)
-                .textContentType(.username)
-                .disabled(login.step != .idle && !isFailed)
+            VStack(alignment: .leading, spacing: 4) {
+                TextField("Steam-Benutzername", text: $account)
+                    .textContentType(.username)
+                    .disabled(login.step != .idle && !isFailed)
+                if !account.isEmpty && account == detectSteamAccount() {
+                    Text("Aus deinem Steam-Client übernommen")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
 
             switch login.step {
             case .password:

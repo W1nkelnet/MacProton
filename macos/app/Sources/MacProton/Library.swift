@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct Game: Codable, Identifiable, Hashable {
@@ -133,13 +134,13 @@ enum Paths {
         return dir
     }()
 
+    /// Asks the system rather than running pgrep: views read this while
+    /// SwiftUI updates them, and waiting for a process there runs the run
+    /// loop, which SwiftUI does not allow. Steam.app in Applications only
+    /// starts the client, steam_osx.
     static var steamRunning: Bool {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        task.arguments = ["-q", "steam_osx"]
-        try? task.run()
-        task.waitUntilExit()
-        return task.terminationStatus == 0
+        NSRunningApplication.runningApplications(withBundleIdentifier: SteamClient.bundleID)
+            .contains { $0.executableURL?.lastPathComponent == "steam_osx" && !$0.isTerminated }
     }
 }
 
