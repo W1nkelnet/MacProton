@@ -233,6 +233,7 @@ struct GameCard: View {
     @EnvironmentObject private var updates: UpdateChecker
     @State private var confirmUninstall = false
     @State private var uninstallError: String?
+    @State private var showCloudImport = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -280,6 +281,7 @@ struct GameCard: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .contextMenu { menu }
+        .sheet(isPresented: $showCloudImport) { CloudImportView(game: game) }
         .confirmationDialog("\(game.name) deinstallieren?", isPresented: $confirmUninstall) {
             Button("Deinstallieren", role: .destructive) { uninstall(prefix: false) }
             Button("Deinstallieren, auch Spielstände im Prefix", role: .destructive) { uninstall(prefix: true) }
@@ -410,6 +412,10 @@ struct GameCard: View {
         }
         Button("Im Steam-Shop öffnen") {
             if let url = URL(string: "https://store.steampowered.com/app/\(game.appID)/") { NSWorkspace.shared.open(url) }
+        }
+        if !game.runsNatively {
+            Button("Cloud-Spielstände holen …") { showCloudImport = true }
+                .disabled(runner.isRunning(game))
         }
         Divider()
         if game.isInstalledNatively {

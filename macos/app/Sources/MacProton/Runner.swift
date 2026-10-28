@@ -26,6 +26,11 @@ final class Runner: ObservableObject {
         set { UserDefaults.standard.set(Array(newValue), forKey: "cloudWarnedApps") }
     }
 
+    /// The user got the cloud saves, so the notice is not needed anymore.
+    func markCloudHandled(_ game: Game) {
+        Self.cloudWarned.insert(game.appID)
+    }
+
     /// Starts the game after the Steam Cloud notice.
     func playAfterCloudNotice(_ game: Game) {
         Self.cloudWarned.insert(game.appID)
