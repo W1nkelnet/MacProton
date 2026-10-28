@@ -31,7 +31,7 @@ final class SteamConsole: @unchecked Sendable {
 
     deinit {
         output.fileHandleForReading.readabilityHandler = nil
-        if process.isRunning { process.terminate() }
+        stop()
     }
 
     /// Logs in with the cached credentials of `account`; steamcmd is stopped
@@ -62,8 +62,19 @@ final class SteamConsole: @unchecked Sendable {
         return result
     }
 
-    func quit() {
+    /// Asks steamcmd to quit and waits for it, then stops what is left.
+    func quit() async {
         send("quit")
+        for _ in 0..<100 where process.isRunning {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        stop()
+    }
+
+    /// steamcmd.sh runs steamcmd as a child and waits for it before handling
+    /// a signal, so signal the whole process group it leads.
+    private func stop() {
+        if process.isRunning { kill(-process.processIdentifier, SIGTERM) }
     }
 
     /// Index after the closing brace of the first balanced { } block.

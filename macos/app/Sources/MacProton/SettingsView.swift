@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage("steamAccount") private var steamAccount = ""
     @AppStorage("runtimePath") private var runtimePath = ""
     @AppStorage("syncSaves") private var syncSaves = true
+    @AppStorage("metalHUD") private var metalHUD = false
 
     var body: some View {
         Form {
@@ -22,6 +23,11 @@ struct SettingsView: View {
             Section("Spielstände") {
                 Toggle("Spielstände über Steam Cloud synchronisieren", isOn: $syncSaves)
                 Text("Für Spiele, deren Windows- und Mac-Version dieselben Spielstände nutzen: Der Speicherordner im Prefix wird mit dem Mac-Ordner verknüpft, den Steam synchronisiert. Vorher werden beide gesichert.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Anzeige") {
+                Toggle("Metal-HUD mit FPS einblenden", isOn: $metalHUD)
+                Text("Zeigt Apples Metal-Leistungsanzeige mit Bildrate und GPU-Zeit in Windows-Spielen. Gilt ab dem nächsten Spielstart.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Proton-Laufzeit") {

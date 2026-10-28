@@ -52,10 +52,22 @@ final class LibrarySync: ObservableObject {
         let licenses = try await SteamCMD.run(steamcmd, ["+login", account, "+licenses_print", "+quit"]) { line in
             try SteamCMD.checkLogin(line, account: account)
         }
-        var (apps, truncated) = Self.parseLicenses(licenses)
+        let (apps, truncated) = Self.parseLicenses(licenses)
 
         let console = try SteamConsole()
-        defer { console.quit() }
+        do {
+            let games = try await fetchGames(console: console, account: account, apps: apps, truncated: truncated)
+            await console.quit()
+            return games
+        } catch {
+            await console.quit()
+            throw error
+        }
+    }
+
+    private func fetchGames(console: SteamConsole, account: String,
+                            apps: Set<Int>, truncated: [Int]) async throws -> [AppInfo] {
+        var apps = apps
         try await console.login(account)
 
         // Packages with many apps are abbreviated in the license list
