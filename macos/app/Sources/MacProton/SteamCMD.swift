@@ -59,8 +59,11 @@ enum SteamCMD {
 
         var size: Int64 = 0
         for (_, depot) in app["depots"]?.entries ?? [] {
+            // DLC and other-language depots are not part of the base download
             let oslist = depot["config", "oslist"]?.string ?? "windows"
-            guard oslist.contains("windows"), let value = depot["manifests", "public", "size"]?.string else { continue }
+            let language = depot["config", "language"]?.string ?? ""
+            guard oslist.contains("windows"), depot["dlcappid"] == nil, language.isEmpty || language == "english",
+                  let value = depot["manifests", "public", "size"]?.string else { continue }
             size += Int64(value) ?? 0
         }
 
