@@ -1,0 +1,39 @@
+From 033f1e12219afd66481ee06b407b5f58d1419e56 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Tue, 27 Oct 2026 23:09:29 +0100
+Subject: [PATCH 2/2] dxvk: Request stretch scaling for swap chains on
+ MoltenVK.
+
+MoltenVK returns VK_SUBOPTIMAL_KHR for every present when the swap
+chain extent differs from the window size, unless scaling was requested
+explicitly. DXVK then recreated the swap chain on every frame, which
+showed as flickering. D3D stretches the back buffer to the window by
+default, so request VK_PRESENT_SCALING_STRETCH_BIT_KHR.
+
+---
+ src/dxvk/dxvk_presenter.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
+index f0d2651..23e6058 100644
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -755,6 +755,15 @@ namespace dxvk {
+     if (m_hasSwapchainMaintenance1)
+       modeInfo.pNext = std::exchange(swapInfo.pNext, &modeInfo);
+ 
++    // MoltenVK returns VK_SUBOPTIMAL_KHR on every present when the swap chain
++    // does not match the window size, unless scaling is requested explicitly.
++    // D3D stretches the back buffer to the window by default.
++    VkSwapchainPresentScalingCreateInfoKHR scalingInfo = { VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_KHR };
++    scalingInfo.scalingBehavior     = VK_PRESENT_SCALING_STRETCH_BIT_KHR;
++
++    if (m_hasSwapchainMaintenance1 && m_device->properties().vk12.driverID == VK_DRIVER_ID_MOLTENVK)
++      scalingInfo.pNext = std::exchange(swapInfo.pNext, &scalingInfo);
++
+     if (m_device->features().nvLowLatency2)
+       latencyInfo.pNext = std::exchange(swapInfo.pNext, &latencyInfo);
+ 
+-- 
+2.56.0
+

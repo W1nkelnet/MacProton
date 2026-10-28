@@ -73,10 +73,24 @@ do_check_tools() {
     fi
 }
 
+# The wine and dxvk submodules point to the upstream commits Proton uses;
+# the macOS changes are kept as patches in macos/patches and applied here.
+apply_patches() {
+    local dir=$proton/$1 patch
+    for patch in "$proton/macos/patches/$1"/*.patch; do
+        if git -C "$dir" apply --reverse --check "$patch" 2>/dev/null; then
+            continue # already applied
+        fi
+        git -C "$dir" apply "$patch"
+    done
+}
+
 do_submodules() {
     cd "$proton"
     git submodule update --init --depth 1 wine dxvk Vulkan-Headers SPIRV-Headers
     git -C dxvk submodule update --init --depth 1 --recursive
+    apply_patches wine
+    apply_patches dxvk
 }
 
 do_moltenvk() {

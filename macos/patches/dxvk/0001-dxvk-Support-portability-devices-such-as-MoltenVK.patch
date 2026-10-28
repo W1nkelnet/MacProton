@@ -1,0 +1,524 @@
+From bd7abddfbf3cd87305a4d6a64da75ccc6b6994e5 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Tue, 27 Oct 2026 23:09:29 +0100
+Subject: [PATCH 1/2] dxvk: Support portability devices such as MoltenVK.
+
+MoltenVK lacks geometryShader, shaderCullDistance, depthClipEnable,
+robustBufferAccess2 and nullDescriptor, so the device was rejected.
+On portability devices (VK_KHR_portability_subset, or the MoltenVK
+driver ID since Wine does not expose that extension to Windows
+applications) these features are now optional:
+
+- geometry shaders and cull distances only fail for shaders using them
+- depth clip is approximated with depth clamp, like DXVK 1.x did
+- null descriptors are replaced with zero-initialized dummy resources
+  (DxvkNullResources), created per context on first use and
+  initialized through the init command buffer
+
+Other devices keep the strict requirements.
+
+---
+ src/dxvk/dxvk_context.cpp        |  27 +++++++
+ src/dxvk/dxvk_context.h          |   5 ++
+ src/dxvk/dxvk_device_info.cpp    |  34 ++++++++
+ src/dxvk/dxvk_device_info.h      |   5 ++
+ src/dxvk/dxvk_graphics.cpp       |  13 ++-
+ src/dxvk/dxvk_null_resources.cpp | 135 +++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_null_resources.h   |  90 +++++++++++++++++++++
+ src/dxvk/dxvk_shader.cpp         |   7 +-
+ src/dxvk/meson.build             |   1 +
+ 9 files changed, 311 insertions(+), 6 deletions(-)
+ create mode 100644 src/dxvk/dxvk_null_resources.cpp
+ create mode 100644 src/dxvk/dxvk_null_resources.h
+
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 187e1ae..9760861 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -901,6 +901,17 @@ namespace dxvk {
+   }
+ 
+ 
++  const DxvkNullResources* DxvkContext::getNullResources() {
++    if (likely(m_device->features().extRobustness2.nullDescriptor))
++      return nullptr;
++
++    if (unlikely(!m_nullResources))
++      m_nullResources = std::make_unique<DxvkNullResources>(m_device.ptr(), this);
++
++    return m_nullResources.get();
++  }
++
++
+   void DxvkContext::initBuffer(
+     const Rc<DxvkBuffer>&           buffer) {
+     auto dstSlice = buffer->getSliceInfo();
+@@ -6339,6 +6350,8 @@ namespace dxvk {
+               descriptorInfo.buffer.range = bufferInfo.size;
+ 
+               trackUniformBufferBinding<TrackBindings>(binding, slice);
++            } else if (auto unbound = getNullResources()) {
++              descriptorInfo = unbound->bufferDescriptor();
+             } else {
+               descriptorInfo.buffer.buffer = VK_NULL_HANDLE;
+               descriptorInfo.buffer.offset = 0;
+@@ -6363,11 +6376,15 @@ namespace dxvk {
+                     descriptorInfo = view->getDescriptor(binding.getViewType())->legacy;
+ 
+                     m_cmd->track(view->image(), DxvkAccess::Read);
++                  } else if (auto unbound = getNullResources()) {
++                    descriptorInfo = unbound->imageViewDescriptor(binding.getViewType(), false);
+                   } else {
+                     descriptorInfo.image.sampler = VK_NULL_HANDLE;
+                     descriptorInfo.image.imageView = VK_NULL_HANDLE;
+                     descriptorInfo.image.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                   }
++                } else if (auto unbound = getNullResources()) {
++                  descriptorInfo = unbound->imageViewDescriptor(binding.getViewType(), false);
+                 } else {
+                   descriptorInfo.image.sampler = VK_NULL_HANDLE;
+                   descriptorInfo.image.imageView = VK_NULL_HANDLE;
+@@ -6386,6 +6403,8 @@ namespace dxvk {
+                   descriptorInfo = descriptor->legacy;
+ 
+                   trackImageViewBinding<TrackBindings, true>(binding, *res.imageView);
++                } else if (auto unbound = getNullResources()) {
++                  descriptorInfo = unbound->imageViewDescriptor(binding.getViewType(), true);
+                 } else {
+                   descriptorInfo.image.sampler = VK_NULL_HANDLE;
+                   descriptorInfo.image.imageView = VK_NULL_HANDLE;
+@@ -6404,6 +6423,8 @@ namespace dxvk {
+                   descriptorInfo = descriptor->legacy;
+ 
+                   trackBufferViewBinding<TrackBindings, false>(binding, *res.bufferView);
++                } else if (auto unbound = getNullResources()) {
++                  descriptorInfo = unbound->bufferViewDescriptor(false);
+                 } else {
+                   descriptorInfo.bufferView = VK_NULL_HANDLE;
+                 }
+@@ -6420,6 +6441,8 @@ namespace dxvk {
+                   descriptorInfo = descriptor->legacy;
+ 
+                   trackBufferViewBinding<TrackBindings, true>(binding, *res.bufferView);
++                } else if (auto unbound = getNullResources()) {
++                  descriptorInfo = unbound->bufferViewDescriptor(true);
+                 } else {
+                   descriptorInfo.bufferView = VK_NULL_HANDLE;
+                 }
+@@ -6436,6 +6459,8 @@ namespace dxvk {
+                   descriptorInfo = descriptor->legacy;
+ 
+                   trackBufferViewBinding<TrackBindings, false>(binding, *res.bufferView);
++                } else if (auto unbound = getNullResources()) {
++                  descriptorInfo = unbound->bufferDescriptor();
+                 } else {
+                   descriptorInfo.buffer.buffer = VK_NULL_HANDLE;
+                   descriptorInfo.buffer.offset = 0;
+@@ -6454,6 +6479,8 @@ namespace dxvk {
+                   descriptorInfo = descriptor->legacy;
+ 
+                   trackBufferViewBinding<TrackBindings, true>(binding, *res.bufferView);
++                } else if (auto unbound = getNullResources()) {
++                  descriptorInfo = unbound->bufferDescriptor();
+                 } else {
+                   descriptorInfo.buffer.buffer = VK_NULL_HANDLE;
+                   descriptorInfo.buffer.offset = 0;
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index c613765..68e0bb3 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -10,6 +10,7 @@
+ #include "dxvk_latency.h"
+ #include "dxvk_objects.h"
+ #include "dxvk_queue.h"
++#include "dxvk_null_resources.h"
+ #include "dxvk_util.h"
+ 
+ namespace dxvk {
+@@ -1378,6 +1379,10 @@ namespace dxvk {
+       std::vector<DxvkLegacyDescriptor> infos;
+     } m_legacyDescriptors;
+ 
++    std::unique_ptr<DxvkNullResources> m_nullResources;
++
++    const DxvkNullResources* getNullResources();
++
+     std::array<Rc<DxvkSampler>, MaxNumSamplerSlots> m_samplers;
+     std::array<DxvkBufferSlice, MaxNumUniformBufferSlots> m_uniformBuffers;
+     std::array<DxvkViewPair, MaxNumResourceSlots> m_resources;
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index c45e62b..87efe24 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -356,6 +356,14 @@ namespace dxvk {
+         return !std::strcmp(ext.extensionName, VK_AMD_SHADER_FRAGMENT_MASK_EXTENSION_NAME);
+       }) != extensions.end();
+ 
++    // Non-conformant implementations layered on top of other APIs, e.g.
++    // MoltenVK, advertise this. Some otherwise required features are
++    // treated as optional on those, see isPortabilityOptional.
++    m_hasPortabilitySubset = std::find_if(extensions.begin(), extensions.end(),
++      [] (const VkExtensionProperties& ext) {
++        return !std::strcmp(ext.extensionName, "VK_KHR_portability_subset");
++      }) != extensions.end();
++
+     // Use the supported spec version as a way to indicate extension support.
+     // We may ignore certain extensions if the spec version is too old.
+     for (const auto& f : getFeatureList()) {
+@@ -701,6 +709,11 @@ namespace dxvk {
+ 
+     for (const auto& f : getFeatureList()) {
+       if (f.featureRequired && !(*f.featureEnabled)) {
++        if (isPortabilityDevice() && isPortabilityOptional(f)) {
++          Logger::warn(str::format("Portability device does not support '", f.readableName, "', using fallback"));
++          continue;
++        }
++
+         std::string message = str::format("Device does not support required feature '", f.readableName, "'");
+ 
+         if (f.extensionEnabled)
+@@ -745,6 +758,27 @@ namespace dxvk {
+   }
+ 
+ 
++  bool DxvkDeviceCapabilities::isPortabilityDevice() const {
++    // Wine does not expose VK_KHR_portability_subset to Windows
++    // applications, so also check for known portability drivers.
++    return m_hasPortabilitySubset
++        || m_properties.vk12.driverID == VK_DRIVER_ID_MOLTENVK;
++  }
++
++
++  bool DxvkDeviceCapabilities::isPortabilityOptional(const FeatureEntry& f) const {
++    // Features with a fallback path: geometry shaders and cull distances
++    // are only unavailable to shaders that use them, depth clip is
++    // approximated with depth clamp and null descriptors are replaced
++    // with zero-initialized dummy resources (DxvkNullResources).
++    return f.featureEnabled == &m_featuresEnabled.core.features.geometryShader
++        || f.featureEnabled == &m_featuresEnabled.core.features.shaderCullDistance
++        || f.featureEnabled == &m_featuresEnabled.extDepthClipEnable.depthClipEnable
++        || f.featureEnabled == &m_featuresEnabled.extRobustness2.robustBufferAccess2
++        || f.featureEnabled == &m_featuresEnabled.extRobustness2.nullDescriptor;
++  }
++
++
+   std::vector<DxvkDeviceCapabilities::FeatureEntry> DxvkDeviceCapabilities::getFeatureList() {
+     #define ENABLE_FEATURE(version, name, require)        \
+       FeatureEntry { nullptr, nullptr,                    \
+diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
+index 32cb90f..22246aa 100644
+--- a/src/dxvk/dxvk_device_info.h
++++ b/src/dxvk/dxvk_device_info.h
+@@ -339,6 +339,7 @@ namespace dxvk {
+ 
+     bool                                  m_hasMeshShader = false;
+     bool                                  m_hasFmask = false;
++    bool                                  m_hasPortabilitySubset = false;
+ 
+     std::vector<const VkExtensionProperties*> m_extensionList;
+ 
+@@ -397,6 +398,10 @@ namespace dxvk {
+ 
+     std::vector<FeatureEntry> getFeatureList();
+ 
++    bool isPortabilityDevice() const;
++
++    bool isPortabilityOptional(const FeatureEntry& f) const;
++
+     static Version decodeDriverVersion(VkDriverId driverId, uint32_t version);
+ 
+     template<typename T>
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index a3ee414..ede0b8e 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -578,10 +578,15 @@ namespace dxvk {
+       rsInfo.rasterizerDiscardEnable = VK_TRUE;
+     }
+ 
+-    // Set up depth clip state. Require depth clip support,
+-    // this is *not* equivalent to disabling depth clamp.
+-    rsDepthClipInfo.pNext = std::exchange(rsInfo.pNext, &rsDepthClipInfo);
+-    rsDepthClipInfo.depthClipEnable = state.rs.depthClipEnable();
++    // Set up depth clip state. Depth clip support is required on conformant
++    // drivers, this is *not* equivalent to disabling depth clamp. Portability
++    // drivers (e.g. MoltenVK) may lack it, approximate it with depth clamp.
++    if (device->features().extDepthClipEnable.depthClipEnable) {
++      rsDepthClipInfo.pNext = std::exchange(rsInfo.pNext, &rsDepthClipInfo);
++      rsDepthClipInfo.depthClipEnable = state.rs.depthClipEnable();
++    } else {
++      rsInfo.depthClampEnable = !state.rs.depthClipEnable();
++    }
+ 
+     // Set up conservative rasterization if requested by the application.
+     if (state.rs.conservativeMode() != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT) {
+diff --git a/src/dxvk/dxvk_null_resources.cpp b/src/dxvk/dxvk_null_resources.cpp
+new file mode 100644
+index 0000000..a00aee3
+--- /dev/null
++++ b/src/dxvk/dxvk_null_resources.cpp
+@@ -0,0 +1,135 @@
++#include "dxvk_context.h"
++#include "dxvk_device.h"
++#include "dxvk_null_resources.h"
++
++namespace dxvk {
++
++  // Large enough for a full D3D constant buffer
++  constexpr VkDeviceSize NullBufferSize = 65536u;
++
++  DxvkNullResources::DxvkNullResources(
++          DxvkDevice*           device,
++          DxvkContext*          context) {
++    DxvkBufferCreateInfo bufferInfo = { };
++    bufferInfo.size   = NullBufferSize;
++    bufferInfo.usage  = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
++                      | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
++                      | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT
++                      | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT
++                      | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++    bufferInfo.stages = device->getShaderPipelineStages()
++                      | VK_PIPELINE_STAGE_TRANSFER_BIT;
++    bufferInfo.access = VK_ACCESS_UNIFORM_READ_BIT
++                      | VK_ACCESS_SHADER_READ_BIT
++                      | VK_ACCESS_SHADER_WRITE_BIT
++                      | VK_ACCESS_TRANSFER_WRITE_BIT;
++    bufferInfo.debugName = "Null descriptor buffer";
++
++    m_buffer = device->createBuffer(bufferInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++    context->initBuffer(m_buffer);
++
++    DxvkBufferViewKey viewInfo = { };
++    viewInfo.format = VK_FORMAT_R32_UINT;
++    viewInfo.offset = 0u;
++    viewInfo.size   = NullBufferSize;
++
++    viewInfo.usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
++    m_bufferViewUniform = m_buffer->createView(viewInfo);
++
++    viewInfo.usage = VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
++    m_bufferViewStorage = m_buffer->createView(viewInfo);
++
++    for (uint32_t i = 0u; i < 2u; i++) {
++      bool storage = i != 0u;
++
++      m_image1D[i] = createImage(device, VK_IMAGE_TYPE_1D, 1u, storage);
++      m_image2D[i] = createImage(device, VK_IMAGE_TYPE_2D, 6u, storage);
++      m_image3D[i] = createImage(device, VK_IMAGE_TYPE_3D, 1u, storage);
++
++      context->initImage(m_image1D[i], VK_IMAGE_LAYOUT_UNDEFINED);
++      context->initImage(m_image2D[i], VK_IMAGE_LAYOUT_UNDEFINED);
++      context->initImage(m_image3D[i], VK_IMAGE_LAYOUT_UNDEFINED);
++
++      m_views[i][VK_IMAGE_VIEW_TYPE_1D]         = createView(m_image1D[i], VK_IMAGE_VIEW_TYPE_1D,         1u, storage);
++      m_views[i][VK_IMAGE_VIEW_TYPE_1D_ARRAY]   = createView(m_image1D[i], VK_IMAGE_VIEW_TYPE_1D_ARRAY,   1u, storage);
++      m_views[i][VK_IMAGE_VIEW_TYPE_2D]         = createView(m_image2D[i], VK_IMAGE_VIEW_TYPE_2D,         1u, storage);
++      m_views[i][VK_IMAGE_VIEW_TYPE_2D_ARRAY]   = createView(m_image2D[i], VK_IMAGE_VIEW_TYPE_2D_ARRAY,   1u, storage);
++      m_views[i][VK_IMAGE_VIEW_TYPE_CUBE]       = createView(m_image2D[i], VK_IMAGE_VIEW_TYPE_CUBE,       6u, storage);
++      m_views[i][VK_IMAGE_VIEW_TYPE_CUBE_ARRAY] = createView(m_image2D[i], VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, 6u, storage);
++      m_views[i][VK_IMAGE_VIEW_TYPE_3D]         = createView(m_image3D[i], VK_IMAGE_VIEW_TYPE_3D,         1u, storage);
++    }
++  }
++
++
++  DxvkNullResources::~DxvkNullResources() {
++
++  }
++
++
++  DxvkLegacyDescriptor DxvkNullResources::bufferDescriptor() const {
++    return m_buffer->getDescriptor(0u, NullBufferSize);
++  }
++
++
++  DxvkLegacyDescriptor DxvkNullResources::bufferViewDescriptor(bool storage) const {
++    const auto& view = storage ? m_bufferViewStorage : m_bufferViewUniform;
++    return view->getDescriptor(false)->legacy;
++  }
++
++
++  DxvkLegacyDescriptor DxvkNullResources::imageViewDescriptor(
++          VkImageViewType       viewType,
++          bool                  storage) const {
++    const auto& view = m_views[storage ? 1u : 0u][uint32_t(viewType)];
++    return view->getDescriptor(viewType)->legacy;
++  }
++
++
++  Rc<DxvkImage> DxvkNullResources::createImage(
++          DxvkDevice*           device,
++          VkImageType           type,
++          uint32_t              layers,
++          bool                  storage) {
++    DxvkImageCreateInfo info = { };
++    info.type         = type;
++    info.format       = storage ? VK_FORMAT_R32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
++    info.flags        = type == VK_IMAGE_TYPE_2D ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u;
++    info.sampleCount  = VK_SAMPLE_COUNT_1_BIT;
++    info.extent       = { 1u, 1u, 1u };
++    info.numLayers    = layers;
++    info.mipLevels    = 1u;
++    info.usage        = VK_IMAGE_USAGE_TRANSFER_DST_BIT
++                      | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT);
++    info.stages       = device->getShaderPipelineStages()
++                      | VK_PIPELINE_STAGE_TRANSFER_BIT;
++    info.access       = VK_ACCESS_SHADER_READ_BIT
++                      | VK_ACCESS_TRANSFER_WRITE_BIT
++                      | (storage ? VK_ACCESS_SHADER_WRITE_BIT : 0u);
++    info.tiling       = VK_IMAGE_TILING_OPTIMAL;
++    info.layout       = VK_IMAGE_LAYOUT_GENERAL;
++    info.debugName    = "Null descriptor image";
++
++    return device->createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++  }
++
++
++  Rc<DxvkImageView> DxvkNullResources::createView(
++    const Rc<DxvkImage>&        image,
++          VkImageViewType       type,
++          uint32_t              layers,
++          bool                  storage) {
++    DxvkImageViewKey info = { };
++    info.viewType   = type;
++    info.usage      = storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
++    info.format     = image->info().format;
++    info.layout     = VK_IMAGE_LAYOUT_GENERAL;
++    info.aspects    = VK_IMAGE_ASPECT_COLOR_BIT;
++    info.mipIndex   = 0u;
++    info.mipCount   = 1u;
++    info.layerIndex = 0u;
++    info.layerCount = layers;
++
++    return image->createView(info);
++  }
++
++}
+diff --git a/src/dxvk/dxvk_null_resources.h b/src/dxvk/dxvk_null_resources.h
+new file mode 100644
+index 0000000..bb9ba4d
+--- /dev/null
++++ b/src/dxvk/dxvk_null_resources.h
+@@ -0,0 +1,90 @@
++#pragma once
++
++#include "dxvk_buffer.h"
++#include "dxvk_descriptor.h"
++#include "dxvk_image.h"
++
++namespace dxvk {
++
++  class DxvkContext;
++  class DxvkDevice;
++
++  /**
++   * \brief Dummy resources for unbound descriptors
++   *
++   * Used in place of null descriptors on devices that do not
++   * support the \c nullDescriptor feature, e.g. MoltenVK. All
++   * resources are zero-initialized, so reads return zero just
++   * like they do for unbound resources in D3D. Writes go to the
++   * dummy resources and are discarded.
++   */
++  class DxvkNullResources {
++
++  public:
++
++    /**
++     * \brief Creates and initializes dummy resources
++     *
++     * \param [in] device DXVK device
++     * \param [in] context Context used to zero-initialize the
++     *    resources. Initialization is recorded into the context's
++     *    init command buffer, so the resources can be used right away.
++     */
++    DxvkNullResources(
++            DxvkDevice*           device,
++            DxvkContext*          context);
++
++    ~DxvkNullResources();
++
++    /**
++     * \brief Descriptor for an unbound uniform or storage buffer
++     * \returns Buffer descriptor covering the dummy buffer
++     */
++    DxvkLegacyDescriptor bufferDescriptor() const;
++
++    /**
++     * \brief Descriptor for an unbound texel buffer
++     *
++     * \param [in] storage Whether a storage texel buffer is needed
++     * \returns Buffer view descriptor
++     */
++    DxvkLegacyDescriptor bufferViewDescriptor(bool storage) const;
++
++    /**
++     * \brief Descriptor for an unbound image
++     *
++     * \param [in] viewType Image view type expected by the shader
++     * \param [in] storage Whether a storage image is needed
++     * \returns Image descriptor
++     */
++    DxvkLegacyDescriptor imageViewDescriptor(
++            VkImageViewType       viewType,
++            bool                  storage) const;
++
++  private:
++
++    Rc<DxvkBuffer>      m_buffer;
++    Rc<DxvkBufferView>  m_bufferViewUniform;
++    Rc<DxvkBufferView>  m_bufferViewStorage;
++
++    Rc<DxvkImage>       m_image1D[2];
++    Rc<DxvkImage>       m_image2D[2];
++    Rc<DxvkImage>       m_image3D[2];
++
++    std::array<Rc<DxvkImageView>, 7> m_views[2];
++
++    Rc<DxvkImage> createImage(
++            DxvkDevice*           device,
++            VkImageType           type,
++            uint32_t              layers,
++            bool                  storage);
++
++    Rc<DxvkImageView> createView(
++      const Rc<DxvkImage>&        image,
++            VkImageViewType       type,
++            uint32_t              layers,
++            bool                  storage);
++
++  };
++
++}
+diff --git a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
+index eb1e364..edd5426 100644
+--- a/src/dxvk/dxvk_shader.cpp
++++ b/src/dxvk/dxvk_shader.cpp
+@@ -396,8 +396,11 @@ namespace dxvk {
+     rsInfo.polygonMode        = VK_POLYGON_MODE_FILL;
+     rsInfo.lineWidth          = 1.0f;
+ 
+-    // Only use the fixed depth clip state if we can't make it dynamic
+-    if (!m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable) {
++    // Only use the fixed depth clip state if we can't make it dynamic.
++    // Without depth clip support, disabling depth clamp enables clipping.
++    if (!m_device->features().extDepthClipEnable.depthClipEnable) {
++      rsInfo.depthClampEnable = VK_FALSE;
++    } else if (!m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable) {
+       rsDepthClipInfo.pNext = std::exchange(rsInfo.pNext, &rsDepthClipInfo);
+       rsDepthClipInfo.depthClipEnable = VK_TRUE;
+     }
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index 073a4ad..4b0b8c6 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -124,6 +124,7 @@ dxvk_src = [
+   'dxvk_staging.cpp',
+   'dxvk_stats.cpp',
+   'dxvk_swapchain_blitter.cpp',
++  'dxvk_null_resources.cpp',
+   'dxvk_unbound.cpp',
+   'dxvk_util.cpp',
+ 
+-- 
+2.56.0
+
