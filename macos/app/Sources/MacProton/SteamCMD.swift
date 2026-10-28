@@ -21,9 +21,9 @@ enum SteamCMDError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notInstalled:
-            return "steamcmd ist nicht installiert. Installiere es mit: brew install --cask steamcmd"
+            return "steamcmd ist noch nicht eingerichtet. MacProton lädt es beim Start von Valve; prüfe die Internetverbindung."
         case .loginRequired(let account):
-            return "steamcmd ist für \(account) nicht angemeldet. Melde dich einmal im Terminal an."
+            return "steamcmd ist für \(account) nicht angemeldet."
         case .noWindowsVersion:
             return "Für dieses Spiel gibt es keine Windows-Version."
         case .failed(let message):

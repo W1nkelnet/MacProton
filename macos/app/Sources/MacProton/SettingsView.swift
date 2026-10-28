@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct SettingsView: View {
+    @EnvironmentObject private var login: SteamLogin
     @AppStorage("steamAccount") private var steamAccount = ""
     @AppStorage("runtimePath") private var runtimePath = ""
     @AppStorage("syncSaves") private var syncSaves = true
@@ -11,6 +12,11 @@ struct SettingsView: View {
             Section("Steam") {
                 TextField("Konto", text: $steamAccount, prompt: Text(detectSteamAccount() ?? "Steam-Kontoname"))
                 Text("Leer lassen, um das zuletzt in Steam angemeldete Konto zu verwenden.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Bei Steam anmelden …") {
+                    login.present(account: steamAccount.isEmpty ? (detectSteamAccount() ?? "") : steamAccount)
+                }
+                Text("steamcmd, mit dem MacProton Spiele lädt, braucht einmalig deine Steam-Anmeldung.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Spielstände") {

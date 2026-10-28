@@ -16,6 +16,9 @@ out=${1:-$src/.build/app}
 runtime=${2:-}
 app=$out/MacProton.app
 version=$(git -C "$src" describe --always --dirty 2>/dev/null || echo dev)
+# Release builds are tagged vX.Y.Z
+short_version=$(git -C "$src" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || true)
+short_version=${short_version:-0.1.0}
 
 swift build --package-path "$src" -c release
 
@@ -33,7 +36,7 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>CFBundleName</key><string>MacProton</string>
     <key>CFBundleDisplayName</key><string>MacProton</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>CFBundleShortVersionString</key><string>$short_version</string>
     <key>CFBundleVersion</key><string>$version</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.games</string>

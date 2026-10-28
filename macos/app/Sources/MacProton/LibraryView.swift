@@ -6,6 +6,8 @@ struct LibraryView: View {
     @EnvironmentObject private var runner: Runner
     @EnvironmentObject private var installer: Installer
     @EnvironmentObject private var sync: LibrarySync
+    @EnvironmentObject private var login: SteamLogin
+    @EnvironmentObject private var steamcmdSetup: SteamCMDSetup
     @State private var showAdd = false
     @State private var steamRunning = Paths.steamRunning
     @State private var steamOnline = SteamClient.isOnline
@@ -84,15 +86,11 @@ struct LibraryView: View {
         .onChange(of: sync.loginRequired) { _, account in
             if let account { installer.loginRequired = account; sync.loginRequired = nil }
         }
-        .alert("Steam-Anmeldung nötig", isPresented: loginBinding) {
-            Button("Terminal öffnen") {
-                if let account = installer.loginRequired { installer.openLoginTerminal(account: account) }
-                installer.loginRequired = nil
-            }
-            Button("Abbrechen", role: .cancel) { installer.loginRequired = nil }
-        } message: {
-            Text("steamcmd braucht einmalig dein Passwort und ggf. den Steam-Guard-Code für \(installer.loginRequired ?? ""). MacProton öffnet dafür ein Terminal; die App selbst sieht deine Zugangsdaten nicht. Danach den Download erneut starten.")
+        .onChange(of: installer.loginRequired) { _, account in
+            if let account { login.present(account: account); installer.loginRequired = nil }
         }
+        .sheet(isPresented: $login.isPresented) { LoginView() }
+        .onAppear { steamcmdSetup.setUpIfNeeded() }
         .alert("Steam ist offline", isPresented: offlineBinding) {
             Button("Offline spielen") {
                 if let game = runner.offlineGame { runner.play(game, allowOffline: true) }
@@ -118,8 +116,14 @@ struct LibraryView: View {
             Banner(text: "Proton-Laufzeit nicht gefunden (\(Paths.runtime.path)). Lege den Ordner in den Einstellungen fest.",
                    color: .orange)
         }
-        if Paths.steamcmd == nil {
-            Banner(text: "steamcmd fehlt: brew install --cask steamcmd", color: .orange)
+        if Paths.needsRosetta {
+            Banner(text: "Rosetta 2 fehlt. Die Windows-Laufzeit braucht es auf Macs mit Apple-Chip.",
+                   color: .orange, action: ("Installieren", { installer.installRosetta() }))
+        }
+        if steamcmdSetup.running {
+            Banner(text: "steamcmd wird von Valve geladen und eingerichtet …", color: .yellow)
+        } else if let error = steamcmdSetup.error {
+            Banner(text: error, color: .orange, action: ("Erneut versuchen", { steamcmdSetup.setUpIfNeeded() }))
         }
         if !steamRunning {
             Banner(text: "Steam läuft nicht. Spiele brauchen den angemeldeten Steam-Client.", color: .yellow)
@@ -140,7 +144,7 @@ struct LibraryView: View {
     }
 
     /// steamcmd's login replaced the Steam client's session
-    private var steamcmdBusy: Bool { !installer.jobs.isEmpty || sync.running }
+    private var steamcmdBusy: Bool { !installer.jobs.isEmpty || sync.running || login.isPresented }
 
     private var offlineBinding: Binding<Bool> {
         Binding(get: { runner.offlineGame != nil }, set: { if !$0 { runner.offlineGame = nil } })
@@ -157,10 +161,6 @@ struct LibraryView: View {
 
     private var resultBinding: Binding<Bool> {
         Binding(get: { sync.lastResult != nil }, set: { if !$0 { sync.lastResult = nil } })
-    }
-
-    private var loginBinding: Binding<Bool> {
-        Binding(get: { installer.loginRequired != nil }, set: { if !$0 { installer.loginRequired = nil } })
     }
 }
 

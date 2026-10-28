@@ -17,11 +17,26 @@ final class Installer: ObservableObject {
 
     func isBusy(_ game: Game) -> Bool { jobs[game.appID] != nil }
 
+    /// Installs Rosetta 2 in Terminal, where macOS may ask for an admin password.
+    func installRosetta() {
+        let script = Paths.support.appendingPathComponent("install-rosetta.command")
+        let text = """
+        #!/bin/bash
+        echo "Rosetta 2 für MacProton installieren …"
+        /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+        echo
+        echo "Fertig. Dieses Fenster kann geschlossen werden."
+        """
+        try? text.write(to: script, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        NSWorkspace.shared.open(script)
+    }
+
     func install(_ game: Game, library: Library) {
         guard jobs[game.appID] == nil else { return }
         let account = self.account
         guard !account.isEmpty else {
-            lastError = "Kein Steam-Konto gefunden. Trage es in den Einstellungen ein."
+            loginRequired = ""  // opens the login window
             return
         }
         jobs[game.appID] = Job(progress: 0, status: "Verbinde mit Steam …")
@@ -52,23 +67,5 @@ final class Installer: ObservableObject {
             }
             jobs[appID] = nil
         }
-    }
-
-    /// Opens Terminal with an interactive steamcmd login, so the user enters
-    /// password and Steam Guard code there; steamcmd caches the login.
-    func openLoginTerminal(account: String) {
-        guard let steamcmd = Paths.steamcmd else { return }
-        let script = Paths.support.appendingPathComponent("steam-login.command")
-        let quotedAccount = account.replacingOccurrences(of: "'", with: "")
-        let text = """
-        #!/bin/bash
-        echo "Anmeldung für MacProton. Gib Passwort und ggf. Steam-Guard-Code ein."
-        HOME='\(Paths.steamcmdHome.path)' '\(steamcmd)' +login '\(quotedAccount)' +quit
-        echo
-        echo "Fertig. Dieses Fenster kann geschlossen werden."
-        """
-        try? text.write(to: script, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-        NSWorkspace.shared.open(script)
     }
 }

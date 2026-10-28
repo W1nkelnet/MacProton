@@ -100,8 +100,21 @@ enum Paths {
         FileManager.default.isExecutableFile(atPath: runtime.appendingPathComponent("run.sh").path)
     }
 
-    static let steamcmd: String? = ["/opt/homebrew/bin/steamcmd", "/usr/local/bin/steamcmd"]
-        .first { FileManager.default.isExecutableFile(atPath: $0) }
+    /// The app's own steamcmd, set up on first launch
+    static let steamcmdDir = support.appendingPathComponent("steamcmd", isDirectory: true)
+
+    static var steamcmd: String? {
+        let path = steamcmdDir.appendingPathComponent("steamcmd.sh").path
+        return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+    }
+
+    /// The runtime is x86_64, which Apple silicon Macs run through Rosetta 2.
+    static var needsRosetta: Bool {
+        var arm64: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        sysctlbyname("hw.optional.arm64", &arm64, &size, nil, 0)
+        return arm64 == 1 && !FileManager.default.fileExists(atPath: "/Library/Apple/usr/libexec/oah/libRosettaRuntime")
+    }
 
     /// HOME for steamcmd. Its default data directory is the Steam client's
     /// (~/Library/Application Support/Steam), and the client overwrites

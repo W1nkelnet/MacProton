@@ -14,7 +14,7 @@ final class LibrarySync: ObservableObject {
     func sync(library: Library, account: String) {
         guard !running else { return }
         guard !account.isEmpty else {
-            lastError = "Kein Steam-Konto gefunden. Trage es in den Einstellungen ein."
+            loginRequired = ""  // opens the login window
             return
         }
         running = true
