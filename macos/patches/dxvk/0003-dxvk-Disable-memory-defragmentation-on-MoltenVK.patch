@@ -1,0 +1,35 @@
+From 66b88fdc41965815ed53b17e08b2c782f61e1c5d Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 07:57:35 +0100
+Subject: [PATCH] dxvk: Disable memory defragmentation on MoltenVK.
+
+Games lost the device with Metal's "Invalid Resource" error right after
+unloading many assets, e.g. when going back to the main menu, and the
+crash is gone with defragmentation disabled. Apple GPUs share system
+memory, so there is no fragmented video memory to win back.
+
+---
+ src/dxvk/dxvk_memory.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index fdd5146..ada5005 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -2744,6 +2744,13 @@ namespace dxvk {
+       if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA))
+         return m_device->properties().vk13.minSubgroupSize >= 16u;
+ 
++      // On MoltenVK, games lose the device with Metal's "Invalid Resource"
++      // error right after unloading many assets, when defragmentation starts
++      // relocating resources. Apple GPUs share system memory, so there is no
++      // fragmented video memory to win back.
++      if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MOLTENVK))
++        return false;
++
+       return true;
+     } else {
+       return option == Tristate::True;
+-- 
+2.56.0
+
