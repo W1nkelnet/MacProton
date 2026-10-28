@@ -141,7 +141,7 @@ struct LibraryView: View {
     /// while no game runs and steamcmd is free.
     private func installNextUpdate() {
         guard UpdateChecker.autoUpdate, runner.running.isEmpty, !steamcmdBusy, !updates.checking,
-              let game = library.games.first(where: { updates.available.contains($0.appID) }) else { return }
+              let game = library.games.first(where: { updates.available.contains($0.appID) && $0.locationAvailable }) else { return }
         installer.install(game, library: library)
     }
 
@@ -403,7 +403,7 @@ struct GameCard: View {
             } label: {
                 Label("Installieren", systemImage: "arrow.down.circle").frame(maxWidth: .infinity)
             }
-            .disabled(installer.isBusy(game))
+            .disabled(installer.isBusy(game) || !game.locationAvailable)
         }
     }
 

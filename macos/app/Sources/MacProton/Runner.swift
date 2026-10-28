@@ -47,6 +47,10 @@ final class Runner: ObservableObject {
             lastError = "Proton-Laufzeit nicht gefunden in \(Paths.runtime.path). Lege sie in den Einstellungen fest."
             return
         }
+        guard game.locationAvailable else {
+            lastError = "Das Laufwerk „\(game.externalVolume ?? "")“ mit \(game.name) ist nicht verbunden."
+            return
+        }
         guard Paths.steamRunning else {
             lastError = "Steam läuft nicht. Starte Steam und melde dich an."
             return

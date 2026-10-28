@@ -34,8 +34,27 @@ final class Installer: ObservableObject {
         NSWorkspace.shared.open(script)
     }
 
+    /// Downloads or updates the game. A new installation goes to the default
+    /// location from the settings; one already begun stays where it is.
     func install(_ game: Game, library: Library) {
         guard !isBusy(game) else { return }
+        // Not a new installation, only its disk is missing
+        guard game.locationAvailable else { return start(game, library: library) }
+        let location = Paths.gameLocation
+        guard game.isInstalled || FileManager.default.fileExists(atPath: game.installDir) else {
+            if location != Paths.gamesDir {
+                guard FileManager.default.fileExists(atPath: location.path) else {
+                    lastError = "Der Standard-Speicherort „\(location.path)“ ist nicht da. Schließ das Laufwerk an oder ändere ihn in den Einstellungen."
+                    return
+                }
+            }
+            install(game, in: location, library: library)
+            return
+        }
+        start(game, library: library)
+    }
+
+    private func start(_ game: Game, library: Library) {
         guard game.locationAvailable else {
             lastError = "Das Laufwerk „\(game.externalVolume ?? "")“ mit \(game.name) ist nicht verbunden. Schließ es an oder wähle per Rechtsklick „Installieren in …“ einen anderen Ort."
             return
@@ -77,15 +96,19 @@ final class Installer: ObservableObject {
 
     /// Installs the game into its own folder in `folder` from now on.
     func install(_ game: Game, in folder: URL, library: Library) {
+        guard !isBusy(game) else { return }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let dir = GameLocation.installDir(for: game, in: folder)
         if let problem = GameLocation.installProblem(game, dir: dir) {
             lastError = problem
             return
         }
+        // Created now, so that it stays the game's place even if the download does not start
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var updated = library.games.first { $0.appID == game.appID } ?? game
         updated.installDir = dir.path
         library.upsert(updated)
-        install(updated, library: library)
+        start(updated, library: library)
     }
 
     /// Moves the installed game's folder into `folder`.

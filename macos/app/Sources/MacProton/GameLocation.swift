@@ -40,7 +40,7 @@ enum GameLocation {
         panel.canCreateDirectories = true
         panel.prompt = prompt
         panel.message = message
-        panel.directoryURL = lastFolder
+        panel.directoryURL = lastFolder ?? Paths.gameLocation
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         lastFolder = url
         return url

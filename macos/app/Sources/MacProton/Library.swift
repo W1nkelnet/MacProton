@@ -108,6 +108,15 @@ enum Paths {
 
     static let libraryFile = support.appendingPathComponent("library.json")
     static let gamesDir = support.appendingPathComponent("games", isDirectory: true)
+
+    /// Where new games go: the folder from the settings, e.g. on an external
+    /// disk, or else the games folder
+    static var gameLocation: URL {
+        if let custom = UserDefaults.standard.string(forKey: "defaultGameLocation"), !custom.isEmpty {
+            return URL(fileURLWithPath: (custom as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        return gamesDir
+    }
     static let logsDir = support.appendingPathComponent("logs", isDirectory: true)
 
     /// Proton runtime: dist directory produced by macos/build.sh, containing
@@ -173,8 +182,18 @@ enum Paths {
 @MainActor
 final class Library: ObservableObject {
     @Published var games: [Game] = []
+    private var volumeObservers: [NSObjectProtocol] = []
 
-    init() { load() }
+    init() {
+        load()
+        // Whether games are installed depends on their disk being connected
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            volumeObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.objectWillChange.send() }
+            })
+        }
+    }
 
     func load() {
         guard let data = try? Data(contentsOf: Paths.libraryFile),

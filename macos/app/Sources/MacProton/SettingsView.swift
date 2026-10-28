@@ -8,6 +8,7 @@ struct SettingsView: View {
     @AppStorage("syncSaves") private var syncSaves = true
     @AppStorage("metalHUD") private var metalHUD = false
     @AppStorage("autoUpdate") private var autoUpdate = false
+    @AppStorage("defaultGameLocation") private var gameLocation = ""
 
     var body: some View {
         Form {
@@ -25,6 +26,29 @@ struct SettingsView: View {
                 Toggle("Spielstände über Steam Cloud synchronisieren", isOn: $syncSaves)
                 Text("Für Spiele, deren Windows- und Mac-Version dieselben Spielstände nutzen: Der Speicherordner im Prefix wird mit dem Mac-Ordner verknüpft, den Steam synchronisiert. Vorher werden beide gesichert.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Speicherort für Spiele") {
+                HStack {
+                    TextField("Ordner", text: $gameLocation, prompt: Text(Paths.gamesDir.path))
+                    Button("Wählen …") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true
+                        panel.canChooseFiles = false
+                        panel.canCreateDirectories = true
+                        panel.prompt = "Wählen"
+                        panel.directoryURL = Paths.gameLocation
+                        if panel.runModal() == .OK, let url = panel.url { gameLocation = url.path }
+                    }
+                    if !gameLocation.isEmpty {
+                        Button("Zurücksetzen") { gameLocation = "" }
+                    }
+                }
+                Text("Neue Spiele werden hier installiert, zum Beispiel auf einer externen Festplatte. Leer lassen für den Ordner von MacProton. Installierte Spiele bleiben, wo sie sind: Verschieben geht per Rechtsklick auf das Spiel, ein anderer Ort für ein einzelnes Spiel mit „Installieren in …“.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !gameLocation.isEmpty && !FileManager.default.fileExists(atPath: Paths.gameLocation.path) {
+                    Label("Ordner nicht gefunden. Ist das Laufwerk angeschlossen?", systemImage: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                }
             }
             Section("Updates") {
                 Toggle("Spiel-Updates automatisch laden", isOn: $autoUpdate)

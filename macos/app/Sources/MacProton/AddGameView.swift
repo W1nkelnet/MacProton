@@ -93,7 +93,7 @@ struct AddGameView: View {
                 let result = try await SteamCMD.appInfo(appID)
                 info = result
                 let folder = result.name.components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: " ")
-                installDir = Paths.gamesDir.appendingPathComponent(folder).path
+                installDir = Paths.gameLocation.appendingPathComponent(folder).path
             } catch {
                 self.error = error.localizedDescription
             }
