@@ -50,9 +50,19 @@ struct Game: Codable, Identifiable, Hashable {
         URL(string: "https://cdn.cloudflare.steamstatic.com/steam/apps/\(appID)/header.jpg")
     }
 
+    /// steamcmd's app manifest says whether the download is complete; games
+    /// added by hand have none, so fall back to the executable.
     var isInstalled: Bool {
-        FileManager.default.fileExists(atPath: (installDir as NSString).appendingPathComponent(executable))
+        let manifest = (installDir as NSString).appendingPathComponent("steamapps/appmanifest_\(appID).acf")
+        if let text = try? String(contentsOfFile: manifest, encoding: .utf8),
+           let flags = VDF.parse(text)["AppState", "StateFlags"]?.string.flatMap(Int.init) {
+            return flags & 4 != 0  // StateFullyInstalled
+        }
+        return FileManager.default.fileExists(atPath: (installDir as NSString).appendingPathComponent(executable))
     }
+
+    /// Launched through another store's client, e.g. "steam2ea://launchgame/…"
+    var launchesViaURL: Bool { executable.contains("://") }
 }
 
 /// Paths and settings shared by the app.

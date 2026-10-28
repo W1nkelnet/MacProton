@@ -113,7 +113,8 @@ enum SteamCMD {
 
     /// "Update state (0x61) downloading, progress: 38.63 (1428051780 / 3696370087)"
     static func parseProgress(_ line: String) -> Double? {
-        guard let range = line.range(of: "progress: ") else { return nil }
+        // The final "Update state (0x0) unknown, progress: 0.00 (0 / 0)" is no progress
+        guard let range = line.range(of: "progress: "), !line.contains("(0 / 0)") else { return nil }
         let number = line[range.upperBound...].prefix { $0.isNumber || $0 == "." }
         return Double(number).map { $0 / 100 }
     }
@@ -170,7 +171,8 @@ private final class OutputState: @unchecked Sendable {
         output += text
         buffer += text
         var lines: [String] = []
-        while let index = buffer.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
+        // isNewline also matches "\r\n", which Swift treats as one Character
+        while let index = buffer.firstIndex(where: \.isNewline) {
             let line = String(buffer[..<index]).trimmingCharacters(in: .whitespaces)
             buffer.removeSubrange(...index)
             if !line.isEmpty { lines.append(line) }
