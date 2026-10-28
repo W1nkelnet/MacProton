@@ -16,7 +16,7 @@ struct LibraryView: View {
     }
 
     private var shownGames: [Game] {
-        filter == .installed ? library.games.filter(\.isInstalled) : library.games
+        filter == .installed ? library.games.filter { $0.isInstalled || $0.isInstalledNatively } : library.games
     }
 
     private let columns = [GridItem(.adaptive(minimum: 230, maximum: 320), spacing: 16)]
@@ -206,7 +206,7 @@ struct GameCard: View {
                     if game.hasNativeMac == true {
                         Image(systemName: "apple.logo")
                             .foregroundStyle(.secondary)
-                            .help("Es gibt eine native Mac-Version, die direkt in Steam läuft.")
+                            .help("Native Mac-Version: MacProton startet sie über Steam.")
                     }
                 }
                 if !(game.cloudSaves ?? []).isEmpty {
@@ -214,7 +214,8 @@ struct GameCard: View {
                         .font(.caption2).foregroundStyle(.secondary)
                         .help("Spielstände werden plattformübergreifend über Steam Cloud synchronisiert (Mac-Speicherort).")
                 }
-                if let issues = game.issues, !issues.isEmpty {
+                // The issues concern the Windows version under Wine
+                if !game.runsNatively, let issues = game.issues, !issues.isEmpty {
                     HStack(spacing: 6) {
                         ForEach(issues, id: \.self) { issue in
                             Text(issue.title)
@@ -243,6 +244,15 @@ struct GameCard: View {
             }
         } else if runner.isRunning(game) {
             Label("Läuft", systemImage: "play.circle.fill").font(.caption).foregroundStyle(.green)
+        } else if game.runsNatively {
+            if !game.isInstalledNatively {
+                Text("Mac-Version · Installation über Steam").font(.caption).foregroundStyle(.secondary)
+            } else if let played = game.lastPlayed {
+                Text("Mac-Version · zuletzt gespielt " + played.formatted(.relative(presentation: .named)))
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("Mac-Version · in Steam installiert").font(.caption).foregroundStyle(.secondary)
+            }
         } else if !game.isInstalled {
             Text("Nicht installiert" + sizeText).font(.caption).foregroundStyle(.secondary)
         } else if let played = game.lastPlayed {
@@ -256,6 +266,19 @@ struct GameCard: View {
     @ViewBuilder private var action: some View {
         if runner.isRunning(game) {
             Button("Beenden", role: .destructive) { runner.stop(game) }
+        } else if game.runsNatively {
+            let installed = game.isInstalledNatively
+            Button {
+                runner.playNative(game)
+                if installed { library.markPlayed(game) }
+            } label: {
+                Label(installed ? "Spielen" : "Mit Steam installieren",
+                      systemImage: installed ? "play.fill" : "arrow.down.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(runner.reconnecting)
+            .help("Startet die native Mac-Version über Steam.")
         } else if game.isInstalled {
             Button {
                 runner.play(game)
@@ -276,8 +299,23 @@ struct GameCard: View {
     }
 
     @ViewBuilder private var menu: some View {
-        Button("Aktualisieren / Dateien prüfen") { installer.install(game, library: library) }
+        if game.runsNatively {
+            // The Windows version stays available, e.g. if the Mac version is outdated
+            if game.isInstalled {
+                Button("Windows-Version spielen") {
+                    runner.play(game)
+                    library.markPlayed(game)
+                }
+                .disabled(installer.isBusy(game) || runner.isRunning(game))
+            }
+            Button(game.isInstalled ? "Windows-Version aktualisieren" : "Windows-Version installieren") {
+                installer.install(game, library: library)
+            }
             .disabled(installer.isBusy(game) || runner.isRunning(game))
+        } else {
+            Button("Aktualisieren / Dateien prüfen") { installer.install(game, library: library) }
+                .disabled(installer.isBusy(game) || runner.isRunning(game))
+        }
         Divider()
         Button("Spielordner im Finder zeigen") { reveal(game.installDir) }
         Button("Prefix im Finder zeigen") { reveal(runner.prefix(of: game).path) }

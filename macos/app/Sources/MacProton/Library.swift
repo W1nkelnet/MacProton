@@ -61,6 +61,11 @@ struct Game: Codable, Identifiable, Hashable {
         return FileManager.default.fileExists(atPath: (installDir as NSString).appendingPathComponent(executable))
     }
 
+    /// Has a macOS version, which runs through the Steam client instead of Wine
+    var runsNatively: Bool { hasNativeMac == true }
+
+    var isInstalledNatively: Bool { runsNatively && SteamClient.isInstalled(appID) }
+
     /// Launched through another store's client, e.g. "steam2ea://launchgame/…"
     var launchesViaURL: Bool { executable.contains("://") }
 }

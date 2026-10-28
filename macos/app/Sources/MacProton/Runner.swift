@@ -115,24 +115,40 @@ final class Runner: ObservableObject {
         }
     }
 
+    /// Starts the macOS version through the Steam client, which installs it
+    /// first if needed, reconnecting the client if steamcmd took its session.
+    func playNative(_ game: Game) {
+        guard !reconnecting else { return }
+        if Paths.steamRunning && SteamClient.isOnline == false && running.isEmpty {
+            reconnect { _ in SteamClient.runOrInstall(game.appID) }
+        } else {
+            SteamClient.runOrInstall(game.appID)
+        }
+    }
+
     /// Restarts the Steam client so it logs in again, then starts the game.
     /// Automatic reconnects (after steamcmd ran) skip quietly while games run.
     func reconnectSteam(then game: Game? = nil, automatic: Bool = false) {
-        guard !reconnecting, running.isEmpty else {
-            if !running.isEmpty && !automatic {
-                lastError = "Beende zuerst die laufenden Spiele, Steam wird dafür neu gestartet."
-            }
+        guard running.isEmpty else {
+            if !automatic { lastError = "Beende zuerst die laufenden Spiele, Steam wird dafür neu gestartet." }
             return
         }
+        reconnect { online in
+            if let game {
+                if online { self.play(game) } else { self.offlineGame = game }
+            } else if !online {
+                self.lastError = "Steam hat sich nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster."
+            }
+        }
+    }
+
+    private func reconnect(then completion: @escaping (Bool) -> Void) {
+        guard !reconnecting else { return }
         reconnecting = true
         Task {
             let online = await SteamClient.reconnect()
             reconnecting = false
-            if let game {
-                if online { play(game) } else { offlineGame = game }
-            } else if !online {
-                lastError = "Steam hat sich nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster."
-            }
+            completion(online)
         }
     }
 

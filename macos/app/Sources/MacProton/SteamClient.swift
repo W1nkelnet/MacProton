@@ -7,8 +7,36 @@ import Foundation
 /// lobbies or other online features until it logs in again.
 enum SteamClient {
     static let bundleID = "com.valvesoftware.steam"
-    private static let connectionLog = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Steam/logs/connection_log.txt")
+    private static let steamDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Steam")
+    private static let connectionLog = steamDir.appendingPathComponent("logs/connection_log.txt")
+
+    /// The client's library folders, each with a steamapps folder
+    static var libraryFolders: [String] {
+        let file = steamDir.appendingPathComponent("steamapps/libraryfolders.vdf")
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return [steamDir.path] }
+        let paths = VDF.parse(text)["libraryfolders"]?.entries.compactMap { $0.1["path"]?.string } ?? []
+        return paths.isEmpty ? [steamDir.path] : paths
+    }
+
+    /// Whether the client has the game fully installed, i.e. its macOS version
+    static func isInstalled(_ appID: Int) -> Bool {
+        libraryFolders.contains { folder in
+            let manifest = (folder as NSString).appendingPathComponent("steamapps/appmanifest_\(appID).acf")
+            guard let text = try? String(contentsOfFile: manifest, encoding: .utf8),
+                  let flags = VDF.parse(text)["AppState", "StateFlags"]?.string.flatMap(Int.init) else { return false }
+            return flags & 4 != 0  // StateFullyInstalled
+        }
+    }
+
+    /// Runs the game in the client, or opens its install dialog. "steam://run"
+    /// alone does not install a game the client wrongly takes as installed,
+    /// e.g. after its Windows version ran here and reported its app id.
+    static func runOrInstall(_ appID: Int) {
+        let action = isInstalled(appID) ? "run" : "install"
+        NSWorkspace.shared.open(URL(string: "steam://open/games")!)
+        if let url = URL(string: "steam://\(action)/\(appID)") { NSWorkspace.shared.open(url) }
+    }
 
     /// The client's last connection state: true when logged on, false when
     /// logged off, nil while connecting or when the log is unreadable.
