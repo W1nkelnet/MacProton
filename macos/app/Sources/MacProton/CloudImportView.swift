@@ -10,6 +10,7 @@ struct CloudImportView: View {
     @State private var items: [CloudImport.Item] = []
     @State private var result: String?
     @State private var error: String?
+    @State private var files: [CloudImport.FileState] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -22,16 +23,19 @@ struct CloudImportView: View {
             HStack {
                 Text("1.").bold()
                 Button("Steam-Cloud-Seite öffnen") { NSWorkspace.shared.open(CloudImport.pageURL(game.appID)) }
-                Text("und dort jede Datei mit „Download“ laden.").font(.callout).foregroundStyle(.secondary)
+                Text("und dort alle Dateien der Liste mit „Herunterladen“ laden.").font(.callout).foregroundStyle(.secondary)
             }
+            fileList
             HStack {
                 Text("2.").bold()
                 Button("Geladene Dateien auswählen …", action: pickFiles)
+                Text("Mehrere auf einmal mit ⌘-Klick.").font(.callout).foregroundStyle(.secondary)
             }
 
             if !items.isEmpty {
-                Text("3. Pfade prüfen: „Pfad“ und „Ordner“ wie auf der Steam-Seite unter „File Name“ und „Folder“.")
+                Text("3. Pfade prüfen: „Pfad“ ist die Spalte „Dateiname“ der Steam-Seite, „Ordner“ die Spalte „Verzeichnis“. Ist „Verzeichnis“ leer, gilt „Leer (Steam-Cloud-Ordner)“.")
                     .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach($items) { $item in row($item) }
@@ -65,6 +69,48 @@ struct CloudImportView: View {
         }
         .padding(20)
         .frame(width: 560)
+        .onAppear(perform: refresh)
+    }
+
+    /// The files that belong to the game, and which of them are imported
+    @ViewBuilder private var fileList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if files.isEmpty {
+                Text("Steam kennt auf diesem Mac noch keine Cloud-Dateien des Spiels. Lade alle Dateien, die die Seite zeigt.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Dazu gehören laut Steam:").font(.caption).foregroundStyle(.secondary)
+                ForEach(files) { file in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(file.folder == .steamCloud ? file.path : "\(file.path) (\(file.folder.title))")
+                            .font(.caption.monospaced())
+                        Spacer()
+                        status(file.status)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    @ViewBuilder private func status(_ status: CloudImport.FileState.Status) -> some View {
+        switch status {
+        case .notImported:
+            Text("noch nicht importiert").font(.caption).foregroundStyle(.secondary)
+        case .imported(let date):
+            Label("importiert \(date.formatted(date: .abbreviated, time: .shortened))", systemImage: "checkmark.circle.fill")
+                .font(.caption).foregroundStyle(.green)
+        case .changedSince(let date):
+            Label("importiert \(date.formatted(date: .abbreviated, time: .shortened)), seitdem geändert", systemImage: "pencil.circle.fill")
+                .font(.caption).foregroundStyle(.orange)
+                .help("Das Spiel hat die Datei seit dem Import neu gespeichert.")
+        }
+    }
+
+    private func refresh() {
+        files = CloudImport.overview(for: game, prefix: runner.prefix(of: game))
     }
 
     private func row(_ item: Binding<CloudImport.Item>) -> some View {
@@ -81,6 +127,11 @@ struct CloudImportView: View {
             if let target = destination(item.wrappedValue) {
                 Text((FileManager.default.fileExists(atPath: target.path) ? "Ersetzt (mit Sicherung): " : "Neu: ") + target.path)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                if let earlier = CloudImport.record(path: item.wrappedValue.path, folder: item.wrappedValue.folder,
+                                                    in: CloudImport.records(game.appID)) {
+                    Text("Schon importiert am \(earlier.date.formatted(date: .abbreviated, time: .shortened)).")
+                        .font(.caption).foregroundStyle(.orange)
+                }
             } else {
                 Text("Ungültiger Pfad").font(.caption).foregroundStyle(.red)
             }
@@ -112,6 +163,7 @@ struct CloudImportView: View {
             if let backup = outcome.backup { text += " Sicherung der ersetzten Dateien: \(backup.path)" }
             result = text
             error = nil
+            refresh()
         } catch {
             self.error = "Import fehlgeschlagen: \(error.localizedDescription)"
         }
