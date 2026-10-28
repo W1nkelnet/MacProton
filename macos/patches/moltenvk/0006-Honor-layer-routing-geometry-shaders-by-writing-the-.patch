@@ -1,0 +1,356 @@
+From d1dbb5d068d7cc6d4db8d584d2a192b8401981c7 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 00:45:15 +0100
+Subject: [PATCH] Honor layer-routing geometry shaders by writing the layer in
+ the vertex shader.
+
+Metal has no geometry shaders, and MoltenVK leaves them out of a
+pipeline. Unreal renders into volume textures, such as the color
+grading LUT of its tonemapper, with a geometry shader that passes each
+triangle through and routes it to the slice its vertex shader chose.
+Without it everything lands in slice 0 and the whole scene turned black
+after tonemapping, as in Medieval Dynasty. When the geometry shader
+only passes triangles through and takes its Layer from an input, add a
+Layer output to the vertex shader that writes that input instead.
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm | 307 ++++++++++++++++++++
+ 1 file changed, 307 insertions(+)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index 7512cd3..9469e6d 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -608,6 +608,287 @@ static void warnIfUnsupportedRobustnessEnabled(MVKPipeline* pipeline, const T* p
+ 	}
+ }
+ 
++#pragma mark Layer-routing geometry shaders
++
++// Metal has no geometry shaders. A geometry shader that passes each triangle through and routes it to
++// a layer it reads from one of its inputs, as Unreal does to render into volume textures, does what a
++// vertex shader can do itself by writing that input to the Layer built-in, which Metal supports.
++namespace {
++
++struct MVKSpvInst { uint32_t op, len, pos; };
++
++static std::vector<MVKSpvInst> mvkSpvInstructions(const std::vector<uint32_t>& spv) {
++	std::vector<MVKSpvInst> insts;
++	for (uint32_t pos = 5; pos < spv.size(); ) {
++		uint32_t len = spv[pos] >> 16;
++		if (len == 0 || pos + len > spv.size()) { return {}; }
++		insts.push_back({spv[pos] & 0xffff, len, pos});
++		pos += len;
++	}
++	return insts;
++}
++
++// Number of words of a literal string starting at pos, including its terminator.
++static uint32_t mvkSpvStringWords(const std::vector<uint32_t>& spv, uint32_t pos) {
++	return uint32_t(strlen(reinterpret_cast<const char*>(&spv[pos])) / 4 + 1);
++}
++
++enum MVKSpvKind { kMVKSpvKindNone, kMVKSpvKindFloat, kMVKSpvKindInt, kMVKSpvKindUInt };
++
++struct MVKLayerSource {
++	uint32_t location = 0;
++	uint32_t component = 0;
++	std::vector<std::pair<uint32_t, MVKSpvKind>> conversions;	// opcode and result kind, from the input to the layer
++	MVKSpvKind layerKind = kMVKSpvKindUInt;
++};
++
++struct MVKSpvModuleInfo {
++	std::vector<MVKSpvInst> insts;
++	std::unordered_map<uint32_t, uint32_t> defs;			// result id -> instruction index
++	std::unordered_map<uint32_t, uint32_t> builtins, locations, components;
++	uint32_t entryIdx = UINT32_MAX;
++
++	MVKSpvModuleInfo(const std::vector<uint32_t>& spv, uint32_t model, const char* entryName) {
++		insts = mvkSpvInstructions(spv);
++		for (uint32_t i = 0; i < insts.size(); i++) {
++			auto& in = insts[i];
++			const uint32_t* w = &spv[in.pos];
++			switch (in.op) {
++				case spv::OpEntryPoint:
++					if (w[1] == model && entryName && strcmp(reinterpret_cast<const char*>(&w[3]), entryName) == 0) { entryIdx = i; }
++					break;
++				case spv::OpDecorate:
++					if (in.len >= 4 && w[2] == spv::DecorationBuiltIn) { builtins[w[1]] = w[3]; }
++					if (in.len >= 4 && w[2] == spv::DecorationLocation) { locations[w[1]] = w[3]; }
++					if (in.len >= 4 && w[2] == spv::DecorationComponent) { components[w[1]] = w[3]; }
++					break;
++				// Instructions with a result type and id, as far as they are followed here
++				case spv::OpVariable: case spv::OpConstant: case spv::OpLoad: case spv::OpAccessChain:
++				case spv::OpInBoundsAccessChain: case spv::OpCompositeExtract: case spv::OpCopyObject:
++				case spv::OpBitcast: case spv::OpConvertFToU: case spv::OpConvertFToS: case spv::OpConvertUToF:
++				case spv::OpConvertSToF: case spv::OpFunction:
++					defs[w[2]] = i;
++					break;
++				default:
++					if (in.op >= spv::OpTypeVoid && in.op < spv::OpTypeForwardPointer) { defs[w[1]] = i; }
++					break;
++			}
++		}
++	}
++
++	const uint32_t* def(const std::vector<uint32_t>& spv, uint32_t id) const {
++		auto it = defs.find(id);
++		return it == defs.end() ? nullptr : &spv[insts[it->second].pos];
++	}
++
++	MVKSpvKind kind(const std::vector<uint32_t>& spv, uint32_t typeID) const {
++		const uint32_t* t = def(spv, typeID);
++		if ( !t ) { return kMVKSpvKindNone; }
++		switch (t[0] & 0xffff) {
++			case spv::OpTypeFloat: return t[2] == 32 ? kMVKSpvKindFloat : kMVKSpvKindNone;
++			case spv::OpTypeInt: return t[2] != 32 ? kMVKSpvKindNone : (t[3] ? kMVKSpvKindInt : kMVKSpvKindUInt);
++			default: return kMVKSpvKindNone;
++		}
++	}
++
++	// Storage class of a variable, or UINT32_MAX
++	uint32_t storage(const std::vector<uint32_t>& spv, uint32_t varID) const {
++		const uint32_t* v = def(spv, varID);
++		return v && (v[0] & 0xffff) == spv::OpVariable ? v[3] : UINT32_MAX;
++	}
++};
++
++static bool mvkFindGeometryShaderLayerSource(const std::vector<uint32_t>& gs, const char* entryName, MVKLayerSource& src) {
++	MVKSpvModuleInfo info(gs, spv::ExecutionModelGeometry, entryName);
++	if (info.entryIdx == UINT32_MAX) { return false; }
++	uint32_t entryFunc = gs[info.insts[info.entryIdx].pos + 2];
++
++	bool triangles = false, triStrip = false;
++	uint32_t outVerts = 0, invocations = 1, emits = 0, layerVar = 0, layerStore = UINT32_MAX;
++	for (uint32_t i = 0; i < info.insts.size(); i++) {
++		auto& in = info.insts[i];
++		const uint32_t* w = &gs[in.pos];
++		if (in.op == spv::OpExecutionMode && w[1] == entryFunc) {
++			if (w[2] == spv::ExecutionModeTriangles) { triangles = true; }
++			if (w[2] == spv::ExecutionModeOutputTriangleStrip) { triStrip = true; }
++			if (w[2] == spv::ExecutionModeOutputVertices && in.len > 3) { outVerts = w[3]; }
++			if (w[2] == spv::ExecutionModeInvocations && in.len > 3) { invocations = w[3]; }
++		}
++		if (in.op == spv::OpEmitVertex) { emits++; }
++		if (in.op == spv::OpEmitStreamVertex) { return false; }
++		if (in.op == spv::OpVariable && w[3] == spv::StorageClassOutput) {
++			auto bi = info.builtins.find(w[2]);
++			if (bi != info.builtins.end() && bi->second == spv::BuiltInLayer) { layerVar = w[2]; }
++		}
++		if (in.op == spv::OpStore && layerVar && w[1] == layerVar && layerStore == UINT32_MAX) { layerStore = i; }
++	}
++	if ( !triangles || !triStrip || outVerts != 3 || invocations != 1 || emits != 3 || layerStore == UINT32_MAX) { return false; }
++
++	// Every other output must have an input at the same location to pass through.
++	for (auto& in : info.insts) {
++		const uint32_t* w = &gs[in.pos];
++		if (in.op != spv::OpVariable || w[3] != spv::StorageClassOutput || info.builtins.count(w[2])) { continue; }
++		auto loc = info.locations.find(w[2]);
++		if (loc == info.locations.end()) { return false; }
++		bool found = false;
++		for (auto& l : info.locations) {
++			if (l.second == loc->second && info.storage(gs, l.first) == spv::StorageClassInput) { found = true; break; }
++		}
++		if ( !found ) { return false; }
++	}
++
++	const uint32_t* layerDecl = info.def(gs, layerVar);
++	const uint32_t* layerPtrType = layerDecl ? info.def(gs, layerDecl[1]) : nullptr;
++	src.layerKind = layerPtrType ? info.kind(gs, layerPtrType[3]) : kMVKSpvKindNone;
++	if (src.layerKind != kMVKSpvKindInt && src.layerKind != kMVKSpvKindUInt) { return false; }
++
++	// Follow the stored value back to the input it is read from.
++	std::vector<std::pair<uint32_t, MVKSpvKind>> conversions;
++	uint32_t id = gs[info.insts[layerStore].pos + 2], component = 0, extracts = 0;
++	for (uint32_t steps = 0; steps < 16; steps++) {
++		const uint32_t* d = info.def(gs, id);
++		if ( !d ) { return false; }
++		uint32_t op = d[0] & 0xffff, len = d[0] >> 16;
++		switch (op) {
++			case spv::OpBitcast: case spv::OpConvertFToU: case spv::OpConvertFToS:
++			case spv::OpConvertUToF: case spv::OpConvertSToF: case spv::OpCopyObject: {
++				MVKSpvKind k = info.kind(gs, d[1]);
++				if (k == kMVKSpvKindNone) { return false; }
++				conversions.push_back({op, k});
++				id = d[3];
++				continue;
++			}
++			case spv::OpCompositeExtract:
++				if (len != 5 || extracts++) { return false; }
++				component += d[4];
++				id = d[3];
++				continue;
++			case spv::OpLoad: {
++				const uint32_t* p = info.def(gs, d[3]);
++				if ( !p || ((p[0] & 0xffff) != spv::OpAccessChain && (p[0] & 0xffff) != spv::OpInBoundsAccessChain)) { return false; }
++				uint32_t plen = p[0] >> 16, base = p[3];
++				if (info.storage(gs, base) != spv::StorageClassInput || plen < 5 || plen > 6) { return false; }
++				if (plen == 6) {
++					const uint32_t* c = info.def(gs, p[5]);
++					if ( !c || (c[0] & 0xffff) != spv::OpConstant || extracts++) { return false; }
++					component += c[3];
++				}
++				auto loc = info.locations.find(base);
++				if (loc == info.locations.end()) { return false; }
++				auto cmp = info.components.find(base);
++				src.location = loc->second;
++				src.component = component + (cmp == info.components.end() ? 0 : cmp->second);
++				src.conversions.assign(conversions.rbegin(), conversions.rend());
++				return true;
++			}
++			default:
++				return false;
++		}
++	}
++	return false;
++}
++
++// Adds a Layer output to the vertex shader, written from its output at the source location before each return.
++static bool mvkAddLayerOutput(const std::vector<uint32_t>& vs, const char* entryName, const MVKLayerSource& src,
++							  std::vector<uint32_t>& out) {
++	MVKSpvModuleInfo info(vs, spv::ExecutionModelVertex, entryName);
++	if (info.entryIdx == UINT32_MAX) { return false; }
++	const MVKSpvInst& ep = info.insts[info.entryIdx];
++	uint32_t entryFunc = vs[ep.pos + 2];
++	uint32_t ifaceStart = ep.pos + 3 + mvkSpvStringWords(vs, ep.pos + 3);
++
++	// The output that holds the layer
++	uint32_t outVar = 0, outType = 0, elemType = 0, elemComp = 0;
++	for (uint32_t p = ifaceStart; p < ep.pos + ep.len; p++) {
++		uint32_t v = vs[p];
++		if (info.storage(vs, v) != spv::StorageClassOutput || info.builtins.count(v)) { continue; }
++		auto loc = info.locations.find(v);
++		if (loc == info.locations.end() || loc->second != src.location) { continue; }
++		const uint32_t* ptr = info.def(vs, info.def(vs, v)[1]);
++		if ( !ptr ) { continue; }
++		const uint32_t* t = info.def(vs, ptr[3]);
++		if ( !t ) { continue; }
++		auto cmp = info.components.find(v);
++		uint32_t first = cmp == info.components.end() ? 0 : cmp->second;
++		uint32_t count = (t[0] & 0xffff) == spv::OpTypeVector ? t[3] : 1;
++		if (src.component < first || src.component >= first + count) { continue; }
++		outVar = v;
++		outType = ptr[3];
++		elemType = (t[0] & 0xffff) == spv::OpTypeVector ? t[2] : ptr[3];
++		elemComp = (t[0] & 0xffff) == spv::OpTypeVector ? src.component - first : UINT32_MAX;
++		break;
++	}
++	if ( !outVar || info.kind(vs, elemType) == kMVKSpvKindNone) { return false; }
++
++	uint32_t bound = vs[3];
++	std::vector<uint32_t> globals;
++	std::unordered_map<int, uint32_t> kindTypes;
++	auto typeOf = [&](MVKSpvKind k) -> uint32_t {
++		if (kindTypes.count(k)) { return kindTypes[k]; }
++		for (auto& in : info.insts) {
++			const uint32_t* w = &vs[in.pos];
++			if ((in.op == spv::OpTypeFloat || in.op == spv::OpTypeInt) && info.kind(vs, w[1]) == k) { return kindTypes[k] = w[1]; }
++		}
++		uint32_t id = bound++;
++		if (k == kMVKSpvKindFloat) { globals.insert(globals.end(), {(3u << 16) | spv::OpTypeFloat, id, 32}); }
++		else { globals.insert(globals.end(), {(4u << 16) | spv::OpTypeInt, id, 32, k == kMVKSpvKindInt ? 1u : 0u}); }
++		return kindTypes[k] = id;
++	};
++	uint32_t layerType = typeOf(src.layerKind);
++	for (auto& c : src.conversions) { typeOf(c.second); }
++	uint32_t ptrType = bound++, layerVar = bound++;
++	globals.insert(globals.end(), {(4u << 16) | spv::OpTypePointer, ptrType, spv::StorageClassOutput, layerType});
++	globals.insert(globals.end(), {(4u << 16) | spv::OpVariable, ptrType, layerVar, spv::StorageClassOutput});
++
++	out.assign(vs.begin(), vs.begin() + 5);
++	bool decorated = false, declared = false, inEntry = false;
++	for (auto& in : info.insts) {
++		const uint32_t* w = &vs[in.pos];
++		bool isType = in.op >= spv::OpTypeVoid && in.op <= spv::OpTypeForwardPointer;
++		if (isType && !decorated) {
++			out.insert(out.end(), {(4u << 16) | spv::OpDecorate, layerVar, spv::DecorationBuiltIn, spv::BuiltInLayer});
++			decorated = true;
++		}
++		if (in.op == spv::OpFunction && !declared) {
++			out.insert(out.end(), globals.begin(), globals.end());
++			declared = true;
++		}
++		if (in.op == spv::OpFunction) { inEntry = w[2] == entryFunc; }
++		if (in.op == spv::OpReturn && inEntry) {
++			uint32_t val = bound++;
++			out.insert(out.end(), {(4u << 16) | spv::OpLoad, outType, val, outVar});
++			if (elemComp != UINT32_MAX) {
++				uint32_t e = bound++;
++				out.insert(out.end(), {(5u << 16) | spv::OpCompositeExtract, elemType, e, val, elemComp});
++				val = e;
++			}
++			for (auto& c : src.conversions) {
++				uint32_t r = bound++;
++				out.insert(out.end(), {(4u << 16) | c.first, typeOf(c.second), r, val});
++				val = r;
++			}
++			if (src.conversions.empty() ? info.kind(vs, elemType) != src.layerKind : src.conversions.back().second != src.layerKind) {
++				uint32_t r = bound++;
++				out.insert(out.end(), {(4u << 16) | spv::OpBitcast, layerType, r, val});
++				val = r;
++			}
++			out.insert(out.end(), {(3u << 16) | spv::OpStore, layerVar, val});
++		}
++		if (&in == &ep) {
++			out.push_back(((in.len + 1) << 16) | in.op);
++			out.insert(out.end(), w + 1, w + in.len);
++			out.push_back(layerVar);
++			continue;
++		}
++		out.insert(out.end(), w, w + in.len);
++	}
++	if ( !decorated || !declared) { return false; }
++	out[3] = bound;
++	return true;
++}
++
++}	// namespace
++
+ static MVKShaderModule* getOrCreateShaderModule(MVKDevice* device, const VkPipelineShaderStageCreateInfo* pCreateInfo,
+                                                    bool& ownsShaderModule) {
+ 	if (pCreateInfo && pCreateInfo->module == VK_NULL_HANDLE) {
+@@ -758,9 +1039,13 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
+ 	VkPipelineCreationFeedback* pTessCtlFB = nullptr;
+ 	VkPipelineCreationFeedback* pTessEvalFB = nullptr;
+ 	VkPipelineCreationFeedback* pFragmentFB = nullptr;
++	const VkPipelineShaderStageCreateInfo* pGeometrySS = nullptr;
+ 	for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
+ 		const auto* pSS = &pCreateInfo->pStages[i];
+ 		switch (pSS->stage) {
++			case VK_SHADER_STAGE_GEOMETRY_BIT:
++				pGeometrySS = pSS;
++				break;
+ 			case VK_SHADER_STAGE_VERTEX_BIT:
+ 				pVertexSS = pSS;
+ 				if (pFeedbackInfo && pFeedbackInfo->pPipelineStageCreationFeedbacks) {
+@@ -795,6 +1080,28 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
+ 	_tessEvalModule = getOrCreateShaderModule(device, pTessEvalSS, _ownsTessEvalModule);
+ 	_fragmentModule = getOrCreateShaderModule(device, pFragmentSS, _ownsFragmentModule);
+ 
++	// Without geometry shaders, a layer-routing one can still be honored by the vertex shader.
++	if (pGeometrySS && _vertexModule && !pTessCtlSS) {
++		bool ownsGeometryModule = false;
++		MVKShaderModule* geometryModule = getOrCreateShaderModule(device, pGeometrySS, ownsGeometryModule);
++		MVKLayerSource layerSrc;
++		std::vector<uint32_t> vsWithLayer;
++		if (geometryModule && mvkFindGeometryShaderLayerSource(geometryModule->getSPIRV(), pGeometrySS->pName, layerSrc) &&
++			mvkAddLayerOutput(_vertexModule->getSPIRV(), pVertexSS->pName, layerSrc, vsWithLayer)) {
++			VkShaderModuleCreateInfo smInfo = {};
++			smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
++			smInfo.codeSize = vsWithLayer.size() * sizeof(uint32_t);
++			smInfo.pCode = vsWithLayer.data();
++			auto* layeredVertexModule = new MVKShaderModule(device, &smInfo);
++			if (_ownsVertexModule) { delete _vertexModule; }
++			_vertexModule = layeredVertexModule;
++			_ownsVertexModule = true;
++			MVKLogDebug("Replaced a layer-routing geometry shader by a vertex shader writing the layer from location %u.%u.",
++						layerSrc.location, layerSrc.component);
++		}
++		if (ownsGeometryModule) { delete geometryModule; }
++	}
++
+ 	warnIfUnsupportedRobustnessEnabled(this, pVertexSS);
+ 	warnIfUnsupportedRobustnessEnabled(this, pTessCtlSS);
+ 	warnIfUnsupportedRobustnessEnabled(this, pTessEvalSS);
+-- 
+2.56.0
+
