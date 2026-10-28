@@ -277,6 +277,7 @@ wine_module() {
 do_lsteamclient() {
     wine_module lsteamclient lsteamclient lsteamclient.dll
     cp "$build/lsteamclient/dlls/lsteamclient/lsteamclient.so" "$dist/lib/wine/x86_64-unix/"
+    install_name_tool -delete_rpath "$deps/lib" "$dist/lib/wine/x86_64-unix/lsteamclient.so" 2>/dev/null || true
 }
 
 do_steamexe() {

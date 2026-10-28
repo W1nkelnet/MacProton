@@ -860,7 +860,9 @@ static NTSTATUS steamclient_Steam_ReleaseThreadLocalMemory( Params *params, bool
 template< typename Params >
 static NTSTATUS steamclient_Steam_IsKnownInterface( Params *params, bool wow64 )
 {
-    params->_ret = p_Steam_IsKnownInterface ? p_Steam_IsKnownInterface( params->version ) : false;
+    /* macOS Steam lacks it; newer steam_api versions give up on interfaces
+     * that are not known, so assume they are and let creating them fail */
+    params->_ret = p_Steam_IsKnownInterface ? p_Steam_IsKnownInterface( params->version ) : true;
     return 0;
 }
 
