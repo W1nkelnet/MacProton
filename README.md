@@ -35,16 +35,19 @@ Metal umsetzt.
    [Releases](../../releases) herunter, entpacke es und zieh
    `MacProton.app` in den Ordner „Programme“.
 2. **Einmal freigeben.** MacProton ist nicht von Apple notarisiert. Das
-   setzt ein kostenpflichtiges Apple-Entwicklerkonto voraus. macOS
-   blockiert deshalb die App und die mitgelieferte Wine-Laufzeit. Prüf
-   zuerst, dass der Download unverändert ist. Der Wert muss mit der Datei
-   `MacProton-….zip.sha256` aus dem Release übereinstimmen:
+   setzt ein kostenpflichtiges Apple-Entwicklerkonto voraus. macOS fragt
+   deshalb beim ersten Öffnen nach. Prüf zuerst, dass der Download
+   unverändert ist. Der Wert muss mit der Datei `MacProton-….zip.sha256`
+   aus dem Release übereinstimmen:
 
    ```bash
    shasum -a 256 ~/Downloads/MacProton-*.zip
    ```
 
-   Entferne dann die Markierung „aus dem Internet geladen“ für diese App:
+   Erlaube dann das Öffnen im Dialog von macOS, notfalls unter
+   Systemeinstellungen → Datenschutz & Sicherheit → „Dennoch öffnen“.
+   Alternativ entfernst du die Markierung „aus dem Internet geladen“ für
+   diese App selbst:
 
    ```bash
    xattr -dr com.apple.quarantine /Applications/MacProton.app
@@ -52,13 +55,14 @@ Metal umsetzt.
 
    Mach das nur, wenn du der Quelle vertraust. Der Befehl betrifft
    ausschließlich `MacProton.app`.
-3. Starte MacProton. Beim ersten Start lädt die App Valves steamcmd von
-   Valves Server und prüft dessen Signatur. steamcmd aktualisiert sich
+3. Starte MacProton. Ein Willkommensbildschirm führt durch die
+   Einrichtung: Die App lädt Valves steamcmd von Valves Server, prüft
+   dessen Signatur und zeigt den Fortschritt an. steamcmd aktualisiert sich
    danach einmal selbst.
-4. Melde dich im Anmeldefenster bei Steam an. Dein Passwort und der
+4. Melde dich über „Bei Steam anmelden“ an. Dein Passwort und der
    Steam-Guard-Code gehen nur an steamcmd. steamcmd merkt sich danach ein
    Anmelde-Token, das Passwort wird nicht gespeichert.
-5. Klick auf „Bibliothek synchronisieren“, um deine Spiele zu übernehmen.
+5. Klick auf „Los geht's“. MacProton übernimmt dann deine Spiele aus Steam.
 
 ## Gut zu wissen
 
