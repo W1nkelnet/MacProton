@@ -73,14 +73,13 @@ mkdir -p "$steam_dir"
 cp -f "$dist/lib/wine/steamclient/x86_64-windows/steamclient64.dll" "$steam_dir/"
 cp -f "$dist/lib/wine/steamclient/i386-windows/steamclient.dll" "$steam_dir/"
 
+# wine returns once the program is done; "wineserver -w" would also wait
+# for anything else running in the prefix, such as the game itself
 if [ -n "$program" ]; then
-    status=0
     case "$program" in
-        *.[cC][mM][dD]|*.[bB][aA][tT]) "$wine" cmd /c "$program" "$@" || status=$? ;;
-        *) "$wine" "$program" "$@" || status=$? ;;
+        *.[cC][mM][dD]|*.[bB][aA][tT]) exec "$wine" cmd /c "$program" "$@" ;;
+        *) exec "$wine" "$program" "$@" ;;
     esac
-    "$wineserver" -w
-    exit $status
 fi
 if [ -n "$prepare_only" ]; then
     "$wineserver" -w
