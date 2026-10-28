@@ -4,6 +4,9 @@
 #
 # usage: run.sh APPID GAME_DIR GAME_EXE [ARGS...]
 #        run.sh --prepare APPID   (only create/update the prefix)
+#        run.sh --exec APPID PROGRAM [ARGS...]
+#                                 (run a Windows program in the prefix and wait
+#                                 for it, e.g. an installer the game ships)
 #
 # Environment:
 #   WINEPREFIX  prefix to use (default: one per app id under
@@ -12,15 +15,18 @@
 
 set -eu
 
-prepare_only=
+prepare_only= program=
 if [ "${1-}" = "--prepare" ] && [ $# -eq 2 ]; then
     prepare_only=1 appid=$2
     shift 2
+elif [ "${1-}" = "--exec" ] && [ $# -ge 3 ]; then
+    prepare_only=1 appid=$2 program=$3
+    shift 3
 elif [ $# -ge 3 ]; then
     appid=$1 game_dir=$2 game_exe=$3
     shift 3
 else
-    sed -n '2,12p' "$0"
+    sed -n '2,15p' "$0"
     exit 1
 fi
 
@@ -67,6 +73,15 @@ mkdir -p "$steam_dir"
 cp -f "$dist/lib/wine/steamclient/x86_64-windows/steamclient64.dll" "$steam_dir/"
 cp -f "$dist/lib/wine/steamclient/i386-windows/steamclient.dll" "$steam_dir/"
 
+if [ -n "$program" ]; then
+    status=0
+    case "$program" in
+        *.[cC][mM][dD]|*.[bB][aA][tT]) "$wine" cmd /c "$program" "$@" || status=$? ;;
+        *) "$wine" "$program" "$@" || status=$? ;;
+    esac
+    "$wineserver" -w
+    exit $status
+fi
 if [ -n "$prepare_only" ]; then
     "$wineserver" -w
     exit 0

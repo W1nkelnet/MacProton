@@ -242,6 +242,11 @@ struct GameCard: View {
             ProgressView(value: job.progress) {
                 Text("\(job.status) – \(Int(job.progress * 100)) %").font(.caption)
             }
+        } else if let step = runner.preparing[game.appID] {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(step).font(.caption).foregroundStyle(.secondary)
+            }
         } else if runner.isRunning(game) {
             Label("Läuft", systemImage: "play.circle.fill").font(.caption).foregroundStyle(.green)
         } else if game.runsNatively {

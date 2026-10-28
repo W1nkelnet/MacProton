@@ -9,6 +9,8 @@ final class Runner: ObservableObject {
     /// Game the user started while the Steam client was offline
     @Published var offlineGame: Game?
     @Published private(set) var reconnecting = false
+    /// What a starting game waits for, e.g. its install scripts
+    @Published private(set) var preparing: [Int: String] = [:]
 
     static var syncSaves: Bool { UserDefaults.standard.object(forKey: "syncSaves") as? Bool ?? true }
 
@@ -38,18 +40,39 @@ final class Runner: ObservableObject {
 
         running.insert(game.appID)
         Task {
+            let prefix = prefix(of: game)
+            if !FileManager.default.fileExists(atPath: prefix.appendingPathComponent("system.reg").path) {
+                preparing[game.appID] = "Richte Wine ein …"
+                await runScript(["--prepare", String(game.appID)])
+            }
+            await runInstallScripts(game, prefix: prefix)
+            preparing[game.appID] = nil
             if Self.syncSaves, !(game.cloudSaves ?? []).isEmpty { await linkSaves(game) }
             launch(game)
         }
     }
 
-    /// Links the prefix's save folders to the ones macOS Steam syncs, creating
-    /// the prefix first if needed. Failures only skip the sync.
+    /// Runs the game's install scripts not done yet, e.g. the Visual C++
+    /// runtime installers; their output goes to the game's setup log.
+    private func runInstallScripts(_ game: Game, prefix: URL) async {
+        let steps = InstallScripts.pending(for: game, prefix: prefix)
+        guard !steps.isEmpty else { return }
+        try? FileManager.default.createDirectory(at: Paths.logsDir, withIntermediateDirectories: true)
+        let log = Paths.logsDir.appendingPathComponent("\(game.appID)-setup.log")
+        for (i, step) in steps.enumerated() {
+            preparing[game.appID] = "Installiere Komponenten des Spiels (\(i + 1)/\(steps.count)) …"
+            let status = await runScript(["--exec", String(game.appID), step.program] + step.arguments, log: log)
+            // 3010: reboot required, 1638: a newer version is installed
+            if [0, 3010, 1638].contains(status) {
+                InstallScripts.markDone(step, prefix: prefix)
+            }
+        }
+    }
+
+    /// Links the prefix's save folders to the ones macOS Steam syncs.
+    /// Failures only skip the sync.
     private func linkSaves(_ game: Game) async {
         let prefix = prefix(of: game)
-        if !FileManager.default.fileExists(atPath: prefix.appendingPathComponent("system.reg").path) {
-            await prepare(game)
-        }
         do {
             let report = try SaveSync.link(game, prefix: prefix)
             if !report.skipped.isEmpty {
@@ -62,15 +85,22 @@ final class Runner: ObservableObject {
         }
     }
 
-    private func prepare(_ game: Game) async {
+    /// Runs run.sh with the arguments and returns its exit status.
+    @discardableResult
+    private func runScript(_ arguments: [String], log: URL? = nil) async -> Int32 {
         let process = Process()
         process.executableURL = Paths.runtime.appendingPathComponent("run.sh")
-        process.arguments = ["--prepare", String(game.appID)]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in continuation.resume() }
-            do { try process.run() } catch { continuation.resume() }
+        process.arguments = arguments
+        var output: FileHandle = .nullDevice
+        if let log {
+            if !FileManager.default.fileExists(atPath: log.path) { FileManager.default.createFile(atPath: log.path, contents: nil) }
+            if let handle = try? FileHandle(forWritingTo: log) { handle.seekToEndOfFile(); output = handle }
+        }
+        process.standardOutput = output
+        process.standardError = output
+        return await withCheckedContinuation { continuation in
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            do { try process.run() } catch { continuation.resume(returning: -1) }
         }
     }
 
