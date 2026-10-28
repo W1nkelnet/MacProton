@@ -108,6 +108,16 @@ GnuTLS, SDL2) aus ihren offiziellen Quellen und prüft die Prüfsummen. Die
 Änderungen an Wine und DXVK liegen als Patches in `macos/patches`.
 Details zum Port stehen in [docs/MACOS_PORT.md](docs/MACOS_PORT.md).
 
+Ein Release entsteht lokal: Commit mit `git tag -a vX.Y.Z` markieren,
+Release-Notes in `macos/release-notes/vX.Y.Z.md` ablegen und dann
+
+```bash
+macos/release.sh ~/macproton-build/dist
+```
+
+ausführen. Das Skript baut die App, packt sie mit Prüfsumme und
+veröffentlicht sie per `gh` als GitHub-Release.
+
 ## Lizenzen
 
 MacProton steht wie Proton unter mehreren Lizenzen, siehe
