@@ -95,6 +95,7 @@ do_submodules() {
     apply_patches dxvk
     apply_patches dxvk/subprojects/dxbc-spirv dxbc-spirv
     apply_patches vkd3d-proton
+    apply_patches vkd3d-proton/subprojects/dxil-spirv dxil-spirv
 }
 
 do_moltenvk() {

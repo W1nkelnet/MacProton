@@ -1,0 +1,47 @@
+From 21cda8474c02bc803e7c869e7bee72834cc1d776 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 18:00:34 +0100
+Subject: [PATCH] Clamp group shared array indices with extended robustness.
+
+D3D drivers tolerate accesses just past the end of group shared memory,
+which some games rely on, but Apple GPUs fault on them. Clamp the index
+to the last element instead of branching around the access, so atomics
+through the pointer are covered as well.
+---
+ opcodes/opcodes_llvm_builtins.cpp | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/opcodes/opcodes_llvm_builtins.cpp b/opcodes/opcodes_llvm_builtins.cpp
+index 0a5a264..1bcbd3a 100644
+--- a/opcodes/opcodes_llvm_builtins.cpp
++++ b/opcodes/opcodes_llvm_builtins.cpp
+@@ -1600,10 +1600,23 @@ bool emit_getelementptr_instruction(Converter::Impl &impl, const llvm::GetElemen
+ 
+ 							impl.handle_to_robustness[instruction] = is_in_bounds->id;
+ 						}
+-						else if (address_space == DXIL::AddressSpace::GroupShared && impl.options.extended_robustness.group_shared)
++						else if (address_space == DXIL::AddressSpace::GroupShared && impl.options.extended_robustness.group_shared &&
++						         !elementptr_shift && array_type->getArrayNumElements() != 0)
+ 						{
+-							// Need to handle atomics as well, and it'll be a mess to add support for that.
+-							LOGW("Robust group shared GEP not yet implemented.\n");
++							// Clamp to the last element rather than branch around the access, which also
++							// covers atomics through this pointer. D3D drivers tolerate reads just past the
++							// end of group shared memory, which some games do, but Apple GPUs fault on them.
++							if (!impl.glsl_std450_ext)
++								impl.glsl_std450_ext = builder.import("GLSL.std.450");
++
++							auto *clamp_op = impl.allocate(spv::OpExtInst, builder.makeUintType(32));
++							clamp_op->add_id(impl.glsl_std450_ext);
++							clamp_op->add_id(GLSLstd450UMin);
++							clamp_op->add_id(impl.get_id_for_value(instruction->getOperand(2)));
++							clamp_op->add_id(builder.makeUintConstant(array_type->getArrayNumElements() - 1));
++							impl.add(clamp_op);
++							op->add_id(clamp_op->id);
++							continue;
+ 						}
+ 						else if (impl.options.instruction_instrumentation.enabled &&
+ 						         impl.options.instruction_instrumentation.type == InstructionInstrumentationType::ExpectAssume)
+-- 
+2.56.0
+

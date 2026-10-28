@@ -1,0 +1,28 @@
+From c908af2e0b51a0b5e31402aa856d15bacb426029 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 18:00:34 +0100
+Subject: [PATCH] vkd3d-shader: Bump the shader revision for clamped group
+ shared access.
+
+dxil-spirv now clamps group shared array indices with extended
+robustness. Cached SPIR-V from before has no clamps, so do not reuse it.
+---
+ libs/vkd3d-shader/vkd3d_shader_main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d-shader/vkd3d_shader_main.c b/libs/vkd3d-shader/vkd3d_shader_main.c
+index 408745d..c10e28e 100644
+--- a/libs/vkd3d-shader/vkd3d_shader_main.c
++++ b/libs/vkd3d-shader/vkd3d_shader_main.c
+@@ -531,7 +531,7 @@ uint64_t vkd3d_shader_get_revision(void)
+      * Might get nuked later ...
+      * It's not immediately useful for invalidating pipeline caches, since that would mostly be covered
+      * by vkd3d-proton Git hash. */
+-    return quirk_hash ^ 1;
++    return quirk_hash ^ 2;
+ }
+ 
+ struct vkd3d_shader_stage_io_entry *vkd3d_shader_stage_io_map_append(struct vkd3d_shader_stage_io_map *map,
+-- 
+2.56.0
+

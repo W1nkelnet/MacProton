@@ -1,0 +1,33 @@
+From 713245fcf971248b0a4272b57a3a307222fbf0f6 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 18:00:04 +0100
+Subject: [PATCH] GLSL: Keep forwarded copies of access chains as access
+ chains.
+
+OpCopyObject of an access chain pointer forwarded the expression but
+lost the access chain flag, so should_dereference() saw a plain pointer
+value and a store through the copy came out as *_33[i] = x, which does
+not compile. DXIL bitcasts of group shared pointers produce this.
+---
+ spirv_glsl.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/spirv_glsl.cpp b/spirv_glsl.cpp
+index cbd135d0..7e29645c 100644
+--- a/spirv_glsl.cpp
++++ b/spirv_glsl.cpp
+@@ -13850,6 +13850,11 @@ void CompilerGLSL::emit_instruction(const Instruction &instruction)
+ 			{
+ 				e.implied_read_expressions = rhs_expr->implied_read_expressions;
+ 				e.expression_dependencies = rhs_expr->expression_dependencies;
++
++				// A forwarded copy of an access chain still names the object, it is not a pointer value.
++				// Otherwise a store through the copy gets dereferenced, e.g. *_33[i] = x.
++				if (pointer && rhs_expr->access_chain && expression_is_forwarded(id))
++					e.access_chain = true;
+ 			}
+ 		}
+ 		break;
+-- 
+2.56.0
+
