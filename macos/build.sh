@@ -106,7 +106,17 @@ do_moltenvk() {
     for patch in "$proton/macos/patches/moltenvk"/*.patch; do
         git -C "$src" apply --reverse --check "$patch" 2>/dev/null || git -C "$src" apply "$patch"
     done
-    (cd "$src" && ./fetchDependencies --macos && make macos)
+    # fetchDependencies resets changes in its own SPIRV-Cross checkout, so it
+    # builds a patched copy at the revision MoltenVK pins instead
+    local cross=$deps_src/SPIRV-Cross
+    if [ ! -d "$cross" ]; then
+        git clone https://github.com/KhronosGroup/SPIRV-Cross.git "$cross"
+    fi
+    git -C "$cross" checkout -q "$(cat "$src/ExternalRevisions/SPIRV-Cross_repo_revision")"
+    for patch in "$proton/macos/patches/spirv-cross"/*.patch; do
+        git -C "$cross" apply --reverse --check "$patch" 2>/dev/null || git -C "$cross" apply "$patch"
+    done
+    (cd "$src" && ./fetchDependencies --macos --spirv-cross-root "$cross" && make macos)
     cp "$src/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" "$deps/lib/"
 }
 

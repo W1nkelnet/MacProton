@@ -1,0 +1,51 @@
+From fd464de9ec755b96f752415685a8d095d6d1f6dd Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 15:25:22 +0100
+Subject: [PATCH] MSL: Cast aliased descriptors so that qualifiers of the base
+ may be dropped.
+
+An aliased buffer descriptor was cast with reinterpret_cast to a type
+without the base's qualifiers. If the base is decorated Restrict, the
+cast casts away __restrict, which Metal's compiler rejects:
+
+  reinterpret_cast from 'device SSBO *__restrict const __restrict
+  constant[N]' to 'device SSBO_2 *const constant (&)[N]' casts away
+  qualifiers
+
+A C-style cast may drop them.
+---
+ spirv_msl.cpp | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index c5a9d433..9758a3ca 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -19984,18 +19984,20 @@ void CompilerMSL::emit_argument_buffer_aliased_descriptor(const SPIRVariable &al
+ 		bool needs_post_cast_deref = !is_array(data_type);
+ 		string ref_type = needs_post_cast_deref ? "&" : join("(&)", type_to_array_glsl(var_type, aliased_var.self));
+ 
++		// A C-style cast, since the base may have qualifiers the alias lacks,
++		// e.g. __restrict, which reinterpret_cast cannot cast away.
+ 		if (is_var_runtime_size_array(aliased_var))
+ 		{
+-			name = join("reinterpret_cast<",
+-			            type_to_glsl(var_type, aliased_var.self, true), " ", descriptor_storage, " *>(&",
++			name = join("((",
++			            type_to_glsl(var_type, aliased_var.self, true), " ", descriptor_storage, " *)&",
+ 			            unqualified_name, ")");
+ 		}
+ 		else
+ 		{
+-			name = join(needs_post_cast_deref ? "*" : "", "reinterpret_cast<",
++			name = join(needs_post_cast_deref ? "*" : "", "((",
+ 			            type_to_glsl(var_type, aliased_var.self, true), " ", descriptor_storage, " ",
+ 			            ref_type,
+-			            ">(", unqualified_name, ");");
++			            ")", unqualified_name, ");");
+ 		}
+ 
+ 		if (needs_post_cast_deref)
+-- 
+2.56.0
+

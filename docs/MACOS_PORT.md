@@ -108,6 +108,8 @@ Gewählt ist vkd3d-proton auf MoltenVK (Patches in `macos/patches/vkd3d-proton`,
 - [x] Feature Level 12_0 auf MoltenVK, obwohl Sparse-Ressourcen (Tiled Resources Tier 0) und Logic Ops fehlen; diese Caps bleiben ehrlich
 - [x] `docs/macos/d3d12-test.c`: Clear, Dreieck, Dreieck mit leerem Vertex-Buffer, Gerät mit Mindest-Feature-Level 12_0, Present über eine DXGI-Swapchain
 - [ ] Unreal Engine 5 (Town To City mit `-dx12`) lehnt D3D12 ab: Der SM6-Pfad verlangt `AtomicInt64OnTypedResourceSupported` (Nanite), und MoltenVK hat weder `shaderBufferInt64Atomics` noch `VK_EXT_shader_image_atomic_int64`. Shader Model meldet vkd3d nur 6.0. Ohne `-dx12` läuft das Spiel weiter mit D3D11
+- [x] SPIRV-Cross (in MoltenVK) castet Alias-Deskriptoren per C-Cast (`macos/patches/spirv-cross`): Ist der erste Buffer-Typ `Restrict`, verlor `reinterpret_cast` das `__restrict`, und Metal lehnte den Compute-Shader ab („casts away qualifiers“). `build.sh` übergibt MoltenVK dafür eine eigene SPIRV-Cross-Kopie (`--spirv-cross-root`), weil `fetchDependencies` die eigene zurücksetzt
+- [ ] Medieval Dynasty (UE4, startet von sich aus mit D3D12): Nach dem Shader-Fix rendert es das Intro, hängt dann aber in Frame 0 („GameThread timed out waiting for RenderThread“) oder stürzt in `vkQueueSubmit2` in MoltenVK ab (0xc0000005). Mit `-dx11` läuft es über DXVK bis ins Hauptmenü
 - [ ] Spiele mit reinem D3D12 testen; ausstehend sind auch Geometry Shader, Stream Output und Sparse-Ressourcen, die MoltenVK fehlen
 
 ### Phase 5 – Steam-Integration
