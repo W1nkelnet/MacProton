@@ -46,7 +46,7 @@ fi
 
 export WINEPREFIX="${WINEPREFIX:-$HOME/Library/Application Support/MacProton/prefixes/$appid}"
 export DYLD_FALLBACK_LIBRARY_PATH="$dist/lib"
-export WINEDLLOVERRIDES="steam.exe=b;mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi=n,b;${WINEDLLOVERRIDES-}"
+export WINEDLLOVERRIDES="steam.exe=b;mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b;${WINEDLLOVERRIDES-}"
 export SteamAppId=$appid SteamGameId=$appid SteamOverlayGameId=$appid
 # Keep resources alive that bound descriptor sets still reference after the
 # game destroyed them; Metal otherwise loses the device ("Invalid Resource")
@@ -74,6 +74,12 @@ fi
 windows="$WINEPREFIX/drive_c/windows"
 cp -f "$dist/lib/wine/dxvk/x86_64-windows/"*.dll "$windows/system32/"
 cp -f "$dist/lib/wine/dxvk/i386-windows/"*.dll "$windows/syswow64/"
+# Direct3D 12 through vkd3d-proton, 64-bit only; its shader cache stays in
+# the prefix instead of the game's working directory
+if [ -d "$dist/lib/wine/vkd3d-proton/x86_64-windows" ]; then
+    cp -f "$dist/lib/wine/vkd3d-proton/x86_64-windows/"*.dll "$windows/system32/"
+fi
+export VKD3D_SHADER_CACHE_PATH="${VKD3D_SHADER_CACHE_PATH-$WINEPREFIX}"
 
 # The game's steam_api loads steamclient(64).dll from SteamPath; Wine's
 # loader redirects their exports to lsteamclient. macOS Steam ships no

@@ -99,7 +99,14 @@ static const char shader[] =
     "    float2 p[3] = { float2(-1, -1), float2(0, 1), float2(1, -1) };\n"
     "    return float4(p[id], 0, 1);\n"
     "}\n"
-    "float4 ps() : SV_Target { return float4(0.25, 0.5, 0.75, 1); }\n";
+    "float4 ps() : SV_Target { return float4(0.25, 0.5, 0.75, 1); }\n"
+    "struct v2p { float4 pos : SV_Position; float4 c : COLOR; };\n"
+    "v2p vs_null_vbo(uint id : SV_VertexID, float4 c : COLOR) {\n"
+    "    float2 p[3] = { float2(-1, -1), float2(0, 1), float2(1, -1) };\n"
+    "    v2p o = { float4(p[id], 0, 1), c };\n"
+    "    return o;\n"
+    "}\n"
+    "float4 ps_null_vbo(v2p i) : SV_Target { return i.c + float4(0.25, 0.5, 0.75, 1); }\n";
 
 static ID3DBlob *compile(const char *entry, const char *target)
 {
@@ -110,6 +117,33 @@ static ID3DBlob *compile(const char *entry, const char *target)
         exit(1);
     }
     return blob;
+}
+
+static ID3D12PipelineState *create_pso(ID3D12RootSignature *rs, const char *vs_entry, const char *ps_entry,
+                                       const D3D12_INPUT_LAYOUT_DESC *layout)
+{
+    ID3DBlob *vs = compile(vs_entry, "vs_5_0"), *ps = compile(ps_entry, "ps_5_0");
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC p = { 0 };
+    ID3D12PipelineState *pso;
+
+    p.pRootSignature = rs;
+    p.VS.pShaderBytecode = ID3D10Blob_GetBufferPointer(vs);
+    p.VS.BytecodeLength = ID3D10Blob_GetBufferSize(vs);
+    p.PS.pShaderBytecode = ID3D10Blob_GetBufferPointer(ps);
+    p.PS.BytecodeLength = ID3D10Blob_GetBufferSize(ps);
+    p.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    p.SampleMask = ~0u;
+    p.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    p.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    p.RasterizerState.DepthClipEnable = TRUE;
+    if (layout)
+        p.InputLayout = *layout;
+    p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    p.NumRenderTargets = 1;
+    p.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    p.SampleDesc.Count = 1;
+    CHECK(ID3D12Device_CreateGraphicsPipelineState(device, &p, &IID_ID3D12PipelineState, (void **)&pso), "CreateGraphicsPipelineState");
+    return pso;
 }
 
 int main(int argc, char **argv)
@@ -127,6 +161,20 @@ int main(int argc, char **argv)
     ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
     printf("OK:   Device created, max feature level 0x%x, resource binding tier %d, tiled resources tier %d\n",
            fl.MaxSupportedFeatureLevel, options.ResourceBindingTier, options.TiledResourcesTier);
+    {
+        D3D12_FEATURE_DATA_SHADER_MODEL sm = { D3D_SHADER_MODEL_6_7 };
+        ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm));
+        printf("      shader model 0x%x, logic op %d, typed UAV load formats %d, ROVs %d, conservative raster tier %d\n",
+               sm.HighestShaderModel, options.OutputMergerLogicOp, options.TypedUAVLoadAdditionalFormats,
+               options.ROVsSupported, options.ConservativeRasterizationTier);
+    }
+    {
+        ID3D12Device *device12;
+        HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_12_0, &IID_ID3D12Device, (void **)&device12);
+        printf("%s Device with minimum feature level 12_0 (0x%08lx)\n", SUCCEEDED(hr) ? "OK:  " : "FAIL:", (unsigned long)hr);
+        if (SUCCEEDED(hr))
+            ID3D12Device_Release(device12);
+    }
     fflush(stdout);
 
     CHECK(ID3D12Device_CreateCommandQueue(device, &qdesc, &IID_ID3D12CommandQueue, (void **)&queue), "CreateCommandQueue");
@@ -156,13 +204,16 @@ int main(int argc, char **argv)
         fflush(stdout);
     }
 
-    /* 2. Triangle */
+    /* 2. Triangle, 3. the same with its color read from a null vertex buffer, which must read zero */
     {
-        D3D12_ROOT_SIGNATURE_DESC rs_desc = { 0 };
-        ID3DBlob *rs_blob, *vs = compile("vs", "vs_5_0"), *ps = compile("ps", "ps_5_0");
+        D3D12_ROOT_SIGNATURE_DESC rs_desc = { 0, NULL, 0, NULL, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT };
+        D3D12_INPUT_ELEMENT_DESC color = { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,
+                                           D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 };
+        D3D12_INPUT_LAYOUT_DESC layout = { &color, 1 };
+        D3D12_VERTEX_BUFFER_VIEW null_vbo = { 0 };
+        ID3DBlob *rs_blob;
         ID3D12RootSignature *rs;
-        ID3D12PipelineState *pso;
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC p = { 0 };
+        ID3D12PipelineState *pso, *pso_null_vbo;
         D3D12_VIEWPORT vp = { 0, 0, W, H, 0, 1 };
         D3D12_RECT scissor = { 0, 0, W, H };
         const float black[4] = { 0, 0, 0, 1 };
@@ -170,21 +221,8 @@ int main(int argc, char **argv)
         CHECK(D3D12SerializeRootSignature(&rs_desc, D3D_ROOT_SIGNATURE_VERSION_1, &rs_blob, NULL), "SerializeRootSignature");
         CHECK(ID3D12Device_CreateRootSignature(device, 0, ID3D10Blob_GetBufferPointer(rs_blob), ID3D10Blob_GetBufferSize(rs_blob),
                                                &IID_ID3D12RootSignature, (void **)&rs), "CreateRootSignature");
-        p.pRootSignature = rs;
-        p.VS.pShaderBytecode = ID3D10Blob_GetBufferPointer(vs);
-        p.VS.BytecodeLength = ID3D10Blob_GetBufferSize(vs);
-        p.PS.pShaderBytecode = ID3D10Blob_GetBufferPointer(ps);
-        p.PS.BytecodeLength = ID3D10Blob_GetBufferSize(ps);
-        p.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        p.SampleMask = ~0u;
-        p.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        p.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        p.RasterizerState.DepthClipEnable = TRUE;
-        p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        p.NumRenderTargets = 1;
-        p.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        p.SampleDesc.Count = 1;
-        CHECK(ID3D12Device_CreateGraphicsPipelineState(device, &p, &IID_ID3D12PipelineState, (void **)&pso), "CreateGraphicsPipelineState");
+        pso = create_pso(rs, "vs", "ps", NULL);
+        pso_null_vbo = create_pso(rs, "vs_null_vbo", "ps_null_vbo", &layout);
 
         ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, black, 0, NULL);
         ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE, NULL);
@@ -198,9 +236,23 @@ int main(int argc, char **argv)
         printf("%s Triangle: pixel %08lx, expected ffbf8040\n",
                (pixel & 0xfffefefe) == (0xffbf8040 & 0xfffefefe) ? "OK:  " : "FAIL:", (unsigned long)pixel);
         fflush(stdout);
+
+        ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, black, 0, NULL);
+        ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE, NULL);
+        ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, rs);
+        ID3D12GraphicsCommandList_SetPipelineState(list, pso_null_vbo);
+        ID3D12GraphicsCommandList_RSSetViewports(list, 1, &vp);
+        ID3D12GraphicsCommandList_RSSetScissorRects(list, 1, &scissor);
+        ID3D12GraphicsCommandList_IASetPrimitiveTopology(list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D12GraphicsCommandList_IASetVertexBuffers(list, 0, 1, &null_vbo);
+        ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
+        pixel = read_pixel(target, W / 2, H / 2);
+        printf("%s Null vertex buffer: pixel %08lx, expected ffbf8040\n",
+               (pixel & 0xfffefefe) == (0xffbf8040 & 0xfffefefe) ? "OK:  " : "FAIL:", (unsigned long)pixel);
+        fflush(stdout);
     }
 
-    /* 3. Present */
+    /* 4. Present */
     {
         HWND hwnd = CreateWindowA("STATIC", "d3d12-test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 640, 480,
                                   NULL, NULL, NULL, NULL);

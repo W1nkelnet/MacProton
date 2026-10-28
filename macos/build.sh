@@ -88,11 +88,13 @@ apply_patches() {
 
 do_submodules() {
     cd "$proton"
-    git submodule update --init --depth 1 wine dxvk Vulkan-Headers SPIRV-Headers
+    git submodule update --init --depth 1 wine dxvk vkd3d-proton Vulkan-Headers SPIRV-Headers
     git -C dxvk submodule update --init --depth 1 --recursive
+    git -C vkd3d-proton submodule update --init --depth 1 --recursive
     apply_patches wine
     apply_patches dxvk
     apply_patches dxvk/subprojects/dxbc-spirv dxbc-spirv
+    apply_patches vkd3d-proton
 }
 
 do_moltenvk() {
@@ -265,6 +267,16 @@ dxvk_build() {
     cp "$build/dxvk-install/$3"/*.dll "$dist/lib/wine/dxvk/$3/"
 }
 
+# Direct3D 12; games are 64-bit only
+do_vkd3d() {
+    meson setup --cross-file "$proton/vkd3d-proton/build-win64.txt" --buildtype release \
+        "$build/vkd3d-x64" "$proton/vkd3d-proton"
+    ninja -C "$build/vkd3d-x64"
+    mkdir -p "$dist/lib/wine/vkd3d-proton/x86_64-windows"
+    cp "$build/vkd3d-x64/libs/d3d12/d3d12.dll" "$build/vkd3d-x64/libs/d3d12core/d3d12core.dll" \
+        "$dist/lib/wine/vkd3d-proton/x86_64-windows/"
+}
+
 do_dxvk() {
     dxvk_build x64 build-win64.txt x86_64-windows
     dxvk_build x32 build-win32.txt i386-windows
@@ -306,6 +318,7 @@ do_dist() {
     # Drop debug info from the shipped files; the build trees keep it
     local f
     find "$dist/lib/wine/x86_64-windows" "$dist/lib/wine/dxvk/x86_64-windows" "$dist/lib/wine/steamclient/x86_64-windows" \
+        "$dist/lib/wine/vkd3d-proton/x86_64-windows" \
         -type f \( -name "*.dll" -o -name "*.exe" -o -name "*.sys" -o -name "*.drv" -o -name "*.ocx" -o -name "*.cpl" \) \
         -exec x86_64-w64-mingw32-strip --strip-debug {} +
     find "$dist/lib/wine/i386-windows" "$dist/lib/wine/dxvk/i386-windows" "$dist/lib/wine/steamclient/i386-windows" \
@@ -333,6 +346,7 @@ step wine_configure
 step wine_build
 step wine_install
 step dxvk
+step vkd3d
 step lsteamclient
 step steamexe
 step steamclient_stub

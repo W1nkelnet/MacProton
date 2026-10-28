@@ -2,8 +2,8 @@
 
 Windows-Spiele aus deiner Steam-Bibliothek auf dem Mac spielen. MacProton
 ist eine Mac-App auf Basis von Valves [Proton](README.proton.md): Wine
-mit DXVK, das Direct3D auf Vulkan umsetzt, und MoltenVK, das Vulkan auf
-Metal umsetzt.
+mit DXVK und vkd3d-proton, die Direct3D auf Vulkan umsetzen, und MoltenVK,
+das Vulkan auf Metal umsetzt.
 
 ## Was MacProton kann
 
@@ -12,7 +12,8 @@ Metal umsetzt.
 - **Mac-Versionen nativ:** Gibt es ein Spiel auch für macOS, installiert
   und startet MacProton es über den Steam-Client, ganz ohne Wine.
 - **Windows-Spiele:** Lädt sie mit Valves steamcmd und startet sie mit
-  Wine. Unterstützt werden Direct3D 9, 10 und 11.
+  Wine. Unterstützt werden Direct3D 9, 10 und 11, Direct3D 12 erst in
+  Teilen.
 - **Steam-Funktionen im Spiel:** Die Spiele sprechen mit dem Steam-Client,
   getestet mit Lobbys. Online-Funktionen mit TLS laufen ebenfalls.
 - **Spielstände über Steam Cloud:** Für Spiele, deren Windows- und
@@ -80,7 +81,11 @@ Metal umsetzt.
 
 - 32-Bit-Windows-Spiele stürzen derzeit beim Start ab. Betroffen sind vor
   allem ältere Unity-Spiele.
-- Kein Direct3D 12.
+- Direct3D 12 ist neu und bisher nur mit einem eigenen Test geprüft, mit
+  keinem Spiel. MoltenVK fehlen dafür unter anderem Sparse-Ressourcen,
+  64-Bit-Atomics auf Texturen, Geometry Shader und Stream Output.
+  Unreal-Engine-5-Spiele lehnen Direct3D 12 deshalb ab und laufen weiter mit
+  Direct3D 11.
 - Spiele, die OpenGL 4.2 oder neuer brauchen (etwa Foundation), starten
   nicht. macOS bietet höchstens OpenGL 4.1.
 - Spiele mit Anti-Cheat (Easy Anti-Cheat, BattlEye) funktionieren online
@@ -109,7 +114,8 @@ macos/app/build-app.sh ~/macproton-app ~/macproton-build/dist
 
 `build.sh` lädt die Abhängigkeiten (MoltenVK, FreeType, GMP, Nettle,
 GnuTLS, SDL2) aus ihren offiziellen Quellen und prüft die Prüfsummen. Die
-Änderungen an Wine und DXVK liegen als Patches in `macos/patches`.
+Änderungen an Wine, DXVK, vkd3d-proton und MoltenVK liegen als Patches in
+`macos/patches`.
 Details zum Port stehen in [docs/MACOS_PORT.md](docs/MACOS_PORT.md).
 
 Ein Release entsteht lokal: Commit mit `git tag -a vX.Y.Z` markieren,
@@ -125,8 +131,8 @@ veröffentlicht sie per `gh` als GitHub-Release.
 ## Lizenzen
 
 MacProton steht wie Proton unter mehreren Lizenzen, siehe
-[LICENSE](LICENSE). Wine und GnuTLS stehen unter der LGPL 2.1, DXVK unter
-der zlib-Lizenz, MoltenVK unter der Apache-Lizenz 2.0. Der Quellcode aller
+[LICENSE](LICENSE). Wine, vkd3d-proton und GnuTLS stehen unter der
+LGPL 2.1, DXVK unter der zlib-Lizenz, MoltenVK unter der Apache-Lizenz 2.0. Der Quellcode aller
 mitgelieferten Teile ist über dieses Repository, seine Submodule und die
 Patches in `macos/patches` verfügbar.
 

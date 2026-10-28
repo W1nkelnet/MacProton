@@ -16,7 +16,7 @@ Brücke zum nativen Steam-Client + `proton`-Startskript.
 | Emulator | FEX entfällt | Rosetta 2 übernimmt die Rolle. |
 | Fenster/Eingabe | `winemac.drv` statt `winex11.drv`/`winewayland.drv` | Ist im Wine-Baum bereits vorhanden. |
 | D3D9–11 | DXVK über **MoltenVK** | Einzige quelloffene Option. Lücken: Geometry Shader, Transform Feedback, einige Formate. |
-| D3D12 | offen (siehe Phase 4) | vkd3d-proton braucht Vulkan-Features, die MoltenVK fehlen. |
+| D3D12 | vkd3d-proton, erste Schritte (siehe Phase 4) | Läuft auf MoltenVK mit Abstrichen, mit Spielen noch ungetestet. |
 | Sync-Primitive | fsync/ntsync auf macOS deaktiviert, Fallback auf wineserver-Sync; später msync-artige Lösung über Mach-Semaphoren | fsync basiert auf Linux-`futex_waitv`, ntsync auf einem Linux-Kernelmodul. |
 | Build | nativer Build auf macOS statt Docker/Steam-Runtime-Container | Der Linux-Container erzeugt keine Mach-O-Binärdateien. |
 
@@ -102,10 +102,13 @@ D3D10-Interop-Pfad (`ID3D10Texture3D_GetDevice`) ab – unabhängig von MoltenVK
 - [ ] Testspiele aus DX9, DX10, DX11 festlegen und Kompatibilität protokollieren
 
 ### Phase 4 – D3D12
-Optionen, zu bewerten:
-1. vkd3d-proton auf MoltenVK mit fehlenden Features als Workarounds (hoher Aufwand, unsicherer Ausgang)
-2. Apples D3DMetal aus dem Game Porting Toolkit als optionale Laufzeitkomponente einbinden (nicht quelloffen, Lizenz prüfen, nicht weitergebbar)
-3. eigener D3D12→Metal-Übersetzer (sehr hoher Aufwand)
+Gewählt ist vkd3d-proton auf MoltenVK (Patches in `macos/patches/vkd3d-proton`, Werte aus `docs/macos/vkd3dcheck.c`):
+- [x] Gerät entsteht trotz fehlendem robustness2, nullDescriptor, Transform Feedback und Texel-Buffer-Ausrichtung; diese Fälle warnen nur
+- [x] Leere Deskriptoren schreibt MoltenVK als `nil`, Metal liest Null. Leere Vertex-Buffer bekommen einen genullten Ersatz-Buffer, weil MoltenVK jeden übergebenen Buffer dereferenziert
+- [x] Feature Level 12_0 auf MoltenVK, obwohl Sparse-Ressourcen (Tiled Resources Tier 0) und Logic Ops fehlen; diese Caps bleiben ehrlich
+- [x] `docs/macos/d3d12-test.c`: Clear, Dreieck, Dreieck mit leerem Vertex-Buffer, Gerät mit Mindest-Feature-Level 12_0, Present über eine DXGI-Swapchain
+- [ ] Unreal Engine 5 (Town To City mit `-dx12`) lehnt D3D12 ab: Der SM6-Pfad verlangt `AtomicInt64OnTypedResourceSupported` (Nanite), und MoltenVK hat weder `shaderBufferInt64Atomics` noch `VK_EXT_shader_image_atomic_int64`. Shader Model meldet vkd3d nur 6.0. Ohne `-dx12` läuft das Spiel weiter mit D3D11
+- [ ] Spiele mit reinem D3D12 testen; ausstehend sind auch Geometry Shader, Stream Output und Sparse-Ressourcen, die MoltenVK fehlen
 
 ### Phase 5 – Steam-Integration
 - [x] `lsteamclient`: Es gibt schon einen `__APPLE__`-Zweig in `lsteamclient/unixlib.cpp`, der `steamclient.dylib` lädt. Geprüft: Der macOS-Steam-Client liefert `steamclient.dylib` als Universal Binary (x86_64 + arm64), der Rosetta-Wineprozess kann sie also laden.
