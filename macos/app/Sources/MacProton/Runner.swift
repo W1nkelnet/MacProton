@@ -31,7 +31,8 @@ final class Runner: ObservableObject {
             return
         }
         guard allowOffline || SteamClient.isOnline != false else {
-            offlineGame = game
+            // Restarting Steam would cut off the other running games
+            if running.isEmpty { reconnectSteam(then: game) } else { offlineGame = game }
             return
         }
 
@@ -115,19 +116,22 @@ final class Runner: ObservableObject {
     }
 
     /// Restarts the Steam client so it logs in again, then starts the game.
-    func reconnectSteam(then game: Game? = nil) {
+    /// Automatic reconnects (after steamcmd ran) skip quietly while games run.
+    func reconnectSteam(then game: Game? = nil, automatic: Bool = false) {
         guard !reconnecting, running.isEmpty else {
-            if !running.isEmpty { lastError = "Beende zuerst die laufenden Spiele, Steam wird dafür neu gestartet." }
+            if !running.isEmpty && !automatic {
+                lastError = "Beende zuerst die laufenden Spiele, Steam wird dafür neu gestartet."
+            }
             return
         }
         reconnecting = true
         Task {
             let online = await SteamClient.reconnect()
             reconnecting = false
-            if !online {
+            if let game {
+                if online { play(game) } else { offlineGame = game }
+            } else if !online {
                 lastError = "Steam hat sich nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster."
-            } else if let game {
-                play(game)
             }
         }
     }

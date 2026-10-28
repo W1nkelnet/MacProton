@@ -94,11 +94,6 @@ struct LibraryView: View {
             Text("steamcmd braucht einmalig dein Passwort und ggf. den Steam-Guard-Code für \(installer.loginRequired ?? ""). MacProton öffnet dafür ein Terminal; die App selbst sieht deine Zugangsdaten nicht. Danach den Download erneut starten.")
         }
         .alert("Steam ist offline", isPresented: offlineBinding) {
-            Button("Neu verbinden und spielen") {
-                let game = runner.offlineGame
-                runner.offlineGame = nil
-                runner.reconnectSteam(then: game)
-            }
             Button("Offline spielen") {
                 if let game = runner.offlineGame { runner.play(game, allowOffline: true) }
                 runner.offlineGame = nil
@@ -106,6 +101,11 @@ struct LibraryView: View {
             Button("Abbrechen", role: .cancel) { runner.offlineGame = nil }
         } message: {
             Text(offlineText)
+        }
+        .onChange(of: steamcmdBusy) { _, busy in
+            if !busy && Paths.steamRunning && SteamClient.isOnline == false {
+                runner.reconnectSteam(automatic: true)
+            }
         }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             steamRunning = Paths.steamRunning
@@ -132,10 +132,15 @@ struct LibraryView: View {
     }
 
     private var offlineText: String {
-        "Der Steam-Client hat keine Verbindung, zum Beispiel weil steamcmd beim Download oder Synchronisieren "
-            + "dieselbe Sitzung übernommen hat. Ohne Verbindung gehen Lobbys und Online-Funktionen nicht. "
-            + "MacProton startet Steam dafür neu; Steam meldet sich mit der gespeicherten Anmeldung wieder an."
+        runner.running.isEmpty
+            ? "Steam hat sich nach dem Neustart nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster. "
+                + "Ohne Verbindung gehen Lobbys und Online-Funktionen nicht."
+            : "Der Steam-Client hat keine Verbindung. Zum Neuverbinden müsste MacProton Steam neu starten, "
+                + "das würde die laufenden Spiele trennen. Ohne Verbindung gehen Lobbys und Online-Funktionen nicht."
     }
+
+    /// steamcmd's login replaced the Steam client's session
+    private var steamcmdBusy: Bool { !installer.jobs.isEmpty || sync.running }
 
     private var offlineBinding: Binding<Bool> {
         Binding(get: { runner.offlineGame != nil }, set: { if !$0 { runner.offlineGame = nil } })
