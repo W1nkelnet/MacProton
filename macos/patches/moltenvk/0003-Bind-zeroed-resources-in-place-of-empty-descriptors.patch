@@ -1,0 +1,260 @@
+From 39eaa7bf5a3b28612e5610ba581346a6e03d7b1d Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 16:40:17 +0100
+Subject: [PATCH 3/3] Bind zeroed resources in place of empty descriptors.
+
+MoltenVK has no nullDescriptor, yet applications such as vkd3d-proton
+still leave descriptors empty that shaders read, as D3D12 allows. Metal
+faults on a nil resource in an argument buffer or binding. Bind a zeroed
+64 KiB buffer, a 1x1 texture and a sampler instead, created once and
+made resident in each device, in argument buffers, descriptor copies and
+direct bindings, and for null vertex buffers, which were dereferenced.
+---
+ MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm      | 13 ++++--
+ .../Commands/MVKCommandEncoderState.mm        | 22 ++++++++++
+ .../MoltenVK/GPUObjects/MVKDescriptorSet.mm   | 44 +++++++++++--------
+ MoltenVK/MoltenVK/GPUObjects/MVKDevice.h      | 14 ++++++
+ MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm     | 38 ++++++++++++++++
+ 5 files changed, 110 insertions(+), 21 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+index 664276b..0d28d68 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+@@ -42,9 +42,16 @@ VkResult MVKCmdBindVertexBuffers<N>::setContent(MVKCommandBuffer* cmdBuff,
+     MVKVertexMTLBufferBinding b;
+     for (uint32_t bindIdx = 0; bindIdx < bindingCount; bindIdx++) {
+         MVKBuffer* mvkBuffer = (MVKBuffer*)pBuffers[bindIdx];
+-        b.mtlBuffer = mvkBuffer->getMTLBuffer();
+-        b.offset = mvkBuffer->getMTLBufferOffset() + pOffsets[bindIdx];
+-		b.size = pSizes ? uint32_t(pSizes[bindIdx] == VK_WHOLE_SIZE ? mvkBuffer->getByteCount() - pOffsets[bindIdx] : pSizes[bindIdx]) : 0;
++        if (mvkBuffer) {
++            b.mtlBuffer = mvkBuffer->getMTLBuffer();
++            b.offset = mvkBuffer->getMTLBufferOffset() + pOffsets[bindIdx];
++            b.size = pSizes ? uint32_t(pSizes[bindIdx] == VK_WHOLE_SIZE ? mvkBuffer->getByteCount() - pOffsets[bindIdx] : pSizes[bindIdx]) : 0;
++        } else {
++            // A null vertex buffer reads zero
++            b.mtlBuffer = mvkGetNullResources().buffer;
++            b.offset = 0;
++            b.size = pSizes ? uint32_t(b.mtlBuffer.length) : 0;
++        }
+ 		b.stride = pStrides ? (uint32_t)pStrides[bindIdx] : 0;
+         _bindings.push_back(b);
+     }
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+index 7d16b94..3509dbb 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+@@ -454,6 +454,28 @@ static void executeBindOp(id<MTLCommandEncoder> encoder,
+ 	MVKDevice* dev = mvkEncoder.getDevice();
+ 	for (uint32_t i = 0; i < count; i++, src += stride) {
+ 		id resource = *reinterpret_cast<const id*>(src);
++		// Empty descriptors get zeroed resources, which need no live check
++		if (!resource) {
++			const MVKNullResources& null = mvkGetNullResources();
++			switch (Op) {
++				case MVKDescriptorBindOperationCode::BindBuffer:
++				case MVKDescriptorBindOperationCode::BindBufferDynamic:
++				case MVKDescriptorBindOperationCode::BindBufferWithLiveCheck:
++				case MVKDescriptorBindOperationCode::BindBufferDynamicWithLiveCheck:
++					bindBuffer(encoder, null.buffer, 0, target + i, exists, bindings, binder);
++					continue;
++				case MVKDescriptorBindOperationCode::BindTexture:
++				case MVKDescriptorBindOperationCode::BindTextureWithLiveCheck:
++					bindTexture(encoder, null.texture, target + i, exists, bindings, binder);
++					continue;
++				case MVKDescriptorBindOperationCode::BindSampler:
++				case MVKDescriptorBindOperationCode::BindSamplerWithLiveCheck:
++					bindSampler(encoder, null.sampler, target + i, exists, bindings, binder);
++					continue;
++				default:
++					break;
++			}
++		}
+ 		switch (Op) {
+ 			case MVKDescriptorBindOperationCode::BindBytes:
+ 				assert(0); // Handled above
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
+index 3cdc623..21a41f1 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
+@@ -904,18 +904,22 @@ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::Metal3> {
+ 	MVKArgBufEncoder(id<MTLArgumentEncoder> enc, char* base): dst(reinterpret_cast<MVKGPUResource*>(base)) {}
+ 	void advance(size_t stride) { dst = reinterpret_cast<MVKGPUResource*>(reinterpret_cast<char*>(dst) + stride); }
+ 	void* constantData(size_t index) { return reinterpret_cast<char*>(dst) + index; }
+-	void setTexture(id<MTLTexture> tex,       size_t index = 0) { dst[index].resource = tex.gpuResourceID; }
+-	void setSampler(id<MTLSamplerState> samp, size_t index = 0) { dst[index].resource = samp.gpuResourceID; }
++	void setTexture(id<MTLTexture> tex,       size_t index = 0) {
++		dst[index].resource = (tex ? tex : mvkGetNullResources().texture).gpuResourceID;
++	}
++	void setSampler(id<MTLSamplerState> samp, size_t index = 0) {
++		dst[index].resource = (samp ? samp : mvkGetNullResources().sampler).gpuResourceID;
++	}
+ 	void setBuffer(id<MTLBuffer> buf, uint64_t offset, size_t index = 0) {
+ 		dst[index].gpuAddress = buf.gpuAddress + offset;
+ 	}
+-	void setNullTexture(size_t index = 0) { dst[index].resource = {}; }
+-	void setNullSampler(size_t index = 0) { dst[index].resource = {}; }
+-	void setNullBuffer (size_t index = 0) { dst[index].gpuAddress = 0; }
++	void setNullTexture(size_t index = 0) { setTexture((id<MTLTexture>)nil, index); }
++	void setNullSampler(size_t index = 0) { setSampler((id<MTLSamplerState>)nil, index); }
++	void setNullBuffer (size_t index = 0) { dst[index].gpuAddress = mvkGetNullResources().buffer.gpuAddress; }
+ 	void setTexture(MVKImageView* img, size_t index = 0) { setTexture(img ? img->getMTLTexture() : nil, index); }
+ 	void setSampler(MVKSampler* samp, size_t index = 0) { setSampler(samp ? samp->getMTLSamplerState() : nil, index); }
+ 	void setBuffer(const VkDescriptorBufferInfo* info, size_t index = 0) {
+-		uint64_t addr = 0;
++		uint64_t addr = mvkGetNullResources().buffer.gpuAddress;
+ 		if (MVKBuffer* buf = reinterpret_cast<MVKBuffer*>(info->buffer))
+ 			addr = buf->getMTLBuffer().gpuAddress + buf->getMTLBufferOffset() + info->offset;
+ 		dst[index].gpuAddress = addr;
+@@ -929,19 +933,23 @@ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::ArgEncoder> {
+ 	MVKArgBufEncoder(id<MTLArgumentEncoder> enc_, char* base): enc(enc_), base(0) {}
+ 	void advance(size_t stride) { base += stride; }
+ 	void* constantData(uint32_t index) { return [enc constantDataAtIndex:base + index]; }
+-	void setTexture(id<MTLTexture> tex,       size_t index = 0) { [enc setTexture:tex atIndex:base + index]; }
+-	void setSampler(id<MTLSamplerState> samp, size_t index = 0) { [enc setSamplerState:samp atIndex:base + index]; }
++	void setTexture(id<MTLTexture> tex,       size_t index = 0) {
++		[enc setTexture:tex ? tex : mvkGetNullResources().texture atIndex:base + index];
++	}
++	void setSampler(id<MTLSamplerState> samp, size_t index = 0) {
++		[enc setSamplerState:samp ? samp : mvkGetNullResources().sampler atIndex:base + index];
++	}
+ 	void setBuffer(id<MTLBuffer> buf, uint64_t offset, size_t index = 0) {
+ 		[enc setBuffer:buf offset:static_cast<NSUInteger>(offset) atIndex:base + index];
+ 	}
+-	void setNullTexture(size_t index = 0) { [enc setTexture:nil atIndex:base + index]; }
+-	void setNullSampler(size_t index = 0) { [enc setSamplerState:nil atIndex:base + index]; }
+-	void setNullBuffer (size_t index = 0) { [enc setBuffer:nil offset:0 atIndex:base + index]; }
++	void setNullTexture(size_t index = 0) { setTexture((id<MTLTexture>)nil, index); }
++	void setNullSampler(size_t index = 0) { setSampler((id<MTLSamplerState>)nil, index); }
++	void setNullBuffer (size_t index = 0) { [enc setBuffer:mvkGetNullResources().buffer offset:0 atIndex:base + index]; }
+ 	void setTexture(MVKImageView* img, size_t index = 0) {
+-		[enc setTexture:img ? img->getMTLTexture() : nil atIndex:base + index];
++		setTexture(img ? img->getMTLTexture() : nil, index);
+ 	}
+ 	void setBuffer(const VkDescriptorBufferInfo* info, size_t index = 0) {
+-		id<MTLBuffer> mtlbuf = nil;
++		id<MTLBuffer> mtlbuf = mvkGetNullResources().buffer;
+ 		NSUInteger offset = 0;
+ 		if (MVKBuffer* buf = reinterpret_cast<MVKBuffer*>(info->buffer)) {
+ 			mtlbuf = buf->getMTLBuffer();
+@@ -950,7 +958,7 @@ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::ArgEncoder> {
+ 		[enc setBuffer:mtlbuf offset:offset atIndex:base + index];
+ 	}
+ 	void setSampler(MVKSampler* samp, size_t index = 0) {
+-		[enc setSamplerState:samp ? samp->getMTLSamplerState() : nil atIndex:base + index];
++		setSampler(samp ? samp->getMTLSamplerState() : nil, index);
+ 	}
+ };
+ 
+@@ -1394,18 +1402,18 @@ static void copyArgBuf(MVKDevice* device, id<MTLArgumentEncoder> enc,
+ 	for (uint32_t i = 0; i < count; i++, src += srcStride) {
+ 		if constexpr (Layout == MVKDescriptorGPULayout::Texture) {
+ 			id<MTLTexture> tex = *reinterpret_cast<const id<MTLTexture>*>(src);
+-			[enc setTexture:tex && device->getLiveResources().isLive(tex) ? tex : nil atIndex:start + i];
++			[enc setTexture:tex && device->getLiveResources().isLive(tex) ? tex : mvkGetNullResources().texture atIndex:start + i];
+ 		} else if constexpr (Layout == MVKDescriptorGPULayout::Sampler) {
+ 			id<MTLSamplerState> samp = *reinterpret_cast<const id<MTLSamplerState>*>(src);
+-			[enc setSamplerState:samp && device->getLiveResources().isLive(samp) ? samp : nil atIndex:start + i];
++			[enc setSamplerState:samp && device->getLiveResources().isLive(samp) ? samp : mvkGetNullResources().sampler atIndex:start + i];
+ 		} else if constexpr (Layout == MVKDescriptorGPULayout::Buffer) {
+ 			id<MTLBuffer> buf = *reinterpret_cast<const id<MTLBuffer>*>(src);
+ 			uint64_t offset = *reinterpret_cast<const uint64_t*>(src + bufferOffsetOffset);
+ 			if (buf) {
+ 				auto live = device->getLiveResources().isLive(buf);
+-				[enc setBuffer:live ? buf : nil offset:live ? offset : 0 atIndex:start + i];
++				[enc setBuffer:live ? buf : mvkGetNullResources().buffer offset:live ? offset : 0 atIndex:start + i];
+ 			} else {
+-				[enc setBuffer:nil offset:0 atIndex:start + i];
++				[enc setBuffer:mvkGetNullResources().buffer offset:0 atIndex:start + i];
+ 			}
+ 		} else {
+ 			static_assert(Layout != Layout, "Other layouts are unsupported");
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
+index 534a414..3aee12f 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
+@@ -1061,6 +1061,7 @@ protected:
+     void initPerformanceTracking();
+ 	void initPhysicalDevice(MVKPhysicalDevice* physicalDevice, const VkDeviceCreateInfo* pCreateInfo);
+ 	void initQueues(const VkDeviceCreateInfo* pCreateInfo);
++	void initNullResources();
+ 	void initConfiguration();
+ 	void reservePrivateData(const VkDeviceCreateInfo* pCreateInfo);
+ 	void enableFeatures(const VkDeviceCreateInfo* pCreateInfo);
+@@ -1318,3 +1319,16 @@ NSArray<id<MTLDevice>>* mvkGetAvailableMTLDevicesArray(MVKInstance* instance);
+  * the returned value will be zero.
+  */
+ uint64_t mvkGetLocationID(id<MTLDevice> mtlDevice);
++
++/**
++ * Zeroed resources bound in place of empty descriptors. Without nullDescriptor,
++ * applications such as vkd3d-proton still leave descriptors empty that shaders
++ * read, and Metal faults on a nil resource ("Invalid Resource") where Vulkan with
++ * nullDescriptor would return zero. All nil until a device has created them.
++ */
++struct MVKNullResources {
++	id<MTLBuffer> buffer = nil;
++	id<MTLTexture> texture = nil;
++	id<MTLSamplerState> sampler = nil;
++};
++const MVKNullResources& mvkGetNullResources();
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index fc3924e..f8e48c4 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -5149,6 +5149,7 @@ MVKDevice::MVKDevice(MVKPhysicalDevice* physicalDevice, const VkDeviceCreateInfo
+ 	enableExtensions(pCreateInfo);
+ 	enableFeatures(pCreateInfo);
+ 	initQueues(pCreateInfo);
++	initNullResources();
+ 	reservePrivateData(pCreateInfo);
+ 	initConfiguration();
+ 
+@@ -5453,6 +5454,43 @@ void MVKDevice::enableExtensions(const VkDeviceCreateInfo* pCreateInfo) {
+ 													 &_physicalDevice->_supportedExtensions));
+ }
+ 
++static MVKNullResources _mvkNullResources;
++
++const MVKNullResources& mvkGetNullResources() { return _mvkNullResources; }
++
++// Large enough for any uniform buffer an application could expect
++static constexpr NSUInteger kMVKNullBufferSize = 64 * KIBI;
++
++void MVKDevice::initNullResources() {
++	static std::once_flag once;
++	id<MTLDevice> mtlDev = _physicalDevice->getMTLDevice();
++	std::call_once(once, [mtlDev]() {
++		@autoreleasepool {
++			id<MTLBuffer> buffer = [mtlDev newBufferWithLength: kMVKNullBufferSize options: MTLResourceStorageModeShared];	// retained
++			memset(buffer.contents, 0, kMVKNullBufferSize);
++			buffer.label = @"MoltenVK null descriptor buffer";
++
++			MTLTextureDescriptor* texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: MTLPixelFormatRGBA8Unorm
++																							   width: 1 height: 1 mipmapped: NO];
++			texDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
++			texDesc.storageMode = MTLStorageModeShared;
++			id<MTLTexture> texture = [mtlDev newTextureWithDescriptor: texDesc];	// retained
++			uint32_t zero = 0;
++			[texture replaceRegion: MTLRegionMake2D(0, 0, 1, 1) mipmapLevel: 0 withBytes: &zero bytesPerRow: sizeof(zero)];
++			texture.label = @"MoltenVK null descriptor texture";
++
++			MTLSamplerDescriptor* sampDesc = [MTLSamplerDescriptor new];	// temp retained
++			sampDesc.supportArgumentBuffers = YES;
++			id<MTLSamplerState> sampler = [mtlDev newSamplerStateWithDescriptor: sampDesc];	// retained
++			[sampDesc release];
++
++			_mvkNullResources = { buffer, texture, sampler };
++		}
++	});
++	makeResident(_mvkNullResources.buffer);
++	makeResident(_mvkNullResources.texture);
++}
++
+ // Create the command queues
+ void MVKDevice::initQueues(const VkDeviceCreateInfo* pCreateInfo) {
+ #if MVK_XCODE_16
+-- 
+2.56.0
+

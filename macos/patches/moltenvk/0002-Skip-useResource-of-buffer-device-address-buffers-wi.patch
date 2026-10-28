@@ -1,0 +1,46 @@
+From ef1874aa97fa6245f131fd3f059daadbf93883c5 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 16:40:17 +0100
+Subject: [PATCH 2/3] Skip useResource of buffer device address buffers with a
+ residency set.
+
+encodeGPUAddressableBuffers collects every buffer with a device address
+for useResource, which runs only at the next draw. A buffer destroyed on
+another thread in between leaves a dangling MTLBuffer there: useResources
+then crashes in objc_msgSend or the command buffer fails with "Invalid
+Resource". With a residency set the memory of these buffers is resident
+already, so skip the list. vkd3d-proton, which uses buffer device
+addresses throughout, hit this within seconds.
+
+Also log whether resources are made resident through a residency set.
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index 6fc4443..fc3924e 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -4601,6 +4601,11 @@ MVKBuffer* MVKDevice::removeBuffer(MVKBuffer* mvkBuff) {
+ }
+ 
+ void MVKDevice::encodeGPUAddressableBuffers(MVKUseResourceHelper& resources, MVKResourceUsageStages stage) {
++	// The residency set already holds the memory of these buffers. The list used here
++	// is handed to useResource only at the next draw, by when another thread may have
++	// destroyed a buffer, which faults in Metal or loses the device ("Invalid Resource").
++	if (hasResidencySet()) { return; }
++
+ 	lock_guard<mutex> lock(_rezLock);
+ 	for (auto& buff : _gpuAddressableBuffers) {
+ 		resources.add(buff->getMTLBuffer(), stage, true);
+@@ -5466,6 +5471,7 @@ void MVKDevice::initQueues(const VkDeviceCreateInfo* pCreateInfo) {
+ 		[setDescriptor release];
+ 	}
+ #endif
++	MVKLogInfo("Resources are made resident %s.", hasResidencySet() ? "through a residency set" : "with useResource per encoder");
+ 
+ 	auto qFams = _physicalDevice->getQueueFamilies();
+ 	uint32_t qrCnt = pCreateInfo->queueCreateInfoCount;
+-- 
+2.56.0
+
