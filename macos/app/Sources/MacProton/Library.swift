@@ -18,6 +18,8 @@ struct Game: Codable, Identifiable, Hashable {
     /// Saves live in Steam Cloud, which macOS Steam does not download
     /// before a Windows game starts
     var steamCloud: Bool?
+    /// Launch options the user set, after Steam's arguments, e.g. "-dx11"
+    var launchOptions: String?
 
     var id: Int { appID }
 

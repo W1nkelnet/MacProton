@@ -146,6 +146,7 @@ final class Runner: ObservableObject {
         process.executableURL = Paths.runtime.appendingPathComponent("run.sh")
         process.arguments = [String(game.appID), dir, exe.lastPathComponent]
             + game.arguments.split(separator: " ").map(String.init)
+            + InstallScripts.split(game.launchOptions ?? "")
         // Apple's Metal Performance HUD, for any Metal app
         if UserDefaults.standard.bool(forKey: "metalHUD") {
             var environment = ProcessInfo.processInfo.environment

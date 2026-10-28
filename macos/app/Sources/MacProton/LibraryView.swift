@@ -238,6 +238,7 @@ struct GameCard: View {
     @State private var confirmUninstall = false
     @State private var uninstallError: String?
     @State private var showCloudImport = false
+    @State private var showLaunchOptions = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -263,6 +264,11 @@ struct GameCard: View {
                             .foregroundStyle(.secondary)
                             .help("Native Mac-Version: MacProton startet sie über Steam.")
                     }
+                }
+                if !game.runsNatively, let options = game.launchOptions {
+                    Label(options, systemImage: "slider.horizontal.3")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        .help("Startoptionen, per Rechtsklick änderbar")
                 }
                 if !(game.cloudSaves ?? []).isEmpty {
                     Label("Steam Cloud", systemImage: "icloud")
@@ -291,6 +297,7 @@ struct GameCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .contextMenu { menu }
         .sheet(isPresented: $showCloudImport) { CloudImportView(game: game) }
+        .sheet(isPresented: $showLaunchOptions) { LaunchOptionsView(game: game) }
         .confirmationDialog("\(game.name) deinstallieren?", isPresented: $confirmUninstall) {
             Button("Deinstallieren", role: .destructive) { uninstall(prefix: false) }
             Button("Deinstallieren, auch Spielstände im Prefix", role: .destructive) { uninstall(prefix: true) }
@@ -468,6 +475,7 @@ struct GameCard: View {
                     .disabled(installer.isBusy(game) || runner.isRunning(game))
             }
         }
+        Button(game.runsNatively ? "Startoptionen der Windows-Version …" : "Startoptionen …") { showLaunchOptions = true }
         Divider()
         Button("Spielordner im Finder zeigen") { reveal(game.installDir) }
         Button("Prefix im Finder zeigen") { reveal(runner.prefix(of: game).path) }
