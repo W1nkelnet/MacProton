@@ -1,10 +1,10 @@
 name: macOS build
 
-# Builds the Proton runtime for macOS and MacProton.app. Tags named v*
-# publish a GitHub release with the zipped app.
+# Builds the Proton runtime for macOS and MacProton.app on pushes to main.
+# Tags named v* publish a GitHub release with the zipped app.
 on:
   push:
-    branches: [macos-port]
+    branches: [main, macos-port]
     tags: ['v*']
   workflow_dispatch:
 
