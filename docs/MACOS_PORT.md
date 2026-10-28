@@ -47,7 +47,7 @@ Bisherige Wine-Anpassungen für macOS (alle per `#ifdef` bzw. configure, Linux-V
 | `include/wine/server_protocol.h` u. a. | per `tools/make_requests` neu erzeugt |
 - [x] x86_64-Abhängigkeiten selbst gebaut (Homebrew bietet keine Intel-Bottles mehr): MoltenVK, FreeType, GMP, nettle, GnuTLS – alle in `macos/build.sh`, Tarballs gegen feste SHA-256-Summen geprüft
 - [x] GnuTLS: ohne es scheitern in Wine die Signaturprüfung von Zertifikaten (`bcrypt: key_asymmetric_create no encryption support`) und HTTPS über schannel. Folge im Spiel war `Curl error 60: Cert verify failed` (UnityTls nutzt den Windows-Zertifikatsspeicher und dessen Prüfung). Test: `docs/macos/tls-check.c`
-- [ ] SDL2 (Controller) nachziehen
+- [x] SDL2 (Controller)
 
 Hinweis zum Testen: `DYLD_*`-Variablen überleben den Start SIP-geschützter Programme nicht (`/bin/sh`, `/usr/bin/timeout`, `/usr/bin/env`). Sie müssen nach solchen Programmen gesetzt werden – `run.sh` tut das selbst.
 
@@ -160,7 +160,7 @@ Ziel: Nutzer laden ein Release von GitHub herunter, entpacken es und starten
 ### Offene Punkte (To-do)
 
 - [x] **Spielstand-Sync (Steam Cloud)**, in MacProton umgesetzt (vor dem Start, abschaltbar; Backups unter `~/Library/Application Support/MacProton/save-backups`). Offen: prüfen, dass Mac-Steam nach dem Spielende tatsächlich hochlädt. Ursprüngliche Analyse: Spiele mit Auto-Cloud haben pro Betriebssystem eigene Speicherpfade (`ufs/rootoverrides` in den App-Infos). Mac-Steam synchronisiert nur den Mac-Pfad (z. B. `~/Library/Application Support/Massive Monster/Cult Of The Lamb/saves`), die Windows-Version speichert im Prefix (`AppData/LocalLow/...`). Plan: Gibt es eine Windows- und eine MacOS-Regel, leitet MacProton den Prefix-Ordner auf den Mac-Pfad um – vorher Backup beider Seiten. Spiele mit ISteamRemoteStorage sollten bereits über lsteamclient synchronisieren (ungetestet). Reine Windows-Spiele mit Auto-Cloud: offen.
-- [ ] **Controller-Unterstützung:** SDL2 als x86_64-Abhängigkeit bauen und Wine (winebus/dinput/xinput) damit konfigurieren.
+- [x] **Controller-Unterstützung:** SDL2 2.32.10 als x86_64-Abhängigkeit, Wine mit SDL konfiguriert (winebus hat zusätzlich das IOKit-HID-Backend). Getestet mit Xbox Wireless Controller über Bluetooth: alle Tasten, Trigger, Steuerkreuz und beide Sticks kommen über XInput an (`docs/macos/xinput-check.c`). Offen: Stick-Klicks (LS/RS) nicht geprüft, PlayStation-/Switch-Controller nicht getestet.
 - [x] **Bibliothek-Sync** (MacProton-App): `licenses_print` → abgekürzte Pakete per `package_info_print` → `app_info_print` je App in einer interaktiven steamcmd-Sitzung (über die Kommandozeile gereihte Abfragen liefert steamcmd asynchron und gibt nur die erste aus). Filter: Typ `game` mit Windows-Startdatei; Paket 0 (Steams Werkzeuge/Server) ausgenommen. Testkonto: 312 Apps → 70 Windows-Spiele, davon 28 auch nativ für Mac, ~26 s.
 - [x] Spiele mit Anti-Cheat (EasyAntiCheat, BattlEye) und Fremd-Launchern (Ubisoft Connect, EA App) erkennen und kennzeichnen (Startdateien, Steam-Deck-Prüfergebnisse, Spielordner nach Installation)
 - [ ] **Steam-Overlay:** Shop/Profil öffnen sich derzeit im Steam-Fenster.

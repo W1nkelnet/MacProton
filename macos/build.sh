@@ -15,8 +15,8 @@
 # Requires Xcode and: brew install bison flex mingw-w64 autoconf automake
 #   meson ninja glslang cmake pkgconf
 #
-# Downloads MoltenVK and freetype (git), GMP, nettle and GnuTLS (release
-# tarballs, checked against pinned SHA-256 sums).
+# Downloads MoltenVK and freetype (git), GMP, nettle, GnuTLS and SDL2
+# (release tarballs, checked against pinned SHA-256 sums).
 
 set -euo pipefail
 
@@ -28,6 +28,9 @@ NETTLE_URL=https://ftpmirror.gnu.org/nettle/nettle-4.0.tar.gz
 NETTLE_SHA256=3addbc00da01846b232fb3bc453538ea5468da43033f21bb345cb1e9073f5094
 GNUTLS_URL=https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz
 GNUTLS_SHA256=ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e
+# SDL publishes GPG signatures only; hash of the official release tarball
+SDL2_URL=https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-2.32.10.tar.gz
+SDL2_SHA256=5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165
 
 proton=$(cd "$(dirname "$0")/.." && pwd)
 build=$(mkdir -p "${1:-$proton/../build-macos}" && cd "${1:-$proton/../build-macos}" && pwd)
@@ -144,11 +147,18 @@ fix_install_names() {
         if otool -l "$lib" | grep -q "path $deps/lib "; then
             install_name_tool -delete_rpath "$deps/lib" "$lib"
         fi
-        install_name_tool -id "@rpath/$(basename "$(otool -D "$lib" | tail -1)")" "$lib"
-        for dep in $(otool -L "$lib" | awk 'NR > 1 {print $1}' | grep "^$deps/lib/"); do
+        local id
+        id=$(otool -arch x86_64 -D "$lib" | tail -1)
+        [[ $id == @rpath/* ]] || install_name_tool -id "@rpath/$(basename "$id")" "$lib"
+        for dep in $(otool -arch x86_64 -L "$lib" | awk 'NR > 1 {print $1}' | grep "^$deps/lib/"); do
             install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$lib"
         done
-        otool -l "$lib" | grep -q "path @loader_path/ " || install_name_tool -add_rpath @loader_path/ "$lib"
+        # Only libraries with @rpath dependencies need an rpath (MoltenVK has
+        # none, and no header space left for one)
+        if otool -arch x86_64 -L "$lib" | awk 'NR > 2 {print $1}' | grep -q "^@rpath/" \
+           && ! otool -l "$lib" | grep -q "path @loader_path/ "; then
+            install_name_tool -add_rpath @loader_path/ "$lib"
+        fi
     done
 }
 
@@ -172,6 +182,16 @@ do_gnutls() {
     fix_install_names
 }
 
+# Game controllers: winebus maps them to XInput/DirectInput through SDL
+do_sdl2() {
+    cmake -S "$(fetch "$SDL2_URL" "$SDL2_SHA256")" -B "$build/sdl2" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+        -DCMAKE_INSTALL_PREFIX="$deps" -DCMAKE_INSTALL_NAME_DIR=@rpath \
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
+    ninja -C "$build/sdl2" install
+    fix_install_names
+}
+
 do_wine_source() {
     cd "$proton/wine"
     XDG_CACHE_HOME="$build/cache" python3 dlls/winevulkan/make_vulkan -x vk.xml -X video.xml
@@ -189,7 +209,7 @@ do_wine_configure() {
         --build=x86_64-apple-darwin --host=x86_64-apple-darwin \
         CC="clang -arch x86_64" LDFLAGS="-L$deps/lib -Wl,-rpath,$deps/lib" \
         --prefix="$dist" --enable-archs=i386,x86_64 \
-        --without-x --without-wayland --without-sdl --without-gstreamer \
+        --without-x --without-wayland --without-gstreamer \
         --without-pulse --without-alsa --without-oss --without-udev --without-dbus --without-v4l2
 }
 
@@ -274,6 +294,7 @@ step freetype
 step gmp
 step nettle
 step gnutls
+step sdl2
 step wine_source
 step wine_configure
 step wine_build
