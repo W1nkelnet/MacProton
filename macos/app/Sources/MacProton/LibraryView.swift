@@ -8,6 +8,7 @@ struct LibraryView: View {
     @EnvironmentObject private var sync: LibrarySync
     @State private var showAdd = false
     @State private var steamRunning = Paths.steamRunning
+    @State private var steamOnline = SteamClient.isOnline
     @AppStorage("libraryFilter") private var filter = Filter.all
 
     enum Filter: String, CaseIterable {
@@ -92,8 +93,23 @@ struct LibraryView: View {
         } message: {
             Text("steamcmd braucht einmalig dein Passwort und ggf. den Steam-Guard-Code für \(installer.loginRequired ?? ""). MacProton öffnet dafür ein Terminal; die App selbst sieht deine Zugangsdaten nicht. Danach den Download erneut starten.")
         }
+        .alert("Steam ist offline", isPresented: offlineBinding) {
+            Button("Neu verbinden und spielen") {
+                let game = runner.offlineGame
+                runner.offlineGame = nil
+                runner.reconnectSteam(then: game)
+            }
+            Button("Offline spielen") {
+                if let game = runner.offlineGame { runner.play(game, allowOffline: true) }
+                runner.offlineGame = nil
+            }
+            Button("Abbrechen", role: .cancel) { runner.offlineGame = nil }
+        } message: {
+            Text(offlineText)
+        }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             steamRunning = Paths.steamRunning
+            steamOnline = SteamClient.isOnline
         }
     }
 
@@ -107,7 +123,22 @@ struct LibraryView: View {
         }
         if !steamRunning {
             Banner(text: "Steam läuft nicht. Spiele brauchen den angemeldeten Steam-Client.", color: .yellow)
+        } else if runner.reconnecting {
+            Banner(text: "Steam wird neu gestartet und meldet sich wieder an …", color: .yellow)
+        } else if steamOnline == false {
+            Banner(text: "Steam ist offline. Lobbys und Online-Funktionen in Spielen gehen erst nach dem Neuverbinden.",
+                   color: .yellow, action: ("Neu verbinden", { runner.reconnectSteam() }))
         }
+    }
+
+    private var offlineText: String {
+        "Der Steam-Client hat keine Verbindung, zum Beispiel weil steamcmd beim Download oder Synchronisieren "
+            + "dieselbe Sitzung übernommen hat. Ohne Verbindung gehen Lobbys und Online-Funktionen nicht. "
+            + "MacProton startet Steam dafür neu; Steam meldet sich mit der gespeicherten Anmeldung wieder an."
+    }
+
+    private var offlineBinding: Binding<Bool> {
+        Binding(get: { runner.offlineGame != nil }, set: { if !$0 { runner.offlineGame = nil } })
     }
 
     private var errorBinding: Binding<Bool> {
@@ -131,13 +162,19 @@ struct LibraryView: View {
 private struct Banner: View {
     let text: String
     let color: Color
+    var action: (String, () -> Void)? = nil
 
     var body: some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill")
-            .font(.callout)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            .background(color.opacity(0.18))
+        HStack {
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let action {
+                Button(action.0, action: action.1)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(color.opacity(0.18))
     }
 }
 

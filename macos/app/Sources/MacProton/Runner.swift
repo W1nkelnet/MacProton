@@ -6,6 +6,9 @@ final class Runner: ObservableObject {
     @Published private(set) var running: Set<Int> = []
     @Published var lastError: String?
     @Published var notice: String?
+    /// Game the user started while the Steam client was offline
+    @Published var offlineGame: Game?
+    @Published private(set) var reconnecting = false
 
     static var syncSaves: Bool { UserDefaults.standard.object(forKey: "syncSaves") as? Bool ?? true }
 
@@ -13,14 +16,22 @@ final class Runner: ObservableObject {
 
     func isRunning(_ game: Game) -> Bool { running.contains(game.appID) }
 
-    func play(_ game: Game) {
-        guard !isRunning(game) else { return }
+    func play(_ game: Game, allowOffline: Bool = false) {
+        guard !isRunning(game), !reconnecting else { return }
+        guard !game.launchesViaURL else {
+            lastError = "\(game.name) startet über den Launcher eines anderen Anbieters (\(game.executable.prefix { $0 != ":" })). Solche Launcher unterstützt MacProton noch nicht."
+            return
+        }
         guard Paths.runtimeAvailable else {
             lastError = "Proton-Laufzeit nicht gefunden in \(Paths.runtime.path). Lege sie in den Einstellungen fest."
             return
         }
         guard Paths.steamRunning else {
             lastError = "Steam läuft nicht. Starte Steam und melde dich an."
+            return
+        }
+        guard allowOffline || SteamClient.isOnline != false else {
+            offlineGame = game
             return
         }
 
@@ -100,6 +111,24 @@ final class Runner: ObservableObject {
         } catch {
             running.remove(appID)
             lastError = "Start fehlgeschlagen: \(error.localizedDescription)"
+        }
+    }
+
+    /// Restarts the Steam client so it logs in again, then starts the game.
+    func reconnectSteam(then game: Game? = nil) {
+        guard !reconnecting, running.isEmpty else {
+            if !running.isEmpty { lastError = "Beende zuerst die laufenden Spiele, Steam wird dafür neu gestartet." }
+            return
+        }
+        reconnecting = true
+        Task {
+            let online = await SteamClient.reconnect()
+            reconnecting = false
+            if !online {
+                lastError = "Steam hat sich nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster."
+            } else if let game {
+                play(game)
+            }
         }
     }
 
