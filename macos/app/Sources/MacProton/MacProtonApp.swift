@@ -11,7 +11,7 @@ struct MacProtonApp: App {
 
     var body: some Scene {
         WindowGroup("MacProton") {
-            LibraryView()
+            RootView()
                 .environmentObject(library)
                 .environmentObject(runner)
                 .environmentObject(installer)
@@ -24,5 +24,20 @@ struct MacProtonApp: App {
             SettingsView()
                 .environmentObject(login)
         }
+    }
+}
+
+/// Shows the welcome screen until the first setup is done, then the library.
+private struct RootView: View {
+    @EnvironmentObject private var login: SteamLogin
+    @EnvironmentObject private var steamcmdSetup: SteamCMDSetup
+    @AppStorage("onboardingDone") private var onboardingDone = false
+
+    var body: some View {
+        Group {
+            if onboardingDone { LibraryView() } else { WelcomeView() }
+        }
+        .sheet(isPresented: $login.isPresented) { LoginView() }
+        .onAppear { steamcmdSetup.setUpIfNeeded() }
     }
 }

@@ -34,6 +34,7 @@ cat > "$app/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key><string>MacProton</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>org.macproton.MacProton</string>
     <key>CFBundleName</key><string>MacProton</string>
     <key>CFBundleDisplayName</key><string>MacProton</string>
@@ -46,6 +47,19 @@ cat > "$app/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+
+# App icon, drawn by make-icon.swift
+iconset=$src/.build/AppIcon.iconset
+if [ ! -f "$src/.build/AppIcon.icns" ] || [ "$src/make-icon.swift" -nt "$src/.build/AppIcon.icns" ]; then
+    rm -rf "$iconset" && mkdir -p "$iconset"
+    swift "$src/make-icon.swift" "$iconset/icon_512x512@2x.png"
+    for px in 16 32 128 256 512; do
+        sips -z $px $px "$iconset/icon_512x512@2x.png" --out "$iconset/icon_${px}x${px}.png" >/dev/null
+        [ $px = 512 ] || sips -z $((px * 2)) $((px * 2)) "$iconset/icon_512x512@2x.png" --out "$iconset/icon_${px}x${px}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$iconset" -o "$src/.build/AppIcon.icns"
+fi
+cp "$src/.build/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 
 if [ -n "$runtime" ]; then
     rsync -a --delete "$runtime/" "$app/Contents/Resources/runtime/"

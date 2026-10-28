@@ -9,6 +9,7 @@ struct LibraryView: View {
     @EnvironmentObject private var login: SteamLogin
     @EnvironmentObject private var steamcmdSetup: SteamCMDSetup
     @State private var showAdd = false
+    @State private var search = ""
     @State private var steamRunning = Paths.steamRunning
     @State private var steamOnline = SteamClient.isOnline
     @AppStorage("libraryFilter") private var filter = Filter.all
@@ -18,7 +19,9 @@ struct LibraryView: View {
     }
 
     private var shownGames: [Game] {
-        filter == .installed ? library.games.filter { $0.isInstalled || $0.isInstalledNatively } : library.games
+        let games = filter == .installed ? library.games.filter { $0.isInstalled || $0.isInstalledNatively } : library.games
+        let query = search.trimmingCharacters(in: .whitespaces)
+        return query.isEmpty ? games : games.filter { $0.name.localizedCaseInsensitiveContains(query) }
     }
 
     private let columns = [GridItem(.adaptive(minimum: 230, maximum: 320), spacing: 16)]
@@ -41,11 +44,15 @@ struct LibraryView: View {
                     Button("Spiel hinzufügen") { showAdd = true }
                 }
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 16) {
-                        ForEach(shownGames) { GameCard(game: $0) }
+                if shownGames.isEmpty && !search.isEmpty {
+                    ContentUnavailableView.search(text: search)
+                } else {
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 16) {
+                            ForEach(shownGames) { GameCard(game: $0) }
+                        }
+                        .padding(16)
                     }
-                    .padding(16)
                 }
             }
         }
@@ -67,6 +74,7 @@ struct LibraryView: View {
                 Button { showAdd = true } label: { Label("Spiel hinzufügen", systemImage: "plus") }
             }
         }
+        .searchable(text: $search, placement: .toolbar, prompt: "Spiele suchen")
         .sheet(isPresented: $showAdd) { AddGameView() }
         .alert("Fehler", isPresented: errorBinding) {
             Button("OK") { runner.lastError = nil; installer.lastError = nil; sync.lastError = nil }
@@ -89,8 +97,6 @@ struct LibraryView: View {
         .onChange(of: installer.loginRequired) { _, account in
             if let account { login.present(account: account); installer.loginRequired = nil }
         }
-        .sheet(isPresented: $login.isPresented) { LoginView() }
-        .onAppear { steamcmdSetup.setUpIfNeeded() }
         .alert("Steam ist offline", isPresented: offlineBinding) {
             Button("Offline spielen") {
                 if let game = runner.offlineGame { runner.play(game, allowOffline: true) }
@@ -188,6 +194,8 @@ struct GameCard: View {
     @EnvironmentObject private var library: Library
     @EnvironmentObject private var runner: Runner
     @EnvironmentObject private var installer: Installer
+    @State private var confirmUninstall = false
+    @State private var uninstallError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -235,6 +243,22 @@ struct GameCard: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .contextMenu { menu }
+        .confirmationDialog("\(game.name) deinstallieren?", isPresented: $confirmUninstall) {
+            Button("Deinstallieren", role: .destructive) { uninstall(prefix: false) }
+            Button("Deinstallieren, auch Spielstände im Prefix", role: .destructive) { uninstall(prefix: true) }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Der Spielordner kommt in den Papierkorb, und das Spiel verschwindet aus der Bibliothek. Der Wine-Prefix enthält lokale Spielstände und Einstellungen; Spielstände in Steam Cloud bleiben erhalten.")
+        }
+        .alert("Deinstallieren", isPresented: Binding(get: { uninstallError != nil }, set: { if !$0 { uninstallError = nil } })) {
+            Button("OK") { uninstallError = nil }
+        } message: {
+            Text(uninstallError ?? "")
+        }
+    }
+
+    private func uninstall(prefix: Bool) {
+        uninstallError = library.uninstall(game, prefix: prefix ? runner.prefix(of: game) : nil)
     }
 
     @ViewBuilder private var status: some View {
@@ -338,6 +362,13 @@ struct GameCard: View {
             if let url = URL(string: "https://store.steampowered.com/app/\(game.appID)/") { NSWorkspace.shared.open(url) }
         }
         Divider()
+        if game.isInstalledNatively {
+            Button("Mac-Version in Steam deinstallieren") {
+                if let url = URL(string: "steam://uninstall/\(game.appID)") { NSWorkspace.shared.open(url) }
+            }
+        }
+        Button("Deinstallieren …") { confirmUninstall = true }
+            .disabled(!game.isInstalled || runner.isRunning(game) || installer.isBusy(game))
         Button("Aus der Bibliothek entfernen") { library.remove(game) }
             .disabled(runner.isRunning(game) || installer.isBusy(game))
     }

@@ -176,6 +176,25 @@ final class Library: ObservableObject {
         save()
     }
 
+    /// Moves the game's folder, and its prefix if asked, to the Trash and
+    /// removes it from the library. Only folders MacProton created are
+    /// touched; returns an error message if a folder could not be moved.
+    func uninstall(_ game: Game, prefix: URL?) -> String? {
+        var failed: [String] = []
+        let folder = URL(fileURLWithPath: game.installDir).standardizedFileURL
+        if folder.path.hasPrefix(Paths.gamesDir.standardizedFileURL.path + "/"),
+           FileManager.default.fileExists(atPath: folder.path) {
+            do { try FileManager.default.trashItem(at: folder, resultingItemURL: nil) }
+            catch { failed.append(folder.path) }
+        }
+        if let prefix, FileManager.default.fileExists(atPath: prefix.path) {
+            do { try FileManager.default.trashItem(at: prefix, resultingItemURL: nil) }
+            catch { failed.append(prefix.path) }
+        }
+        remove(game)
+        return failed.isEmpty ? nil : "Nicht in den Papierkorb gelegt:\n" + failed.joined(separator: "\n")
+    }
+
     func markPlayed(_ game: Game) {
         guard var updated = games.first(where: { $0.appID == game.appID }) else { return }
         updated.lastPlayed = Date()
