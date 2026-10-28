@@ -154,10 +154,13 @@ def prepare(runtime, game, prefix, log):
 
 
 def game_window(tool):
-    """Window number and owning process of the largest Wine window."""
+    """Window number, owning process and area in points of the largest Wine window."""
     out = subprocess.run([tool], capture_output=True, text=True).stdout.split()
     windows = [(float(out[i + 2]), out[i], out[i + 1]) for i in range(0, len(out) - 2, 3)]
-    return max(windows)[1:] if windows else (None, None)
+    if not windows:
+        return None, None, 0
+    area, window, pid = max(windows)
+    return window, pid, area
 
 
 def bring_to_front(pid):
@@ -233,8 +236,9 @@ def test_game(game, runtime, seconds, out, tool):
         while time.time() - started < seconds:
             time.sleep(10)
             alive = any(exe_name in p.lower() for p in processes())
-            window, pid = game_window(tool)
+            window, pid, area = game_window(tool)
             if window:
+                result["window_area"] = area
                 bring_to_front(pid)
                 result["window"] = True
                 if subprocess.run(["/usr/sbin/screencapture", "-x", "-l", window, shots]).returncode == 0:
@@ -276,6 +280,9 @@ def verdict(r):
         return "beendet"
     if r["brightness"] is not None and r["brightness"] < 4:
         return "schwarzes Bild"
+    # An error message or a launcher rather than the game, check the picture
+    if r.get("window_area", 0) < 600 * 400:
+        return "Meldung oder Launcher"
     if r["pipelines"] or r["shaders_failed"]:
         return "läuft, Shader-Fehler"
     return "läuft"

@@ -1,0 +1,34 @@
+From d9488efb6704cc9294376b44e43f2ab1554776cc Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 22:15:15 +0100
+Subject: [PATCH] MSL: Treat early declared stage variables as function locals.
+
+With captured output, as for vertex shaders feeding tessellation,
+outputs count as device memory. Outputs that share a location through
+Component decorations are declared as locals at entry point scope and
+copied to the buffer at the end, though, and scalar writes into them
+were cast to a device pointer, which Metal rejects.
+---
+ spirv_msl.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index fe5d9a8f..7169974d 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -17364,6 +17364,12 @@ bool CompilerMSL::variable_decl_is_remapped_storage(const SPIRVariable &variable
+ 		// This is fine, as there cannot be concurrent writers to that memory anyways,
+ 		// so we just ignore that case.
+ 
++		// Variables declared early at entry point scope are function locals, e.g. outputs that share
++		// a location through Component decorations and are copied to the buffer at the end.
++		if (find(begin(vars_needing_early_declaration), end(vars_needing_early_declaration), variable.self) !=
++		    end(vars_needing_early_declaration))
++			return false;
++
+ 		return (variable.storage == StorageClassOutput || variable.storage == StorageClassInput) &&
+ 		       !variable_storage_requires_stage_io(variable.storage) &&
+ 		       (variable.storage != StorageClassOutput || !is_stage_output_variable_masked(variable));
+-- 
+2.56.0
+

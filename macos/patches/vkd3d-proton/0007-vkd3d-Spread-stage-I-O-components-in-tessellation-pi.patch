@@ -1,0 +1,104 @@
+From 73db545ae13f01d8813d34e08e325488675fab02 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 00:16:19 +0100
+Subject: [PATCH] vkd3d: Spread stage I/O components in tessellation pipelines
+ on MoltenVK.
+
+SPIRV-Cross cannot pack components into one location in MSL
+tessellation stages and rejects their Component decorations, which
+D3D signatures produce whenever elements share a register. In
+graphics pipelines with a hull shader, give each component its own
+location from the vertex shader outputs to the pixel shader inputs,
+one bank of 64 locations per component, so that elements spanning
+rows stay consecutive. Bump the shader revision for the changed I/O.
+---
+ include/vkd3d_shader.h                |  3 +++
+ libs/vkd3d-shader/dxil.c              | 18 ++++++++++++++++++
+ libs/vkd3d-shader/vkd3d_shader_main.c |  2 +-
+ libs/vkd3d/state.c                    |  7 +++++++
+ 4 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/include/vkd3d_shader.h b/include/vkd3d_shader.h
+index 2baae9b..7b5c0ef 100644
+--- a/include/vkd3d_shader.h
++++ b/include/vkd3d_shader.h
+@@ -264,6 +264,9 @@ enum vkd3d_shader_interface_flag
+     /* Bounds check local arrays and constant tables (and group shared memory,
+      * once dxil-spirv implements it) */
+     VKD3D_SHADER_INTERFACE_EXTENDED_ROBUSTNESS                 = 0x00001000u,
++    /* Give each component of stage I/O its own location instead of a Component decoration,
++     * which SPIRV-Cross does not support in MSL tessellation stages */
++    VKD3D_SHADER_INTERFACE_SPREAD_STAGE_IO                     = 0x00002000u,
+ };
+ 
+ struct vkd3d_shader_stage_io_entry
+diff --git a/libs/vkd3d-shader/dxil.c b/libs/vkd3d-shader/dxil.c
+index 43ff727..986e152 100644
+--- a/libs/vkd3d-shader/dxil.c
++++ b/libs/vkd3d-shader/dxil.c
+@@ -417,6 +417,16 @@ static dxil_spv_bool dxil_shader_stage_input_remap(void *userdata, const dxil_sp
+     return true;
+ }
+ 
++static dxil_spv_bool dxil_shader_stage_io_spread(void *userdata, const dxil_spv_d3d_shader_stage_io *d3d_io,
++                                                 dxil_spv_vulkan_shader_stage_io *vk_io)
++{
++    /* One bank of locations per component keeps the rows of an element consecutive,
++     * and 64 rows leave room for patch constants behind the control points. */
++    vk_io->location = vk_io->component * 64 + vk_io->location;
++    vk_io->component = 0;
++    return true;
++}
++
+ static dxil_spv_bool dxil_uav_remap(void *userdata, const dxil_spv_uav_d3d_binding *d3d_binding,
+                                     dxil_spv_uav_vulkan_binding *vk_binding)
+ {
+@@ -1392,6 +1402,14 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
+     if (shader_interface_info->stage_output_map)
+         dxil_spv_converter_set_stage_output_remapper(converter, dxil_shader_stage_output_capture, (void *)shader_interface_info->stage_output_map);
+ 
++    if (shader_interface_info->flags & VKD3D_SHADER_INTERFACE_SPREAD_STAGE_IO)
++    {
++        if (stage != DXIL_SPV_STAGE_VERTEX && !shader_interface_info->stage_input_map)
++            dxil_spv_converter_set_stage_input_remapper(converter, dxil_shader_stage_io_spread, NULL);
++        if (stage != DXIL_SPV_STAGE_PIXEL && !shader_interface_info->stage_output_map)
++            dxil_spv_converter_set_stage_output_remapper(converter, dxil_shader_stage_io_spread, NULL);
++    }
++
+     if (stage == DXIL_SPV_STAGE_DOMAIN)
+         dxil_spv_converter_set_patch_location_offset(converter, shader_interface_info->patch_location_offset);
+ 
+diff --git a/libs/vkd3d-shader/vkd3d_shader_main.c b/libs/vkd3d-shader/vkd3d_shader_main.c
+index c10e28e..168f2a5 100644
+--- a/libs/vkd3d-shader/vkd3d_shader_main.c
++++ b/libs/vkd3d-shader/vkd3d_shader_main.c
+@@ -531,7 +531,7 @@ uint64_t vkd3d_shader_get_revision(void)
+      * Might get nuked later ...
+      * It's not immediately useful for invalidating pipeline caches, since that would mostly be covered
+      * by vkd3d-proton Git hash. */
+-    return quirk_hash ^ 2;
++    return quirk_hash ^ 3;
+ }
+ 
+ struct vkd3d_shader_stage_io_entry *vkd3d_shader_stage_io_map_append(struct vkd3d_shader_stage_io_map *map,
+diff --git a/libs/vkd3d/state.c b/libs/vkd3d/state.c
+index 6dbd864..1d39c7e 100644
+--- a/libs/vkd3d/state.c
++++ b/libs/vkd3d/state.c
+@@ -2669,6 +2669,13 @@ static void d3d12_pipeline_state_init_shader_interface(struct d3d12_pipeline_sta
+         shader_interface->patch_location_offset = state->graphics.cached_desc.patch_location_offset;
+     }
+ 
++    /* SPIRV-Cross cannot pack components in MSL tessellation stages, so spread the stage I/O of
++     * the whole pipeline the same way, from the vertex shader outputs to the pixel shader inputs. */
++    if (state->pipeline_type == VKD3D_PIPELINE_TYPE_GRAPHICS &&
++            (state->graphics.stage_flags & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) &&
++            device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MOLTENVK)
++        shader_interface->flags |= VKD3D_SHADER_INTERFACE_SPREAD_STAGE_IO;
++
+ #ifdef VKD3D_ENABLE_DESCRIPTOR_QA
+     shader_interface->descriptor_qa_payload_binding = &root_signature->descriptor_qa_payload_binding;
+     shader_interface->descriptor_qa_control_binding = &root_signature->descriptor_qa_control_binding;
+-- 
+2.56.0
+

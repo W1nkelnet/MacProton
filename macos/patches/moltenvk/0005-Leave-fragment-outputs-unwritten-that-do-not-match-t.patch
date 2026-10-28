@@ -1,0 +1,87 @@
+From 74cd6fedb91fdbbb895c228dd3f8a8bd6fd476b2 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 00:16:19 +0100
+Subject: [PATCH] Leave fragment outputs unwritten that do not match their
+ attachment.
+
+Vulkan and D3D allow a fragment shader to write floats to an integer
+color attachment or the other way around, with undefined results in
+the attachment, while Metal rejects the whole pipeline. Ratchet &
+Clank: Rift Apart has such a pipeline. Mask the output instead.
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h  |  2 ++
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm | 38 +++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+index e385e9b..3eb3adb 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+@@ -341,6 +341,8 @@ protected:
+ 	void initSampleLocations(const VkGraphicsPipelineCreateInfo* pCreateInfo);
+     void initMTLRenderPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, VkPipelineCreationFeedback* pPipelineFB, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pTessCtlSS, VkPipelineCreationFeedback* pTessCtlFB, const VkPipelineShaderStageCreateInfo* pTessEvalSS, VkPipelineCreationFeedback* pTessEvalFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
+     void initShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData);
++    void disableMismatchedFragmentOutputs(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo,
++                                          const VkPipelineRenderingCreateInfo* pRendInfo, bool hasA2C);
+ 	void initReservedVertexAttributeBufferCount(const VkGraphicsPipelineCreateInfo* pCreateInfo);
+     void addVertexInputToShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo);
+     void addNextStageInputToShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, SPIRVShaderInputs& inputs);
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index 7eae64c..7512cd3 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -2033,6 +2033,43 @@ void MVKGraphicsPipeline::addFragmentOutputToPipeline(MTLRenderPipelineDescripto
+ }
+ 
+ // Initializes the shader conversion config used to prepare the MSL library used by this pipeline.
++// Vulkan and D3D let a fragment shader write floats to an integer color attachment or the other way
++// around, which leaves the attachment undefined, but Metal rejects the whole pipeline. Leave such
++// outputs unwritten instead.
++void MVKGraphicsPipeline::disableMismatchedFragmentOutputs(SPIRVToMSLConversionConfiguration& shaderConfig,
++														   const VkGraphicsPipelineCreateInfo* pCreateInfo,
++														   const VkPipelineRenderingCreateInfo* pRendInfo,
++														   bool hasA2C) {
++	if ( !_fragmentModule || !pRendInfo || !pRendInfo->pColorAttachmentFormats ) { return; }
++
++	const VkPipelineShaderStageCreateInfo* pFragmentSS = nullptr;
++	for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
++		if (pCreateInfo->pStages[i].stage == VK_SHADER_STAGE_FRAGMENT_BIT) { pFragmentSS = &pCreateInfo->pStages[i]; }
++	}
++	if ( !pFragmentSS ) { return; }
++
++	SPIRVShaderOutputs fragOutputs;
++	std::string errorLog;
++	if ( !getShaderOutputs(_fragmentModule->getSPIRV(), spv::ExecutionModelFragment, pFragmentSS->pName, fragOutputs, errorLog) ) { return; }
++
++	MVKPixelFormats* pixFmts = getPixelFormats();
++	for (auto& output : fragOutputs) {
++		uint32_t loc = output.location;
++		if (output.builtin != spv::BuiltInMax || loc >= pRendInfo->colorAttachmentCount || (hasA2C && loc == 0)) { continue; }
++		if ( !mvkIsAnyFlagEnabled(shaderConfig.options.mslOptions.enable_frag_output_mask, 1 << loc) ) { continue; }
++
++		MVKFormatType fmtType = pixFmts->getFormatType(pRendInfo->pColorAttachmentFormats[loc]);
++		bool isIntFormat = fmtType >= kMVKFormatColorInt8 && fmtType <= kMVKFormatColorUInt32;
++		bool isUIntFormat = fmtType == kMVKFormatColorUInt8 || fmtType == kMVKFormatColorUInt16 || fmtType == kMVKFormatColorUInt32;
++		auto bt = output.baseType;
++		bool isUIntOutput = bt == SPIRType::UByte || bt == SPIRType::UShort || bt == SPIRType::UInt || bt == SPIRType::UInt64;
++		bool isIntOutput = isUIntOutput || bt == SPIRType::SByte || bt == SPIRType::Short || bt == SPIRType::Int || bt == SPIRType::Int64;
++		if (isIntFormat != isIntOutput || (isIntFormat && isUIntFormat != isUIntOutput)) {
++			mvkDisableFlags(shaderConfig.options.mslOptions.enable_frag_output_mask, 1 << loc);
++		}
++	}
++}
++
+ void MVKGraphicsPipeline::initShaderConversionConfig(SPIRVToMSLConversionConfiguration& shaderConfig,
+ 													 const VkGraphicsPipelineCreateInfo* pCreateInfo,
+ 													 const SPIRVTessReflectionData& reflectData) {
+@@ -2123,6 +2160,7 @@ void MVKGraphicsPipeline::initShaderConversionConfig(SPIRVToMSLConversionConfigu
+ 				mvkEnableFlags(shaderConfig.options.mslOptions.enable_frag_output_mask, 1 << caIdx);
+ 			}
+ 		}
++		disableMismatchedFragmentOutputs(shaderConfig, pCreateInfo, pRendInfo, hasA2C);
+ 	}
+ 
+ 	shaderConfig.options.mslOptions.ios_support_base_vertex_instance = mtlFeats.baseVertexInstanceDrawing;
+-- 
+2.56.0
+
