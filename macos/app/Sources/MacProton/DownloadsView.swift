@@ -16,8 +16,9 @@ struct DownloadsView: View {
                 Section {
                     ForEach(installer.downloads) { DownloadRow(download: $0) }
                 } footer: {
-                    Text("Downloads laufen nacheinander. Beim Fortsetzen, auch nach einem Neustart von MacProton, prüft steamcmd zuerst die vorhandenen Dateien und lädt nur, was fehlt. Entfernen behält das bereits Geladene.")
+                    Text("Downloads laufen nacheinander. Beim Fortsetzen, auch nach einem Neustart von MacProton, gleicht steamcmd die vorhandenen Dateien ab und lädt nur, was fehlt. Entfernen behält das bereits Geladene.")
                         .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
