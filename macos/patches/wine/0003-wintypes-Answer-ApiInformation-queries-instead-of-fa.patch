@@ -1,0 +1,179 @@
+From 1206eab8e0a137ca00d60e64c8e48c640b7f3302 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 28 Oct 2026 22:01:05 +0100
+Subject: [PATCH] wintypes: Answer ApiInformation queries instead of failing
+ them.
+
+C++/WinRT turns the E_NOTIMPL of these stubs into an exception, and
+Ratchet & Clank: Rift Apart terminated on its check for a Windows
+Graphics Capture property. Report types as present when they have an
+activation factory, members as absent, and API contracts by major
+version for the major and minor query too.
+---
+ dlls/wintypes/main.c | 54 +++++++++++++++++++++++++++++---------------
+ 1 file changed, 36 insertions(+), 18 deletions(-)
+
+diff --git a/dlls/wintypes/main.c b/dlls/wintypes/main.c
+index 287e599..a0bd25c 100644
+--- a/dlls/wintypes/main.c
++++ b/dlls/wintypes/main.c
+@@ -18,6 +18,7 @@
+ 
+ #include "initguid.h"
+ #include "private.h"
++#include "roapi.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(wintypes);
+ 
+@@ -145,99 +146,115 @@ DEFINE_IINSPECTABLE(api_information_statics, IApiInformationStatics, struct api_
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsTypePresent(
+         IApiInformationStatics *iface, HSTRING type_name, BOOLEAN *value)
+ {
+-    FIXME("iface %p, type_name %s, value %p stub!\n", iface, debugstr_hstring(type_name), value);
++    IActivationFactory *factory;
++
++    FIXME("iface %p, type_name %s, value %p semi-stub.\n", iface, debugstr_hstring(type_name), value);
+ 
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    /* Types Wine implements have an activation factory */
++    if (SUCCEEDED(RoGetActivationFactory(type_name, &IID_IActivationFactory, (void **)&factory)))
++    {
++        IActivationFactory_Release(factory);
++        *value = TRUE;
++    }
++    else *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresent(
+         IApiInformationStatics *iface, HSTRING type_name, HSTRING method_name, BOOLEAN *value)
+ {
+-    FIXME("iface %p, type_name %s, method_name %s, value %p stub!\n", iface,
++    FIXME("iface %p, type_name %s, method_name %s, value %p semi-stub.\n", iface,
+             debugstr_hstring(type_name), debugstr_hstring(method_name), value);
+ 
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresentWithArity(
+         IApiInformationStatics *iface, HSTRING type_name, HSTRING method_name,
+         UINT32 input_parameter_count, BOOLEAN *value)
+ {
+-    FIXME("iface %p, type_name %s, method_name %s, input_parameter_count %u, value %p stub!\n",
++    FIXME("iface %p, type_name %s, method_name %s, input_parameter_count %u, value %p semi-stub.\n",
+             iface, debugstr_hstring(type_name), debugstr_hstring(method_name),
+             input_parameter_count, value);
+ 
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
+         IApiInformationStatics *iface, HSTRING type_name, HSTRING event_name, BOOLEAN *value)
+ {
+-    FIXME("iface %p, type_name %s, event_name %s, value %p stub!\n", iface,
++    FIXME("iface %p, type_name %s, event_name %s, value %p semi-stub.\n", iface,
+             debugstr_hstring(type_name), debugstr_hstring(event_name), value);
+ 
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
+         IApiInformationStatics *iface, HSTRING type_name, HSTRING property_name, BOOLEAN *value)
+ {
+-    FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
++    FIXME("iface %p, type_name %s, property_name %s, value %p semi-stub.\n", iface,
+             debugstr_hstring(type_name), debugstr_hstring(property_name), value);
+ 
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsReadOnlyPropertyPresent(
+         IApiInformationStatics *iface, HSTRING type_name, HSTRING property_name,
+         BOOLEAN *value)
+ {
+-    FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
++    FIXME("iface %p, type_name %s, property_name %s, value %p semi-stub.\n", iface,
+             debugstr_hstring(type_name), debugstr_hstring(property_name), value);
+ 
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsWriteablePropertyPresent(
+         IApiInformationStatics *iface, HSTRING type_name, HSTRING property_name, BOOLEAN *value)
+ {
+-    FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
++    FIXME("iface %p, type_name %s, property_name %s, value %p semi-stub.\n", iface,
+             debugstr_hstring(type_name), debugstr_hstring(property_name), value);
+ 
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEnumNamedValuePresent(
+         IApiInformationStatics *iface, HSTRING enum_type_name, HSTRING value_name, BOOLEAN *value)
+ {
+-    FIXME("iface %p, enum_type_name %s, value_name %s, value %p stub!\n", iface,
++    FIXME("iface %p, enum_type_name %s, value_name %s, value %p semi-stub.\n", iface,
+             debugstr_hstring(enum_type_name), debugstr_hstring(value_name), value);
+ 
+     if (!enum_type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsApiContractPresentByMajor(
+@@ -257,13 +274,14 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsApiContractPresentByM
+         IApiInformationStatics *iface, HSTRING contract_name, UINT16 major_version,
+         UINT16 minor_version, BOOLEAN *value)
+ {
+-    FIXME("iface %p, contract_name %s, major_version %u, minor_version %u, value %p stub!\n", iface,
++    FIXME("iface %p, contract_name %s, major_version %u, minor_version %u, value %p semi-stub.\n", iface,
+             debugstr_hstring(contract_name), major_version, minor_version, value);
+ 
+     if (!contract_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    *value = is_api_contract_present( contract_name, major_version );
++    return S_OK;
+ }
+ 
+ static const struct IApiInformationStaticsVtbl api_information_statics_vtbl =
+-- 
+2.56.0
+

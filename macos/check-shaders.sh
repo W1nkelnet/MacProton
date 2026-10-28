@@ -24,13 +24,13 @@ std=${METAL_STD:-metal3.2}
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
-find "$@" -name '*.metal' -print0 |
+find "$@" -name '*.metal' ! -name '._*' -print0 |
     xargs -0 -P "$(sysctl -n hw.ncpu)" -I{} sh -c '
         err=$(xcrun -sdk macosx metal -std="$1" -w -c "$2" -o /dev/null 2>&1) ||
             printf "%s\n%s\n" "$2" "$(printf "%s\n" "$err" | grep -m1 "error:")" > "$3/$(basename "$2").fail"
     ' _ "$std" {} "$out"
 
-total=$(find "$@" -name '*.metal' | wc -l | tr -d ' ')
+total=$(find "$@" -name '*.metal' ! -name '._*' | wc -l | tr -d ' ')
 failed=$(find "$out" -name '*.fail' | wc -l | tr -d ' ')
 for f in "$out"/*.fail; do
     [ -e "$f" ] || continue
