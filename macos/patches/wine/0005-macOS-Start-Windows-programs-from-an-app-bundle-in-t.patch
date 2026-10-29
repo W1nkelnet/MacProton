@@ -1,0 +1,76 @@
+From 11e60a7cb2211d1a1ad76638c4a2918d5aa6935c Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 17:52:08 +0100
+Subject: [PATCH] macOS: Start Windows programs from an app bundle in the games
+ category.
+
+macOS turns on Game Mode only for processes whose app bundle is in the
+games category; the info plist embedded in the loader does not count.
+When Wine.app/Contents/MacOS/wine is installed next to ntdll.so, ntdll
+starts Windows programs with it, and that loader finds ntdll.so three
+folders up. The bundle's Info.plist is the loader's, now with the games
+category.
+---
+ dlls/ntdll/unix/loader.c  | 14 ++++++++++++++
+ loader/main.c             |  5 +++++
+ loader/wine_info.plist.in |  4 ++++
+ 3 files changed, 23 insertions(+)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index c67aaabc225..08bdd570a71 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -446,6 +446,20 @@ static void init_paths(void)
+         bin_dir = build_relative_path( dll_dir, LIBDIR "/wine", BINDIR );
+         data_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/wine" );
+         wineloader = build_path( ntdll_dir, "wine" );
++#ifdef __APPLE__
++        {
++            /* macOS turns on Game Mode only for processes of an app bundle
++             * in the games category, so start Windows programs from one if
++             * it is installed next to ntdll.so */
++            char *bundled = build_path( ntdll_dir, "Wine.app/Contents/MacOS/wine" );
++            if (!access( bundled, X_OK ))
++            {
++                free( (char *)wineloader );
++                wineloader = bundled;
++            }
++            else free( bundled );
++        }
++#endif
+     }
+ 
+     set_dll_path();
+diff --git a/loader/main.c b/loader/main.c
+index 2775c078d96..b5a487594f5 100644
+--- a/loader/main.c
++++ b/loader/main.c
+@@ -168,6 +168,11 @@ static void *try_dlopen( const char *argv0 )
+ 
+     if ((p = remove_tail( dir, "/loader" )))
+         path = build_path( p, "dlls/ntdll/ntdll.so" );
++#ifdef __APPLE__
++    /* The copy in the app bundle that ntdll starts Windows programs from */
++    else if ((p = remove_tail( dir, "/Wine.app/Contents/MacOS" )))
++        path = build_path( p, "ntdll.so" );
++#endif
+     else
+         path = build_path( dir, "ntdll.so" );
+ 
+diff --git a/loader/wine_info.plist.in b/loader/wine_info.plist.in
+index 6495b8f90f0..ba8d28ccbcd 100644
+--- a/loader/wine_info.plist.in
++++ b/loader/wine_info.plist.in
+@@ -26,5 +26,9 @@
+     <string>WineApplication</string>
+     <key>LSUIElement</key>
+     <string>1</string>
++    <key>LSApplicationCategoryType</key>
++    <string>public.app-category.games</string>
++    <key>GCSupportsGameMode</key>
++    <true/>
+ </dict>
+ </plist>
+-- 
+2.56.0
+

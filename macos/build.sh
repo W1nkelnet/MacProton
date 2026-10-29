@@ -268,6 +268,14 @@ do_wine_install() {
             install_name_tool -delete_rpath "$deps/lib" "$f"
         fi
     done
+
+    # macOS turns on Game Mode only for processes of an app bundle in the
+    # games category (wine_info.plist); ntdll starts Windows programs from
+    # this one, and its loader finds ntdll.so three folders up
+    local bundle="$dist/lib/wine/x86_64-unix/Wine.app/Contents"
+    mkdir -p "$bundle/MacOS"
+    cp -f "$dist/lib/wine/x86_64-unix/wine" "$bundle/MacOS/wine"
+    cp -f "$build/wine/loader/wine_info.plist" "$bundle/Info.plist"
 }
 
 # dxvk_build ARCH CROSSFILE LIBDIR

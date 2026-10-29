@@ -155,6 +155,8 @@ Gewählt ist vkd3d-proton auf MoltenVK (Patches in `macos/patches/vkd3d-proton`,
 - Gemessen mit Horizon Zero Dawn (Apple M3, „Fortfahren“ bis zur Spielwelt): nach einem Update von vkd3d-proton und MoltenVK (alle Caches ungültig) rund 27 Minuten für 24.000 Pipelines; mit warmem Metal-Cache, aber ohne MSL-Cache 140 s; mit MSL-Cache 35 s. Der MSL-Cache belegt 144 MB
 - [ ] Der erste Start nach einem Update der Laufzeit bleibt lang: Horizon baut dann alle Pipelines des Spiels neu, und der Metal-Compiler lastet alle Kerne aus
 
+- [x] **Game Mode**: macOS schaltet ihn nur für Prozesse ein, deren App-Bundle in der Kategorie „Games“ steht (`LSApplicationCategoryType`), und nur solange das Spielfenster vorne ist; GamePolicyAgent sucht dafür den Bundle-Eintrag des Prozesses (`bundleRecordForAuditToken`). Die in Wines Loader eingebettete Info.plist zählt nicht. `build.sh` legt deshalb `lib/wine/x86_64-unix/Wine.app` an (Loader-Kopie und Wines Info.plist, jetzt mit Kategorie „Games“ und `GCSupportsGameMode`), ntdll startet Windows-Programme aus diesem Bundle, und dessen Loader findet `ntdll.so` drei Ordner höher (Wine-Patch 0005). `LSUIElement` bleibt, damit Hintergrundprozesse kein Dock-Symbol bekommen
+
 ### Phase 5 – Steam-Integration
 - [x] `lsteamclient`: Es gibt schon einen `__APPLE__`-Zweig in `lsteamclient/unixlib.cpp`, der `steamclient.dylib` lädt. Geprüft: Der macOS-Steam-Client liefert `steamclient.dylib` als Universal Binary (x86_64 + arm64), der Rosetta-Wineprozess kann sie also laden.
 - [x] `Steam_IsKnownInterface` und `Steam_NotifyMissingInterface` fehlen in der macOS-dylib → auf macOS optional geladen (Fallback: `false` bzw. nichts tun), damit `steamclient_init` nicht abbricht
