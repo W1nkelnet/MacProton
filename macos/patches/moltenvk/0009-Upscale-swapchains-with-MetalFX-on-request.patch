@@ -1,0 +1,254 @@
+From 359a3042632d6cc027ec43f51b93a1217cff853e Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 14:35:59 +0100
+Subject: [PATCH] Upscale swapchains with MetalFX on request.
+
+With MVK_CONFIG_UPSCALING=metalfx, a swapchain whose layer has more
+pixels than the swapchain extent, such as a window sized in points on a
+Retina display, renders to textures of its own extent, and each present
+upscales one into the drawable with a MetalFX spatial scaler. MetalFX is
+loaded at runtime.
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKImage.h      |  1 +
+ MoltenVK/MoltenVK/GPUObjects/MVKImage.mm     | 23 ++++-
+ MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h  |  6 ++
+ MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm | 96 +++++++++++++++++++-
+ 4 files changed, 122 insertions(+), 4 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.h b/MoltenVK/MoltenVK/GPUObjects/MVKImage.h
+index 45ddd3a4..b8a5d04b 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.h
+@@ -508,6 +508,7 @@ protected:
+ 
+ 	id<CAMetalDrawable> _mtlDrawable = nil;
+ 	id<MTLTexture> _mtlTextureHeadless = nil;
++	id<MTLTexture> _mtlTextureUpscaled = nil;	// Rendered to by the application when the swapchain upscales
+ 	MVKSwapchainImageAvailability _availability;
+ 	MVKSmallVector<MVKSwapchainSignaler, 1> _availabilitySignalers;
+ 	MVKSwapchainSignaler _preSignaler = {};
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+index 2b394922..b8e69027 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+@@ -1641,7 +1641,9 @@ id<CAMetalDrawable> MVKPresentableSwapchainImage::getCAMetalDrawable() {
+ 
+ // If not headless, retrieve the MTLTexture directly from the CAMetalDrawable.
+ id<MTLTexture> MVKPresentableSwapchainImage::getMTLTexture(uint8_t planeIndex) {
+-	return _mtlTextureHeadless ? _mtlTextureHeadless : getCAMetalDrawable().texture;
++	if (_mtlTextureHeadless) { return _mtlTextureHeadless; }
++	if (_mtlTextureUpscaled) { return _mtlTextureUpscaled; }
++	return getCAMetalDrawable().texture;
+ }
+ 
+ // Present the drawable and make myself available only once the command buffer has completed.
+@@ -1650,6 +1652,11 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
+ 															  MVKImagePresentInfo presentInfo) {
+ 	_swapchain->renderWatermark(getMTLTexture(0), mtlCmdBuff);
+ 
++	if (_mtlTextureUpscaled) {
++		id<MTLTexture> mtlDrawableTex = getCAMetalDrawable().texture;
++		if (mtlDrawableTex) { _swapchain->encodeUpscale(_mtlTextureUpscaled, mtlDrawableTex, mtlCmdBuff); }
++	}
++
+ 	// According to Apple, it is more performant to call MTLDrawable present from within a
+ 	// MTLCommandBuffer scheduled-handler than it is to call MTLCommandBuffer presentDrawable:.
+ 	// But get current drawable now, intead of in handler, because a new drawable might be acquired by then.
+@@ -1811,6 +1818,18 @@ MVKPresentableSwapchainImage::MVKPresentableSwapchainImage(MVKDevice* device,
+ 
+ 			_mtlTextureHeadless = [[getMTLDevice() newTextureWithDescriptor: mtlTexDesc] retain];	// retained
+ 		}
++	} else if (swapchain->isUpscaling()) {
++		@autoreleasepool {
++			MTLTextureDescriptor* mtlTexDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: getMTLPixelFormat()
++																								  width: pCreateInfo->extent.width
++																								 height: pCreateInfo->extent.height
++																							  mipmapped: NO];
++			mtlTexDesc.usage = (MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
++								MTLTextureUsagePixelFormatView | swapchain->getUpscalerInputUsage());
++			mtlTexDesc.storageMode = MTLStorageModePrivate;
++
++			_mtlTextureUpscaled = [getMTLDevice() newTextureWithDescriptor: mtlTexDesc];	// retained
++		}
+ 	}
+ }
+ 
+@@ -1819,6 +1838,8 @@ void MVKPresentableSwapchainImage::destroy() {
+ 	releaseMetalDrawable();
+ 	[_mtlTextureHeadless release];
+ 	_mtlTextureHeadless = nil;
++	[_mtlTextureUpscaled release];
++	_mtlTextureUpscaled = nil;
+ 	MVKSwapchainImage::destroy();
+ }
+ 
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h b/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h
+index 1665b514..e12454bf 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h
+@@ -116,6 +116,10 @@ protected:
+ 						  VkSwapchainPresentScalingCreateInfoKHR* pScalingInfo,
+ 						  uint32_t imgCnt);
+ 	void initSurfaceImages(const VkSwapchainCreateInfoKHR* pCreateInfo, uint32_t imgCnt);
++	void initUpscaler(CAMetalLayer* mtlLayer, MTLPixelFormat mtlPixFmt);
++	bool isUpscaling() { return _mtlUpscaler != nil; }
++	MTLTextureUsage getUpscalerInputUsage();
++	void encodeUpscale(id<MTLTexture> mtlSrcTex, id<MTLTexture> mtlDstTex, id<MTLCommandBuffer> mtlCmdBuff);
+ 	bool getIsSurfaceLost();
+ 	bool hasOptimalSurface();
+ 	uint64_t getNextAcquisitionID();
+@@ -144,5 +148,7 @@ protected:
+ 	uint32_t _presentHistoryCount = 0;
+ 	uint32_t _presentHistoryIndex = 0;
+ 	uint32_t _presentHistoryHeadIndex = 0;
++	id _mtlUpscaler = nil;					// MetalFX spatial scaler, from the image extent to the display pixels
++	VkExtent2D _upscaledExtent = {0, 0};
+ 	bool _isDeliberatelyScaled = false;
+ };
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm b/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm
+index 4c908669..2224a9e6 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm
+@@ -26,6 +26,9 @@
+ #include "MVKWatermarkTextureContent.h"
+ #include "MVKWatermarkShaderSource.h"
+ #include "mvk_datatypes.hpp"
++
++#import <MetalFX/MetalFX.h>
++#include <dlfcn.h>
+ #include <libkern/OSByteOrder.h>
+ 
+ #import "CAMetalLayer+MoltenVK.h"
+@@ -132,6 +135,9 @@ VkResult MVKSwapchain::getSurfaceStatus() {
+ bool MVKSwapchain::hasOptimalSurface() {
+ 	if (_isDeliberatelyScaled || isHeadless()) { return true; }
+ 
++	// An upscaled swapchain keeps the extent of the surface in points
++	if (isUpscaling()) { return mvkVkExtent2DsAreEqual(_surface->getNaturalExtent(), _imageExtent); }
++
+ 	VkExtent2D surfExtent = _surface->getExtent();
+ 	return (mvkVkExtent2DsAreEqual(surfExtent, _imageExtent) &&
+ 			mvkVkExtent2DsAreEqual(surfExtent, _surface->getNaturalExtent()));
+@@ -488,18 +494,20 @@ void MVKSwapchain::initCAMetalLayer(const VkSwapchainCreateInfoKHR* pCreateInfo,
+ 
+ 	VkExtent2D prevSurfaceExtent = _surface->getExtent();
+ 	auto* oldSwapchain = (MVKSwapchain*)pCreateInfo->oldSwapchain;
++	initUpscaler(mtlLayer, getPixelFormats()->getMTLPixelFormat(pCreateInfo->imageFormat));
++	VkExtent2D drawableExtent = isUpscaling() ? _upscaledExtent : _imageExtent;
+ 
+ 	// Because of a regression in Metal, the most recent one or two presentations may not
+ 	// complete and call back. Changing the CAMetalLayer drawableSize will force any incomplete
+ 	// presentations on the oldSwapchain to complete and call back, but if the drawableSize
+ 	// is not changing from the previous, we need to force those completions before resetting
+ 	// the layer to the same size on the replacement swapchain.
+-	if (oldSwapchain && mvkVkExtent2DsAreEqual(pCreateInfo->imageExtent, prevSurfaceExtent)) {
++	if (oldSwapchain && mvkVkExtent2DsAreEqual(drawableExtent, prevSurfaceExtent)) {
+ 		oldSwapchain->forceUnpresentedImageCompletion();
+ 	}
+ 
+ 	auto minMagFilter = getMVKConfig().swapchainMinMagFilterUseNearest ? kCAFilterNearest : kCAFilterLinear;
+-	mtlLayer.drawableSize = mvkCGSizeFromVkExtent2D(_imageExtent);
++	mtlLayer.drawableSize = mvkCGSizeFromVkExtent2D(drawableExtent);
+ 	mtlLayer.device = getMTLDevice();
+ 	mtlLayer.pixelFormat = getPixelFormats()->getMTLPixelFormat(pCreateInfo->imageFormat);
+ 	mtlLayer.maximumDrawableCount = imgCnt;
+@@ -511,7 +519,8 @@ void MVKSwapchain::initCAMetalLayer(const VkSwapchainCreateInfoKHR* pCreateInfo,
+ 																			  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+ 																			  VK_IMAGE_USAGE_SAMPLED_BIT |
+ 																			  VK_IMAGE_USAGE_STORAGE_BIT)) &&
+-								!mvkAreAllFlagsEnabled(pCreateInfo->flags, VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR);
++								!mvkAreAllFlagsEnabled(pCreateInfo->flags, VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR) &&
++								!isUpscaling();
+ 
+ 	if (pCreateInfo->compositeAlpha != VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
+ 		mtlLayer.opaque = pCreateInfo->compositeAlpha == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+@@ -658,5 +667,86 @@ void MVKSwapchain::destroy() {
+ 
+ MVKSwapchain::~MVKSwapchain() {
+     if (_licenseWatermark) { _licenseWatermark->destroy(); }
++	[_mtlUpscaler release];
++}
++
++
++#pragma mark Upscaling
++
++// Without Retina mode, Wine sizes windows, and so swapchains, in points, and macOS doubles each
++// image for a Retina display. With MVK_CONFIG_UPSCALING=metalfx, MetalFX upscales the images to
++// the pixels of the display instead. The application still renders to images of its own extent,
++// and each present upscales one into the drawable.
++void MVKSwapchain::initUpscaler(CAMetalLayer* mtlLayer, MTLPixelFormat mtlPixFmt) {
++	[_mtlUpscaler release];
++	_mtlUpscaler = nil;
++
++	const char* mode = getenv("MVK_CONFIG_UPSCALING");
++	if ( !mode || strcmp(mode, "metalfx") != 0 || isHeadless()) { return; }
++
++	// Loaded at runtime, so MoltenVK still runs where MetalFX is missing
++	static Class descClass = nil;
++	static dispatch_once_t once;
++	dispatch_once(&once, ^{
++		if (dlopen("/System/Library/Frameworks/MetalFX.framework/MetalFX", RTLD_LAZY | RTLD_LOCAL)) {
++			descClass = NSClassFromString(@"MTLFXSpatialScalerDescriptor");
++		}
++	});
++	if ( !descClass || ![descClass supportsDevice: getMTLDevice()]) {
++		reportWarning(VK_ERROR_FEATURE_NOT_PRESENT, "MetalFX spatial upscaling is not available on this device.");
++		return;
++	}
++
++	CGFloat scale = 1.0;
++#if MVK_MACOS && !MVK_MACCAT
++	scale = mtlLayer.screenMVK.backingScaleFactor;		// The layer's screen, else the main screen
++#endif
++	CGSize bounds = mtlLayer.bounds.size;
++	VkExtent2D out = { std::max(uint32_t(bounds.width * scale), _imageExtent.width),
++					   std::max(uint32_t(bounds.height * scale), _imageExtent.height) };
++	if (mvkVkExtent2DsAreEqual(out, _imageExtent)) { return; }	// Nothing to upscale
++
++	MTLFXSpatialScalerDescriptor* desc = [descClass new];	// temp retain
++	desc.colorTextureFormat = mtlPixFmt;
++	desc.outputTextureFormat = mtlPixFmt;
++	desc.inputWidth = _imageExtent.width;
++	desc.inputHeight = _imageExtent.height;
++	desc.outputWidth = out.width;
++	desc.outputHeight = out.height;
++	// sRGB formats read as linear values, and float formats may exceed 1
++	switch (mtlPixFmt) {
++		case MTLPixelFormatBGRA8Unorm_sRGB:
++		case MTLPixelFormatRGBA8Unorm_sRGB:
++		case MTLPixelFormatBGRA10_XR_sRGB:
++		case MTLPixelFormatBGR10_XR_sRGB:
++			desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModeLinear;
++			break;
++		default:
++			desc.colorProcessingMode = (getPixelFormats()->getFormatType(mtlPixFmt) == kMVKFormatColorFloat
++										? MTLFXSpatialScalerColorProcessingModeHDR
++										: MTLFXSpatialScalerColorProcessingModePerceptual);
++			break;
++	}
++	_mtlUpscaler = [desc newSpatialScalerWithDevice: getMTLDevice()];	// retained
++	[desc release];															// temp release
++	if ( !_mtlUpscaler) {
++		reportWarning(VK_ERROR_FEATURE_NOT_PRESENT, "Could not create a MetalFX spatial scaler for format %s.", getPixelFormats()->getName(mtlPixFmt));
++		return;
++	}
++	_upscaledExtent = out;
++	MVKLogInfo("Upscaling the swapchain from %u x %u to %u x %u with MetalFX.", _imageExtent.width, _imageExtent.height, out.width, out.height);
++}
++
++MTLTextureUsage MVKSwapchain::getUpscalerInputUsage() {
++	return ((id<MTLFXSpatialScaler>)_mtlUpscaler).colorTextureUsage;
++}
++
++void MVKSwapchain::encodeUpscale(id<MTLTexture> mtlSrcTex, id<MTLTexture> mtlDstTex, id<MTLCommandBuffer> mtlCmdBuff) {
++	auto scaler = (id<MTLFXSpatialScaler>)_mtlUpscaler;
++	scaler.colorTexture = mtlSrcTex;
++	scaler.outputTexture = mtlDstTex;
++	scaler.inputContentWidth = _imageExtent.width;
++	scaler.inputContentHeight = _imageExtent.height;
++	[scaler encodeToCommandBuffer: mtlCmdBuff];
+ }
+ 
+-- 
+2.56.0
+

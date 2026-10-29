@@ -1,12 +1,41 @@
 import AppKit
 import SwiftUI
 
+/// How the images of Windows games reach the pixels of a Retina display.
+/// MetalFX Temporal would need depth and motion vectors from the game, so
+/// only the spatial scaler is offered.
+enum Upscaling: String, CaseIterable {
+    case system, metalFX = "metalfx", nearest
+
+    var title: String {
+        switch self {
+        case .system: return "macOS (weich)"
+        case .metalFX: return "MetalFX Spatial (schärfer)"
+        case .nearest: return "Pixelgenau"
+        }
+    }
+
+    /// Read by MoltenVK
+    var environment: [String: String] {
+        switch self {
+        case .system: return [:]
+        case .metalFX: return ["MVK_CONFIG_UPSCALING": "metalfx"]
+        case .nearest: return ["MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST": "1"]
+        }
+    }
+
+    static var current: Upscaling {
+        UserDefaults.standard.string(forKey: "upscaling").flatMap(Upscaling.init) ?? .system
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var login: SteamLogin
     @AppStorage("steamAccount") private var steamAccount = ""
     @AppStorage("runtimePath") private var runtimePath = ""
     @AppStorage("syncSaves") private var syncSaves = true
     @AppStorage("metalHUD") private var metalHUD = false
+    @AppStorage("upscaling") private var upscaling = Upscaling.system
     @AppStorage("autoUpdate") private var autoUpdate = false
     @AppStorage("defaultGameLocation") private var gameLocation = ""
 
@@ -58,6 +87,11 @@ struct SettingsView: View {
             Section("Anzeige") {
                 Toggle("Metal-HUD mit FPS einblenden", isOn: $metalHUD)
                 Text("Zeigt Apples Metal-Leistungsanzeige mit Bildrate und GPU-Zeit in Windows-Spielen. Gilt ab dem nächsten Spielstart.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Hochskalierung", selection: $upscaling) {
+                    ForEach(Upscaling.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Text("Windows-Spiele rendern in der Fenstergröße in Punkten, auf einem Retina-Display rechnet macOS jedes Bild auf die doppelte Auflösung hoch. MetalFX Spatial macht das schärfer und kostet etwas GPU-Zeit, „Pixelgenau“ passt zu Pixel-Art. Gilt für Direct3D- und Vulkan-Spiele ab dem nächsten Spielstart.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Proton-Laufzeit") {

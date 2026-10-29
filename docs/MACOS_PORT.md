@@ -1,6 +1,20 @@
 # Proton auf macOS – Portierungs-Roadmap
 
-Branch: `macos-port` (abgezweigt von `proton_11.0`)
+Branch: `macos-port` (abgezweigt von `proton_11.0`, seit Ende Oktober 2026 auf Protons `bleeding-edge`)
+
+Stand der Komponenten:
+
+| Komponente | Version |
+|---|---|
+| Wine | 11.0, Proton `bleeding-edge` (674d3cdd) |
+| DXVK | `master` (0cfe089, meldet 3.1.1), dxbc-spirv 687a301 |
+| vkd3d-proton | 3.1 (4522cc1) |
+| MoltenVK | `main` nach 1.4.2 (5189f8de), SPIRV-Cross aa217aeb |
+
+Khronos hat MoltenVK im Oktober 2026 abgekündigt und empfiehlt auf Apple
+Silicon KosmicKrisp, einen Vulkan-Treiber aus Mesa. MacProton bleibt vorerst
+bei MoltenVK, weil alle macOS-Anpassungen (Geometry Shader, Ersatz-Ressourcen,
+MetalFX) darauf aufbauen; KosmicKrisp ist der Kandidat für später.
 
 ## Zielbild
 
@@ -113,11 +127,11 @@ Gewählt ist vkd3d-proton auf MoltenVK (Patches in `macos/patches/vkd3d-proton`,
 - [x] Leere Deskriptoren: MoltenVK bindet statt `nil` genullte Ersatz-Ressourcen (64-KiB-Buffer, 1×1-Textur, Sampler), auch für leere Vertex-Buffer (MoltenVK-Patch 0003)
 - [x] vkd3d schaltet auf MoltenVK dxil-spirvs erweiterte Robustheit ein (lokale Arrays, Konstanten-Tabellen). Für Threadgroup-Speicher begrenzt dxil-spirv den Index auf das letzte Element (`macos/patches/dxil-spirv`), weil Spiele knapp hinter das Ende lesen und Apple-GPUs dabei abbrechen
 - [x] SPIRV-Cross schrieb Stores über eine Zeigerkopie (`OpCopyObject` einer Access Chain) als `*_33[i] = x`, was Metal ablehnt (SPIRV-Cross-Patch 0002). Horizon Zero Dawn bekam dadurch für zwei Compute-Shader kein Pipeline-Objekt und stürzte in der Eröffnungsszene ab. Seitdem laufen Eröffnungsszene, Hauptmenü und ein neues Spiel bis in die Spielwelt
-- [x] Horizon Zero Dawn: Haut und Haare der Figuren erschienen weiß. dxil-spirv tastet bindless Farbtextur-Arrays auch mit `SampleCmp`/`GatherCmp` ab (Vulkan ignoriert den Depth-Operand von `OpTypeImage`), und SPIRV-Cross deklarierte daraufhin das ganze Array als `depth2d`: Jeder normale Zugriff im selben Shader las nur noch den Rot-Kanal. SPIRV-Cross-Patch 0003 behält die Farbdeklaration und deutet den Descriptor nur an den Vergleichsstellen als Tiefentextur (`spvAsDepth`). Betraf 198 von rund 8.000 Shadern in Horizon
+- [x] Horizon Zero Dawn: Haut und Haare der Figuren erschienen weiß. dxil-spirv tastet bindless Farbtextur-Arrays auch mit `SampleCmp`/`GatherCmp` ab (Vulkan ignoriert den Depth-Operand von `OpTypeImage`), und SPIRV-Cross deklarierte daraufhin das ganze Array als `depth2d`: Jeder normale Zugriff im selben Shader las nur noch den Rot-Kanal. Betraf 198 von rund 8.000 Shadern in Horizon. Ein eigener Patch behielt die Farbdeklaration; seit d6b093e0 macht SPIRV-Cross das selbst (`spvDepthCast` an den Vergleichsstellen), der Patch entfällt
 - [x] Geometry Shader: MoltenVK bildet sie jetzt mit Compute-Stufen nach wie die Tessellation (MoltenVK-Patch 0007, `docs/macos/geometry-shaders.md`). Der Vertex-Shader läuft als Kernel und schreibt seine Ausgaben gepackt in einen Puffer, der Geometry Shader läuft als Kernel mit einem Thread pro Primitiv und Invocation und schreibt Vertices und Strip-Indizes, ein Vertex-Shader zeichnet sie danach. Direkte, indizierte und indirekte Draws, Instanzen, Invocations, Strip-Neustarts und Punkt-Ausgabe; Test in `macos/tests/geometry/run.sh`. Nicht nachgebildet: Geometry Shader zusammen mit Tessellation, mehrere Streams und Transform Feedback
 - [x] Ratchet & Clank: Rift Apart beendete sich bei einer `ApiInformation`-Abfrage (Wine-Patch 0003) und meldete danach „keine Grafikkarte“: MoltenVK gab Apple-GPUs eine andere Geräte-ID als Wines Registry-Eintrag fürs Anzeigegerät (MoltenVK-Patch 0004). Jetzt startet der Launcher
 - [x] Tessellation-Pipelines scheiterten, weil SPIRV-Cross `Component`-Decorations in MSL-Tessellation-Stufen nicht kann. vkd3d spreizt in Pipelines mit Tessellation auf MoltenVK jede Komponente auf eine eigene Location (`64·Komponente + Zeile`), vom Vertex-Shader bis zum Pixel-Shader (vkd3d-Patch 0007)
-- [x] Tessellations-Vertex-Shader schrieben gepackte Ausgaben über einen `device`-Zeiger, obwohl sie lokal liegen (SPIRV-Cross-Patch 0004)
+- [x] Tessellations-Vertex-Shader schrieben gepackte Ausgaben über einen `device`-Zeiger, obwohl sie lokal liegen (SPIRV-Cross-Patch 0003)
 - [x] Pixel-Shader, die `float4` auf ein Integer-Renderziel schreiben (D3D erlaubt das mit undefiniertem Ergebnis), ließen Metal die ganze Pipeline ablehnen. MoltenVK lässt solche Ausgaben jetzt weg (MoltenVK-Patch 0005)
 - [ ] Ratchet & Clank: Nach „Play“ entstehen alle Pipelines, dann hängen alle Threads an Wines `vectored_handlers_section` („blocked by 0000“, der Lock hat keinen Besitzer mehr). `crs-client.dll` (Crash-Reporter) ist Pflicht-Import und lässt sich nicht abschalten
 
@@ -129,9 +143,12 @@ Gewählt ist vkd3d-proton auf MoltenVK (Patches in `macos/patches/vkd3d-proton`,
 - [x] `macos/smoke-test.py`: startet installierte Spiele aus der MacProton-Bibliothek nacheinander unbeaufsichtigt, richtet Prefix und Install-Skripte wie die App ein und hält in `report.md` fest, ob ein Fenster und ein Bild kommen, ob das Spiel abstürzt, das Gerät verliert, Pipelines scheitern oder Metal Shader ablehnt (mit `check-shaders.sh`). Klickt nicht durch Menüs; als Regressionstest nach Änderungen an der Laufzeit
 - [x] Schwarze Spielwelt in Unreal-4-Spielen (Medieval Dynasty mit D3D11): Unreal rendert die Farbkorrektur-LUT des Tonemappers mit einem Geometry Shader, der jedes Dreieck in eine Scheibe einer 3D-Textur lenkt. MoltenVK ließ ihn weg, alles landete in Scheibe 0, und das Bild wurde nach dem Tonemapping schwarz. Reicht ein Geometry Shader Dreiecke nur durch und nimmt den Layer aus einer Eingabe, schreibt MoltenVK den Layer jetzt im Vertex-Shader (MoltenVK-Patch 0006)
 - [x] Medieval Dynasty mit D3D12 verlor ein, zwei Minuten nach dem Laden der Spielwelt das Gerät („Internal Error“ 0x10d, ohne Encoder-Angabe). Eingegrenzt über Unreal-Konsolenvariablen auf `r.DFShadowScatterTileCulling`: Die Distance-Field-Schatten verteilen Objekte mit Draws ohne Render-Target auf Licht-Kacheln. vkd3d beginnt solche Passes mit dem größten Renderbereich und 2048 Ebenen (`maxFramebufferLayers`), MoltenVK gab Metal diese Ebenenzahl weiter, und die GPU bricht den Pass ab. Ohne Attachments setzt MoltenVK keine Ebenen mehr (MoltenVK-Patch 0008); `docs/macos/d3d12-uavcount.c` stellt den Fall nach. Medieval Dynasty läuft jetzt auch mit D3D12 in die Spielwelt
-- [x] Typisierte Puffer außerhalb der View: vkd3d macht solche Indizes zu `0xFFFFFFFF` und verlässt sich darauf, dass Vulkan den Zugriff verwirft. Metal tut das nicht; SPIRV-Cross prüft jetzt die Grenzen von Texel-Buffer-Lesezugriffen, Schreibzugriffen und Atomics (SPIRV-Cross-Patch 0005)
+- [x] Typisierte Puffer außerhalb der View: vkd3d macht solche Indizes zu `0xFFFFFFFF` und verlässt sich darauf, dass Vulkan den Zugriff verwirft. Metal tut das nicht; SPIRV-Cross prüft jetzt die Grenzen von Texel-Buffer-Lesezugriffen, Schreibzugriffen und Atomics (SPIRV-Cross-Patch 0004)
 - Geprüft und verworfen: Eine Ersatztextur je Texturtyp für leere Deskriptoren (Shader lesen denselben Heap-Platz als 2D, 3D, Cube und Texel-Buffer) änderte am Geräteverlust nichts
-- [ ] Spiele mit reinem D3D12 testen; ausstehend sind Stream Output und Sparse-Ressourcen, die MoltenVK fehlen. `vkCmdDrawIndirectCount` und `vkCmdDrawIndexedIndirectCount` sind in MoltenVK leer, das Feature `drawIndirectCount` meldet es nicht
+- [ ] Spiele mit reinem D3D12 testen; ausstehend sind Stream Output und Sparse-Ressourcen, die MoltenVK fehlen. `vkCmdDrawIndirectCount` und `VK_EXT_depth_clip_enable` hat MoltenVK `main` inzwischen; die Geometry-Shader-Nachbildung liest den Count-Puffer mit
+
+### Anzeige
+- [x] **Hochskalierung** (Einstellung in MacProton, „Anzeige“): Ohne Retina-Modus sind Fenster und Swapchain in Punkten groß, macOS verdoppelt jedes Bild bilinear. Mit `MVK_CONFIG_UPSCALING=metalfx` rendert das Spiel weiter in seine Bilder, MoltenVK rechnet sie beim Present mit MetalFX Spatial auf die Pixel des Displays hoch (MoltenVK-Patch 0009). MetalFX wird erst zur Laufzeit geladen. „Pixelgenau“ setzt `MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST`. MetalFX Temporal bräuchte Tiefe und Bewegungsvektoren vom Spiel und ist deshalb nicht wählbar
 
 ### Phase 5 – Steam-Integration
 - [x] `lsteamclient`: Es gibt schon einen `__APPLE__`-Zweig in `lsteamclient/unixlib.cpp`, der `steamclient.dylib` lädt. Geprüft: Der macOS-Steam-Client liefert `steamclient.dylib` als Universal Binary (x86_64 + arm64), der Rosetta-Wineprozess kann sie also laden.

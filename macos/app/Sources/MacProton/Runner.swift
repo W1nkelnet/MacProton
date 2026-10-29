@@ -147,12 +147,13 @@ final class Runner: ObservableObject {
         process.arguments = [String(game.appID), dir, exe.lastPathComponent]
             + game.arguments.split(separator: " ").map(String.init)
             + InstallScripts.split(game.launchOptions ?? "")
+        var environment = ProcessInfo.processInfo.environment
         // Apple's Metal Performance HUD, for any Metal app
         if UserDefaults.standard.bool(forKey: "metalHUD") {
-            var environment = ProcessInfo.processInfo.environment
             environment["MTL_HUD_ENABLED"] = "1"
-            process.environment = environment
         }
+        environment.merge(Upscaling.current.environment) { $1 }
+        process.environment = environment
         process.currentDirectoryURL = URL(fileURLWithPath: dir)
         process.standardOutput = log
         process.standardError = log
