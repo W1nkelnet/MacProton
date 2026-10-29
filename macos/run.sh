@@ -51,6 +51,9 @@ export SteamAppId=$appid SteamGameId=$appid SteamOverlayGameId=$appid
 # Keep resources alive that bound descriptor sets still reference after the
 # game destroyed them; Metal otherwise loses the device ("Invalid Resource")
 export MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES=${MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES-1}
+# MoltenVK keeps its SPIR-V to MSL conversions in the prefix, so later starts
+# skip them (MoltenVK patch 0010)
+export MVK_CONFIG_SHADER_CACHE_DIR="${MVK_CONFIG_SHADER_CACHE_DIR-$WINEPREFIX/moltenvk-cache}"
 # .NET games load ICU for globalization; Wine's icu.dll forwards to an ICU
 # build this runtime does not ship, so .NET would fail fast
 export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=${DOTNET_SYSTEM_GLOBALIZATION_INVARIANT-1}

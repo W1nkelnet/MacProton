@@ -1,0 +1,389 @@
+From b03b1da477b5d0e16fb660aa9560c7ac8be327b3 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 15:01:23 +0100
+Subject: [PATCH] Keep SPIR-V to MSL conversions in a file across runs.
+
+With MVK_CONFIG_SHADER_CACHE_DIR naming a directory, each conversion is
+appended to a file there, keyed by the SPIR-V code and the serialized
+conversion configuration a pipeline requests, and later runs take the
+MSL from the file instead of converting again. Games that build
+thousands of pipelines while loading spent about half of that time in
+SPIRV-Cross. The file is specific to the build of MoltenVK and the
+device; files of other builds are removed.
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm   | 239 ++++++++++++++++++
+ .../MoltenVK/GPUObjects/MVKShaderModule.h     |  58 +++++
+ .../MoltenVK/GPUObjects/MVKShaderModule.mm    |  19 ++
+ 3 files changed, 316 insertions(+)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index d7b59cc7..eb93fe2f 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -27,7 +27,13 @@
+ #include "MVKGeometryShaderEmulation.h"
+ #include "mvk_datatypes.hpp"
+ #include <sys/stat.h>
++#include <sys/file.h>
+ #include <sstream>
++#include <dirent.h>
++#include <dlfcn.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <mach-o/loader.h>
+ 
+ #ifndef MVK_USE_CEREAL
+ #define MVK_USE_CEREAL (1)
+@@ -3624,6 +3630,239 @@ void serialize(Archive & archive, MVKCompressor<C>& comp) {
+ }
+ 
+ 
++#pragma mark -
++#pragma mark MVKShaderDiskCache
++
++// The file starts with a header naming the build of MoltenVK and the device. Records follow, each
++// a fixed-size header and a payload, appended as soon as a conversion completes. A record cut
++// short, because the process ended while writing it, ends the file.
++
++static const char kMVKShaderDiskCacheMagic[8] = { 'M', 'V', 'K', 'S', 'H', 'D', 'C', '1' };
++static const uint32_t kMVKShaderDiskCacheRecordMagic = 0x4352564D;
++
++typedef struct {
++	char magic[8];
++	uint8_t buildUUID[16];
++	uint8_t pipelineCacheUUID[VK_UUID_SIZE];
++	uint32_t vendorID;
++	uint32_t deviceID;
++} MVKShaderDiskCacheFileHeader;
++
++typedef struct {
++	uint32_t magic;
++	uint32_t payloadSize;
++	uint64_t codeSize;
++	uint64_t codeHash;
++	uint64_t requestHash;
++	uint64_t checksum;
++} MVKShaderDiskCacheRecordHeader;
++
++static uint64_t mvkShaderDiskCacheHash(const void* data, size_t size) {
++	auto* bytes = (const uint8_t*)data;
++	uint64_t hash = 0xcbf29ce484222325ull;		// FNV-1a
++	for (size_t i = 0; i < size; i++) { hash = (hash ^ bytes[i]) * 0x100000001b3ull; }
++	return hash;
++}
++
++// The UUID of the image holding MoltenVK, which changes with any change to its code.
++static bool mvkGetBuildUUID(uint8_t* uuid) {
++	Dl_info info;
++	if ( !dladdr((const void*)&mvkGetBuildUUID, &info) || !info.dli_fbase) { return false; }
++	auto* header = (const struct mach_header_64*)info.dli_fbase;
++	if (header->magic != MH_MAGIC_64) { return false; }
++	auto* cmd = (const struct load_command*)(header + 1);
++	for (uint32_t i = 0; i < header->ncmds; i++) {
++		if (cmd->cmd == LC_UUID) {
++			memcpy(uuid, ((const struct uuid_command*)cmd)->uuid, 16);
++			return true;
++		}
++		cmd = (const struct load_command*)((const uint8_t*)cmd + cmd->cmdsize);
++	}
++	return false;
++}
++
++MVKShaderDiskCache* MVKShaderDiskCache::get(MVKBaseDeviceObject* obj) {
++#if MVK_USE_CEREAL
++	static const char* dir = getenv("MVK_CONFIG_SHADER_CACHE_DIR");
++	if ( !dir || !*dir ) { return nullptr; }
++
++	static uint8_t buildUUID[16];
++	static bool hasBuildUUID = mvkGetBuildUUID(buildUUID);
++	if ( !hasBuildUUID ) { return nullptr; }
++
++	MVKShaderDiskCacheFileHeader hdr;
++	memset(&hdr, 0, sizeof(hdr));
++	memcpy(hdr.magic, kMVKShaderDiskCacheMagic, sizeof(hdr.magic));
++	memcpy(hdr.buildUUID, buildUUID, sizeof(hdr.buildUUID));
++	auto& props = obj->getDeviceProperties();
++	memcpy(hdr.pipelineCacheUUID, props.pipelineCacheUUID, VK_UUID_SIZE);
++	hdr.vendorID = props.vendorID;
++	hdr.deviceID = props.deviceID;
++
++	char name[64];
++	snprintf(name, sizeof(name), "moltenvk-%016llx.cache", mvkShaderDiskCacheHash(&hdr, sizeof(hdr)));
++
++	// Caches live as long as the process
++	static mutex cachesLock;
++	static unordered_map<string, MVKShaderDiskCache*> caches;
++	lock_guard<mutex> lock(cachesLock);
++	auto& cache = caches[name];
++	if ( !cache ) { cache = new MVKShaderDiskCache(dir, name, &hdr, sizeof(hdr)); }
++	return cache->_fd >= 0 ? cache : nullptr;
++#else
++	return nullptr;
++#endif
++}
++
++MVKShaderDiskCache::MVKShaderDiskCache(const char* dir, const char* name, const void* fileHeader, size_t fileHeaderSize) {
++	auto& hdr = *(const MVKShaderDiskCacheFileHeader*)fileHeader;
++	mkdir(dir, 0755);
++
++	// Remove the files of other builds, and keep those of other devices
++	if (DIR* dirStream = opendir(dir)) {
++		while (struct dirent* ent = readdir(dirStream)) {
++			size_t len = strlen(ent->d_name);
++			if (strncmp(ent->d_name, "moltenvk-", 9) != 0 || len < 6 || strcmp(ent->d_name + len - 6, ".cache") != 0) { continue; }
++			string path = string(dir) + "/" + ent->d_name;
++			MVKShaderDiskCacheFileHeader other;
++			int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
++			if (fd < 0) { continue; }
++			bool isStale = (read(fd, &other, sizeof(other)) == sizeof(other) &&
++							memcmp(other.magic, hdr.magic, sizeof(hdr.magic)) == 0 &&
++							memcmp(other.buildUUID, hdr.buildUUID, sizeof(hdr.buildUUID)) != 0);
++			close(fd);
++			if (isStale) { unlink(path.c_str()); }
++		}
++		closedir(dirStream);
++	}
++
++	string path = string(dir) + "/" + name;
++	_fd = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
++	if (_fd < 0) {
++		MVKBaseObject::reportMessage(nullptr, MVK_CONFIG_LOG_LEVEL_WARNING, "Could not open the shader cache %s: %s", path.c_str(), strerror(errno));
++		return;
++	}
++
++	// Other processes may append to the same file
++	flock(_fd, LOCK_EX);
++	MVKShaderDiskCacheFileHeader fileHdr;
++	if (pread(_fd, &fileHdr, sizeof(fileHdr), 0) != sizeof(fileHdr) || memcmp(&fileHdr, &hdr, sizeof(hdr)) != 0) {
++		if (ftruncate(_fd, 0) != 0 || pwrite(_fd, &hdr, sizeof(hdr), 0) != sizeof(hdr)) {
++			MVKBaseObject::reportMessage(nullptr, MVK_CONFIG_LOG_LEVEL_WARNING, "Could not write the shader cache %s: %s", path.c_str(), strerror(errno));
++			flock(_fd, LOCK_UN);
++			close(_fd);
++			_fd = -1;
++			return;
++		}
++	}
++
++	struct stat st;
++	fstat(_fd, &st);
++	uint64_t end = sizeof(hdr);
++	MVKShaderDiskCacheRecordHeader rec;
++	while (end + sizeof(rec) <= (uint64_t)st.st_size &&
++		   pread(_fd, &rec, sizeof(rec), end) == sizeof(rec) &&
++		   rec.magic == kMVKShaderDiskCacheRecordMagic &&
++		   end + sizeof(rec) + rec.payloadSize <= (uint64_t)st.st_size) {
++		_index[{rec.codeSize, rec.codeHash, rec.requestHash}] = {end + sizeof(rec), rec.payloadSize, rec.checksum};
++		end += sizeof(rec) + rec.payloadSize;
++	}
++	if (end < (uint64_t)st.st_size) { ftruncate(_fd, end); }
++	flock(_fd, LOCK_UN);
++
++	MVKBaseObject::reportMessage(nullptr, MVK_CONFIG_LOG_LEVEL_INFO, "Shader cache %s holds %zu conversions.", path.c_str(), _index.size());
++}
++
++uint64_t MVKShaderDiskCache::getRequestHash(const SPIRVToMSLConversionConfiguration& request) {
++#if MVK_USE_CEREAL
++	// MoltenVK compares options bytewise, padding included, so hash their serialized form instead
++	auto config = request;
++	ostringstream stream;
++	try {
++		cereal::BinaryOutputArchive writer(stream);
++		writer(config);
++	} catch (cereal::Exception&) {
++		return 0;
++	}
++	string bytes = stream.str();
++	return mvkShaderDiskCacheHash(bytes.data(), bytes.size());
++#else
++	return 0;
++#endif
++}
++
++bool MVKShaderDiskCache::find(MVKShaderModuleKey smKey, uint64_t requestHash,
++							  SPIRVToMSLConversionConfiguration& config,
++							  SPIRVToMSLConversionResultInfo& resultInfo,
++							  MVKCompressor<string>& compressedMSL) {
++#if MVK_USE_CEREAL
++	Entry entry;
++	{
++		lock_guard<mutex> lock(_lock);
++		auto iter = _index.find({smKey.codeSize, smKey.codeHash, requestHash});
++		if (iter == _index.end()) { return false; }
++		entry = iter->second;
++	}
++	string payload(entry.size, '\0');
++	if (pread(_fd, payload.data(), entry.size, entry.offset) != (ssize_t)entry.size ||
++		mvkShaderDiskCacheHash(payload.data(), payload.size()) != entry.checksum) { return false; }
++	try {
++		mvk::membuf mb(payload.data(), payload.size());
++		istream inStream(&mb);
++		cereal::BinaryInputArchive reader(inStream);
++		reader(config, resultInfo, compressedMSL);
++	} catch (cereal::Exception&) {
++		return false;
++	}
++	return true;
++#else
++	return false;
++#endif
++}
++
++void MVKShaderDiskCache::add(MVKShaderModuleKey smKey, uint64_t requestHash,
++							 const SPIRVToMSLConversionConfiguration& config,
++							 const SPIRVToMSLConversionResultInfo& resultInfo,
++							 const string& msl) {
++#if MVK_USE_CEREAL
++	auto cfg = config;
++	auto info = resultInfo;
++	MVKCompressor<string> compressedMSL;
++	compressedMSL.compress(msl, MVK_CONFIG_COMPRESSION_ALGORITHM_LZFSE);
++
++	MVKShaderDiskCacheRecordHeader rec;
++	string record(sizeof(rec), '\0');
++	{
++		ostringstream stream;
++		try {
++			cereal::BinaryOutputArchive writer(stream);
++			writer(cfg, info, compressedMSL);
++		} catch (cereal::Exception&) {
++			return;
++		}
++		record += stream.str();
++	}
++	rec.magic = kMVKShaderDiskCacheRecordMagic;
++	rec.payloadSize = uint32_t(record.size() - sizeof(rec));
++	rec.codeSize = smKey.codeSize;
++	rec.codeHash = smKey.codeHash;
++	rec.requestHash = requestHash;
++	rec.checksum = mvkShaderDiskCacheHash(record.data() + sizeof(rec), rec.payloadSize);
++	memcpy(record.data(), &rec, sizeof(rec));
++
++	Key key = {smKey.codeSize, smKey.codeHash, requestHash};
++	lock_guard<mutex> lock(_lock);
++	if (_index.count(key)) { return; }
++	flock(_fd, LOCK_EX);
++	struct stat st;
++	if (fstat(_fd, &st) == 0 && pwrite(_fd, record.data(), record.size(), st.st_size) == (ssize_t)record.size()) {
++		_index[key] = {uint64_t(st.st_size) + sizeof(rec), rec.payloadSize, rec.checksum};
++	}
++	flock(_fd, LOCK_UN);
++#endif
++}
++
++
+ #pragma mark Construction
+ 
+ MVKPipelineCache::MVKPipelineCache(MVKDevice* device, const VkPipelineCacheCreateInfo* pCreateInfo) :
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
+index c5b74991..601baf83 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
+@@ -24,6 +24,7 @@
+ #include "MVKSmallVector.h"
+ #include <MoltenVKShaderConverter/SPIRVToMSLConverter.h>
+ #include <mutex>
++#include <unordered_map>
+ 
+ #import <Metal/Metal.h>
+ 
+@@ -236,6 +237,63 @@ namespace std {
+ 	};
+ }
+ 
++#pragma mark -
++#pragma mark MVKShaderDiskCache
++
++/**
++ * Keeps the results of SPIR-V to MSL conversions in a file, so later runs skip the conversion,
++ * when the MVK_CONFIG_SHADER_CACHE_DIR environment variable names a directory. Entries are keyed
++ * by the SPIR-V code and the shader conversion configuration a pipeline requests. Each build of
++ * MoltenVK and each device has a file of its own, and files of other builds are removed.
++ */
++class MVKShaderDiskCache {
++
++public:
++
++	/** Returns the cache for the device of the object, or null if there is none. */
++	static MVKShaderDiskCache* get(MVKBaseDeviceObject* obj);
++
++	/** Returns the key of a requested shader conversion configuration, before conversion. */
++	uint64_t getRequestHash(const mvk::SPIRVToMSLConversionConfiguration& request);
++
++	/** Looks up a conversion, returning the configuration after conversion with its results. */
++	bool find(MVKShaderModuleKey smKey, uint64_t requestHash,
++			  mvk::SPIRVToMSLConversionConfiguration& config,
++			  mvk::SPIRVToMSLConversionResultInfo& resultInfo,
++			  MVKCompressor<std::string>& compressedMSL);
++
++	/** Adds a conversion, with the configuration after conversion. */
++	void add(MVKShaderModuleKey smKey, uint64_t requestHash,
++			 const mvk::SPIRVToMSLConversionConfiguration& config,
++			 const mvk::SPIRVToMSLConversionResultInfo& resultInfo,
++			 const std::string& msl);
++
++protected:
++	struct Key {
++		uint64_t codeSize;
++		uint64_t codeHash;
++		uint64_t requestHash;
++		bool operator==(const Key& rhs) const {
++			return codeSize == rhs.codeSize && codeHash == rhs.codeHash && requestHash == rhs.requestHash;
++		}
++	};
++	struct KeyHash {
++		std::size_t operator()(const Key& k) const { return k.codeHash ^ (k.requestHash * 0x9E3779B97F4A7C15ull) ^ k.codeSize; }
++	};
++	struct Entry {
++		uint64_t offset;
++		uint32_t size;
++		uint64_t checksum;
++	};
++
++	MVKShaderDiskCache(const char* dir, const char* name, const void* fileHeader, size_t fileHeaderSize);
++
++	std::unordered_map<Key, Entry, KeyHash> _index;
++	std::mutex _lock;
++	int _fd = -1;
++};
++
++
+ /** Represents a Vulkan shader module. */
+ class MVKShaderModule : public MVKVulkanAPIDeviceObject {
+ 
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+index 3aa44a44..657defa2 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+@@ -323,10 +323,29 @@ MVKShaderLibrary* MVKShaderLibraryCache::getShaderLibrary(SPIRVToMSLConversionCo
+ 														  uint64_t startTime) {
+ 	bool wasAdded = false;
+ 	MVKShaderLibrary* shLib = findShaderLibrary(pShaderConfig, pShaderFeedback, startTime);
++	auto* diskCache = shLib ? nullptr : MVKShaderDiskCache::get(this);
++	uint64_t requestHash = diskCache ? diskCache->getRequestHash(*pShaderConfig) : 0;
++	if (diskCache) {
++		SPIRVToMSLConversionConfiguration cachedConfig;
++		SPIRVToMSLConversionResultInfo cachedResultInfo;
++		MVKCompressor<std::string> cachedMSL;
++		if (diskCache->find(shaderModule->getKey(), requestHash, cachedConfig, cachedResultInfo, cachedMSL)) {
++			pShaderConfig->alignWith(cachedConfig);
++			shLib = addShaderLibrary(&cachedConfig, cachedResultInfo, cachedMSL);
++			addPerformanceInterval(getPerformanceStats().shaderCompilation.shaderLibraryFromCache, startTime);
++			if (pShaderFeedback) {
++				pShaderFeedback->duration += mvkGetElapsedNanoseconds(startTime);
++			}
++			wasAdded = true;
++		}
++	}
+ 	if ( !shLib && !pipeline->shouldFailOnPipelineCompileRequired() ) {
+ 		SPIRVToMSLConversionResult conversionResult;
+ 		if (shaderModule->convert(pShaderConfig, conversionResult)) {
+ 			shLib = addShaderLibrary(pShaderConfig, conversionResult);
++			if (diskCache) {
++				diskCache->add(shaderModule->getKey(), requestHash, *pShaderConfig, conversionResult.resultInfo, conversionResult.msl);
++			}
+ 			if (pShaderFeedback) {
+ 				pShaderFeedback->duration += mvkGetElapsedNanoseconds(startTime);
+ 			}
+-- 
+2.56.0
+
