@@ -44,7 +44,7 @@ SIGNATURES = {
 WINDOWS_SWIFT = r"""
 import CoreGraphics
 let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String: Any]]
-for w in list where (w[kCGWindowOwnerName as String] as? String) == "wine" {
+for w in list where (w[kCGWindowOwnerName as String] as? String)?.lowercased() == "wine" {
     let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
     print(w[kCGWindowNumber as String] ?? 0, w[kCGWindowOwnerPID as String] ?? 0,
           (b["Width"] as? Double ?? 0) * (b["Height"] as? Double ?? 0))
