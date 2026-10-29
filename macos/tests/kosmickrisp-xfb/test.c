@@ -177,6 +177,8 @@ int main(void)
    I(vkCmdBindTransformFeedbackBuffersEXT); I(vkCmdBeginTransformFeedbackEXT); I(vkCmdEndTransformFeedbackEXT);
    I(vkCmdDrawIndirectByteCountEXT); I(vkCreateImage); I(vkGetImageMemoryRequirements); I(vkAllocateMemory);
    I(vkBindImageMemory); I(vkCreateImageView); I(vkCmdPipelineBarrier);
+   I(vkCreateQueryPool); I(vkCmdResetQueryPool); I(vkCmdBeginQueryIndexedEXT); I(vkCmdEndQueryIndexedEXT);
+   I(vkGetQueryPoolResults);
 
    VkPipelineLayoutCreateInfo plci = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
    VkPipelineLayout layout;
@@ -241,6 +243,12 @@ int main(void)
    VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
    CHECK(vkBeginCommandBuffer(cmd, &cbbi));
 
+   VkQueryPoolCreateInfo qpci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT,
+      .queryCount = 2};
+   VkQueryPool queries;
+   CHECK(vkCreateQueryPool(dev, &qpci, NULL, &queries));
+   vkCmdResetQueryPool(cmd, queries, 0, 2);
+
    VkRenderingAttachmentInfo color = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
       .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
    VkRenderingInfo rinfo = {VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {4, 4}}, .layerCount = 1,
@@ -278,7 +286,9 @@ int main(void)
     * counter and write nothing more */
    vkCmdBindTransformFeedbackBuffersEXT(cmd, 0, 1, &small.b, &zero, &small_size);
    vkCmdBeginTransformFeedbackEXT(cmd, 0, 0, NULL, NULL);
+   vkCmdBeginQueryIndexedEXT(cmd, queries, 0, 0, 0);
    vkCmdDraw(cmd, 8, 1, 0, 0);
+   vkCmdEndQueryIndexedEXT(cmd, queries, 0, 0);
    vkCmdEndTransformFeedbackEXT(cmd, 0, 1, &counters.b, &ctr_offs[3]);
    vkCmdBeginTransformFeedbackEXT(cmd, 0, 1, &counters.b, &ctr_offs[3]);
    vkCmdDraw(cmd, 1, 1, 0, 0);
@@ -299,7 +309,9 @@ int main(void)
    VkDeviceSize zeros[2] = {0, 0}, wholes[2] = {VK_WHOLE_SIZE, VK_WHOLE_SIZE};
    vkCmdBindTransformFeedbackBuffersEXT(cmd, 0, 2, two, zeros, wholes);
    vkCmdBeginTransformFeedbackEXT(cmd, 0, 0, NULL, NULL);
+   vkCmdBeginQueryIndexedEXT(cmd, queries, 1, 0, 1);
    vkCmdDraw(cmd, 4, 1, 0, 0);
+   vkCmdEndQueryIndexedEXT(cmd, queries, 1, 1);
    VkBuffer ctr2[2] = {counters.b, counters.b};
    vkCmdEndTransformFeedbackEXT(cmd, 0, 2, ctr2, &ctr_offs[5]);
 
@@ -415,6 +427,13 @@ int main(void)
       printf("  tes[%d] = %g %g %g %g%s\n", i, f[0], f[1], f[2], f[3], corner && f[3] == 10 + i / 3 ? "" : "  BAD");
       fail |= !(corner && f[3] == 10 + i / 3);
    }
+
+   uint64_t q[2][3];
+   VkResult qr = vkGetQueryPoolResults(dev, queries, 0, 2, sizeof(q), q, sizeof(q[0]),
+                                       VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+   printf("queries (%d): written %llu needed %llu available %llu; stream 1 written %llu needed %llu available %llu "
+          "(want 5 8 1; 4 4 1)\n", qr, q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2]);
+   fail |= qr || q[0][0] != 5 || q[0][1] != 8 || !q[0][2] || q[1][0] != 4 || q[1][1] != 4 || !q[1][2];
 
    printf(fail ? "FAILED\n" : "PASSED\n");
    return fail;

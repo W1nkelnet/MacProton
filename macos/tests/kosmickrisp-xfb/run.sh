@@ -7,7 +7,7 @@ dist=${1:-$here/../../../../build-macos/dist}
 lib=$dist/files/lib/kosmickrisp
 out=$(mktemp -d)
 for f in "$here"/*.vert "$here"/*.geom "$here"/*.frag "$here"/*.tesc "$here"/*.tese; do
-    glslangValidator -V -o "$out/$(basename "$f").spv" "$f" >/dev/null || exit 1
+    glslangValidator -V -o "$out/$(basename "$f").spv" "$f" >/dev/null 2>&1 || exit 1
 done
 clang -arch x86_64 -O1 -I"$here/../../../../build/src/mesa/include" -o "$out/xfbtest" "$here/test.c" \
     -L"$lib" -lMoltenVK -Wl,-rpath,"$lib"

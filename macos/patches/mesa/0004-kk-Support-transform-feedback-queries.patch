@@ -1,0 +1,211 @@
+From 643383dc0719bf2cc2f3d8762613a24f68924eb8 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 23:28:26 +0100
+Subject: [PATCH] kk: Support transform feedback queries
+
+poly's pre-GS program counts the primitives each stream writes and
+needs; point those counters at the reports of the active query of the
+stream.
+
+DXVK creates pipeline statistics pools without checking the feature,
+which hit an unreachable. Let them report zeroes.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h      |  2 +
+ src/kosmickrisp/vulkan/kk_cmd_draw.c        |  9 +++
+ src/kosmickrisp/vulkan/kk_physical_device.c |  2 +-
+ src/kosmickrisp/vulkan/kk_private.h         |  1 +
+ src/kosmickrisp/vulkan/kk_query_pool.c      | 63 +++++++++++++++++----
+ 5 files changed, 64 insertions(+), 13 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index 9c09168..7c26b03 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -200,6 +200,8 @@ struct kk_graphics_state {
+       /* Address of the byte offsets the buffers are written at, 0 while
+        * transform feedback is not active */
+       uint64_t offsets;
++      /* Reports of the active query of each stream */
++      uint64_t queries[KK_MAX_XFB_STREAMS];
+    } xfb;
+ 
+    /* Needed by vk_command_buffer::dynamic_graphics_state */
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 910a2ac..3570b5e 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -1354,6 +1354,15 @@ kk_upload_geometry_params(struct kk_cmd_buffer *cmd,
+    }
+    params.xfb_any_overflow = sink;
+ 
++   /* A query reports the primitives written and the primitives needed */
++   for (uint32_t i = 0u; i < POLY_MAX_VERTEX_STREAMS; ++i) {
++      uint64_t query = gfx->xfb.queries[i];
++      if (query) {
++         params.xfb_prims_generated_counter[i] = query;
++         params.prims_generated_counter[i] = query + sizeof(uint64_t);
++      }
++   }
++
+    if (kk_gs_xfb(cmd)) {
+       for (uint32_t i = 0u; i < KK_MAX_XFB_BUFFERS; ++i) {
+          params.xfb_base_original[i] = gfx->xfb.buffers[i].addr;
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 90289b4..f077180 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -892,7 +892,7 @@ kk_get_device_properties(
+       .maxTransformFeedbackStreamDataSize = 2048,
+       .maxTransformFeedbackBufferDataSize = 512,
+       .maxTransformFeedbackBufferDataStride = 2048,
+-      .transformFeedbackQueries = false,
++      .transformFeedbackQueries = true,
+       .transformFeedbackStreamsLinesTriangles = true,
+       .transformFeedbackRasterizationStreamSelect = false,
+       .transformFeedbackDraw = true,
+diff --git a/src/kosmickrisp/vulkan/kk_private.h b/src/kosmickrisp/vulkan/kk_private.h
+index af53092..1188101 100644
+--- a/src/kosmickrisp/vulkan/kk_private.h
++++ b/src/kosmickrisp/vulkan/kk_private.h
+@@ -25,6 +25,7 @@
+ #define KK_MIN_UBO_ALIGNMENT             64
+ #define KK_MAX_VIEWPORTS                 16
+ #define KK_MAX_XFB_BUFFERS               4
++#define KK_MAX_XFB_STREAMS               4
+ #define KK_MAX_DESCRIPTOR_SIZE           64
+ #define KK_MAX_PUSH_DESCRIPTORS          32
+ #define KK_MAX_DESCRIPTOR_SET_SIZE       (1u << 30)
+diff --git a/src/kosmickrisp/vulkan/kk_query_pool.c b/src/kosmickrisp/vulkan/kk_query_pool.c
+index 7cfe7be..d1eb48f 100644
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -38,6 +38,13 @@ kk_reports_per_query(struct kk_query_pool *pool)
+    case VK_QUERY_TYPE_OCCLUSION:
+    case VK_QUERY_TYPE_TIMESTAMP:
+       return 1;
++   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
++      /* Primitives written, primitives needed */
++      return 2;
++   case VK_QUERY_TYPE_PIPELINE_STATISTICS:
++      /* Not supported, but DXVK creates such pools without checking: they
++       * report zeroes */
++      return util_bitcount(pool->vk.pipeline_statistics);
+    default:
+       UNREACHABLE("Unsupported query type");
+    }
+@@ -76,8 +83,8 @@ kk_query_report_addr(struct kk_device *dev, struct kk_query_pool *pool,
+    struct kk_bo *bo =
+       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
+ 
+-   uint32_t index =
+-      kk_pool_is_ts(pool) ? query : kk_pool_index_ptr(pool)[query];
++   uint32_t index = kk_pool_is_oq(pool) ? kk_pool_index_ptr(pool)[query]
++                                         : query * kk_reports_per_query(pool);
+    return bo->gpu + pool->query_start + (index * sizeof(uint64_t));
+ }
+ 
+@@ -96,8 +103,8 @@ kk_query_report_map(struct kk_device *dev, struct kk_query_pool *pool,
+       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
+ 
+    uint64_t *queries = (uint64_t *)(bo->cpu + pool->query_start);
+-   uint32_t index =
+-      kk_pool_is_ts(pool) ? query : kk_pool_index_ptr(pool)[query];
++   uint32_t index = kk_pool_is_oq(pool) ? kk_pool_index_ptr(pool)[query]
++                                         : query * kk_reports_per_query(pool);
+ 
+    return (struct kk_query_report *)&queries[index];
+ }
+@@ -272,7 +279,7 @@ emit_zero_queries(struct kk_cmd_buffer *cmd, struct kk_query_pool *pool,
+    struct libkk_reset_query_args info = {
+       .availability = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu,
+       .results = results_bo->gpu + pool->query_start,
+-      .oq_index = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu + pool->index_start,
++      .oq_index = kk_pool_is_oq(pool) ? pool->bo->gpu + pool->index_start : 0u,
+ 
+       .first_query = first_index,
+       .reports_per_query = kk_reports_per_query(pool),
+@@ -428,11 +435,24 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+-kk_CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+-                 uint32_t query, VkQueryControlFlags flags)
++kk_CmdBeginQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
++                           uint32_t query, VkQueryControlFlags flags,
++                           uint32_t index)
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++
++   /* GS draws count the primitives of the stream into the reports while
++    * transform feedback is active */
++   if (pool->vk.query_type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT) {
++      cmd->state.gfx.xfb.queries[index] = kk_query_report_addr(dev, pool, query);
++      return;
++   }
++
++   if (!kk_pool_is_oq(pool))
++      return;
++
+    cmd->state.gfx.occlusion.mode = flags & VK_QUERY_CONTROL_PRECISE_BIT
+                                       ? MTL_VISIBILITY_RESULT_MODE_COUNTING
+                                       : MTL_VISIBILITY_RESULT_MODE_BOOLEAN;
+@@ -442,13 +462,25 @@ kk_CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+-kk_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+-               uint32_t query)
++kk_CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
++                 uint32_t query, VkQueryControlFlags flags)
++{
++   kk_CmdBeginQueryIndexedEXT(commandBuffer, queryPool, query, flags, 0u);
++}
++
++VKAPI_ATTR void VKAPI_CALL
++kk_CmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
++                         uint32_t query, uint32_t index)
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
+-   cmd->state.gfx.occlusion.mode = MTL_VISIBILITY_RESULT_MODE_DISABLED;
+-   cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;
++
++   if (pool->vk.query_type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT) {
++      cmd->state.gfx.xfb.queries[index] = 0u;
++   } else if (kk_pool_is_oq(pool)) {
++      cmd->state.gfx.occlusion.mode = MTL_VISIBILITY_RESULT_MODE_DISABLED;
++      cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;
++   }
+ 
+    /* Make the query available. The Vulkan spec states:
+     * If queries are used while executing a render pass instance that has
+@@ -469,6 +501,13 @@ kk_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+    }
+ }
+ 
++VKAPI_ATTR void VKAPI_CALL
++kk_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
++               uint32_t query)
++{
++   kk_CmdEndQueryIndexedEXT(commandBuffer, queryPool, query, 0u);
++}
++
+ static bool
+ kk_query_is_available(struct kk_device *dev, struct kk_query_pool *pool,
+                       uint32_t query)
+@@ -594,7 +633,7 @@ kk_CmdCopyQueryPoolResultsToMemoryKHR(
+    struct libkk_copy_queries_args args = {
+       .availability = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu,
+       .results = results_bo->gpu + pool->query_start,
+-      .oq_index = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu + pool->index_start,
++      .oq_index = kk_pool_is_oq(pool) ? pool->bo->gpu + pool->index_start : 0u,
+       .dst_addr = pDstRange->address,
+       .dst_stride = pDstRange->stride,
+       .first_query = firstQuery,
+-- 
+2.56.0
+
