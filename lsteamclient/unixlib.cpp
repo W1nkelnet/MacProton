@@ -946,8 +946,7 @@ static void collapse_path( WCHAR *path, UINT mark )
 static char *get_unix_file_name( const WCHAR *path )
 {
     NTSTATUS status;
-    ULONG size = 256;
-    char *buffer;
+    char *buffer = NULL;
 
     status = ntdll_get_unix_file_name( path, &buffer, FILE_OPEN_IF );
 
@@ -971,21 +970,31 @@ static void url_unescape( WCHAR *s )
 {
     unsigned int i, len;
     unsigned char c, d1, d2;
+    char *tmp, *d;
 
     len = wcslen( s );
     if (len < 3) return;
+    tmp = (char *)malloc( len + 1 );
+    d = tmp;
     for (i = 0; i < len - 3; ++i)
     {
-        if (s[i] != '%') continue;
-        if ((d1 = hexdigit( s[i + 1] )) == 0xff || (d2 = hexdigit( s[i + 2] )) == 0xff)
+        if (s[i] != '%')
         {
-            ERR( "Invalid escape %s.\n", debugstr_wn( s, 3 ) );
+            *d++ = s[i];
             continue;
         }
-        s[i] = d1 * 0x10 + d2;
-        len -= 2;
-        memmove( &s[i + 1], &s[i + 3], (len - i) * sizeof(*s) );
+        if ((d1 = hexdigit( s[i + 1] )) == 0xff || (d2 = hexdigit( s[i + 2] )) == 0xff)
+        {
+            ERR( "Invalid escape %s.\n", debugstr_wn( s, 3 ));
+            continue;
+        }
+        *d++ = d1 * 0x10 + d2;
+        i += 2;
     }
+    for (    ; i <= len; ++i) *d++ = s[i];
+    RtlUTF8ToUnicodeN( s, (len + 1) * sizeof(*s), &len, tmp, strlen( tmp ) + 1 );
+    free( tmp );
+    TRACE( "-> %s.\n", debugstr_w( s ));
 }
 
 char *steamclient_dos_to_unix_path( const char *src, int is_url )
@@ -1070,12 +1079,39 @@ char *steamclient_dos_to_unix_path( const char *src, int is_url )
     }
 
 done:
-    len = strlen( buffer ) + 1;
-    if (!(dst = (char *)malloc( len ))) return NULL;
-    memcpy( dst, buffer, len );
-
+    if (is_url || !IS_ABSOLUTE(src) || !(dst = realpath( buffer, NULL )))
+    {
+        len = strlen( buffer ) + 1;
+        if (!(dst = (char *)malloc( len ))) return NULL;
+        memcpy( dst, buffer, len );
+    }
     TRACE( "-> %s\n", debugstr_a(dst) );
     return dst;
+}
+
+char *steamclient_dos_to_unix_path_fixup_slash( const char *src, int is_url )
+{
+    const char *install_dir_env;
+    char *path, *install_path, *p;
+    size_t len;
+
+    if (!(path = steamclient_dos_to_unix_path( src, is_url ))) return path;
+    if (!(install_dir_env = getenv( "STEAM_COMPAT_INSTALL_PATH" ))) return path;
+    if (!(install_path = realpath( install_dir_env, NULL ))) return path;
+    len = strlen( install_path );
+    if (!memcmp( path, install_path, len ))
+    {
+        p = path + len;
+        if (*p == '/') ++p;
+        while (*p)
+        {
+            if (*p == '/') *p = '\\';
+            ++p;
+        }
+    }
+    free( install_path );
+    TRACE( "-> %s\n", debugstr_a(path) );
+    return path;
 }
 
 void steamclient_free_path( char *path )
