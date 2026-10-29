@@ -7,6 +7,7 @@ struct LaunchOptionsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var graphics: Graphics
     @State private var extra: String
+    @State private var driver: VulkanDriver?
 
     enum Graphics: String, CaseIterable {
         case game = "", dx11 = "-dx11", dx12 = "-dx12"
@@ -34,6 +35,7 @@ struct LaunchOptionsView: View {
         let options = InstallScripts.split(game.launchOptions ?? "")
         _graphics = State(initialValue: options.compactMap(Graphics.of).last ?? .game)
         _extra = State(initialValue: options.filter { Graphics.of($0) == nil }.joined(separator: " "))
+        _driver = State(initialValue: game.vulkanDriver)
     }
 
     var body: some View {
@@ -49,6 +51,12 @@ struct LaunchOptionsView: View {
             Text("Diese Schalter verstehen vor allem Spiele mit Unreal Engine. Direct3D 11 läuft auf dem Mac am zuverlässigsten, Direct3D 12 ist noch in Arbeit.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Picker("Grafiktreiber", selection: $driver) {
+                Text("Standard (\(VulkanDriver.standard.title))").tag(VulkanDriver?.none)
+                ForEach(VulkanDriver.allCases, id: \.self) { Text($0.title).tag(VulkanDriver?.some($0)) }
+            }
+            .disabled(!VulkanDriver.kosmicKrispAvailable)
 
             TextField("Weitere Startoptionen", text: $extra, prompt: Text("z. B. -windowed"))
             if !game.arguments.isEmpty {
@@ -76,6 +84,7 @@ struct LaunchOptionsView: View {
         var updated = library.games.first { $0.appID == game.appID } ?? game
         let options = ([graphics.rawValue] + InstallScripts.split(extra)).filter { !$0.isEmpty }
         updated.launchOptions = options.isEmpty ? nil : options.joined(separator: " ")
+        updated.vulkanDriver = driver
         library.upsert(updated)
     }
 }

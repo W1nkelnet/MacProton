@@ -1,0 +1,31 @@
+From d5a4d13bd21842be4101f97f2048a8a4555aeb51 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 22:36:17 +0100
+Subject: [PATCH] vkd3d: Treat Mesa's KosmicKrisp like MoltenVK.
+
+KosmicKrisp, a Vulkan driver on Metal, lacks transform feedback too, so
+run without stream output there rather than failing to create a device.
+---
+ libs/vkd3d/device.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index d69c583..a47acfb 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -2461,8 +2461,10 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
+     VkPhysicalDeviceFeatures *features;
+     bool single_storage_texel;
+     bool single_uniform_texel;
+-    /* MoltenVK lacks some required features; run with what it has rather than not at all */
+-    bool portability = physical_device_info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_MOLTENVK;
++    /* MoltenVK lacks some required features, and so does Mesa's KosmicKrisp (driver ID 28), both on
++     * Metal; run with what they have rather than not at all */
++    bool portability = physical_device_info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_MOLTENVK ||
++            physical_device_info->vulkan_1_2_properties.driverID == (VkDriverId)28;
+ 
+     vkd3d_trace_physical_device(physical_device, physical_device_info, vk_procs);
+     vkd3d_trace_physical_device_features(physical_device_info);
+-- 
+2.56.0
+

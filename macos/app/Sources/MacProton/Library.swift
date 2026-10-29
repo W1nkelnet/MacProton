@@ -22,6 +22,8 @@ struct Game: Codable, Identifiable, Hashable {
     var steamCloud: Bool?
     /// Launch options the user set, after Steam's arguments, e.g. "-dx11"
     var launchOptions: String?
+    /// Vulkan driver for this game, nil for the default from the settings
+    var vulkanDriver: VulkanDriver?
 
     var id: Int { appID }
 
@@ -99,6 +101,34 @@ struct Game: Codable, Identifiable, Hashable {
     /// False while the disk holding the game is not connected
     var locationAvailable: Bool {
         externalVolume.map { FileManager.default.fileExists(atPath: "/Volumes/" + $0) } ?? true
+    }
+}
+
+/// The Vulkan driver DXVK and vkd3d-proton run on, both on Metal.
+enum VulkanDriver: String, Codable, CaseIterable {
+    case moltenVK = "moltenvk", kosmicKrisp = "kosmickrisp"
+
+    var title: String {
+        switch self {
+        case .moltenVK: return "MoltenVK"
+        case .kosmicKrisp: return "KosmicKrisp (Mesa)"
+        }
+    }
+
+    /// KosmicKrisp runs on Metal 4, from macOS 26
+    static var kosmicKrispAvailable: Bool {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
+    }
+
+    /// The choice in the settings
+    static var standard: VulkanDriver {
+        let stored = UserDefaults.standard.string(forKey: "vulkanDriver").flatMap(VulkanDriver.init)
+        return stored ?? .moltenVK
+    }
+
+    static func effective(for game: Game) -> VulkanDriver {
+        let driver = game.vulkanDriver ?? standard
+        return driver == .kosmicKrisp && !kosmicKrispAvailable ? .moltenVK : driver
     }
 }
 

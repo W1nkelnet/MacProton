@@ -46,6 +46,11 @@ fi
 
 export WINEPREFIX="${WINEPREFIX:-$HOME/Library/Application Support/MacProton/prefixes/$appid}"
 export DYLD_FALLBACK_LIBRARY_PATH="$dist/lib"
+# MACPROTON_VULKAN_DRIVER=kosmickrisp runs Vulkan, and so DXVK and vkd3d, on
+# Mesa's KosmicKrisp instead of MoltenVK
+if [ "${MACPROTON_VULKAN_DRIVER-}" = kosmickrisp ] && [ -f "$dist/lib/kosmickrisp/libMoltenVK.dylib" ]; then
+    export DYLD_LIBRARY_PATH="$dist/lib/kosmickrisp${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+fi
 export WINEDLLOVERRIDES="steam.exe=b;mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b;${WINEDLLOVERRIDES-}"
 export SteamAppId=$appid SteamGameId=$appid SteamOverlayGameId=$appid
 # Keep resources alive that bound descriptor sets still reference after the

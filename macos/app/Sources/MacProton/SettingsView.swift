@@ -39,6 +39,7 @@ struct SettingsView: View {
     @AppStorage("syncSaves") private var syncSaves = true
     @AppStorage("metalHUD") private var metalHUD = false
     @AppStorage("steamOverlay") private var steamOverlay = true
+    @AppStorage("vulkanDriver") private var vulkanDriver = VulkanDriver.standard
     @AppStorage("upscaling") private var upscaling = Upscaling.system
     @AppStorage("autoUpdate") private var autoUpdate = false
     @AppStorage("defaultGameLocation") private var gameLocation = ""
@@ -105,6 +106,14 @@ struct SettingsView: View {
             Section("Anzeige") {
                 Toggle("Metal-HUD mit FPS einblenden", isOn: $metalHUD)
                 Text("Zeigt Apples Metal-Leistungsanzeige mit Bildrate und GPU-Zeit in Windows-Spielen. Gilt ab dem nächsten Spielstart.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Grafiktreiber", selection: $vulkanDriver) {
+                    ForEach(VulkanDriver.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .disabled(!VulkanDriver.kosmicKrispAvailable)
+                Text(VulkanDriver.kosmicKrispAvailable
+                     ? "Der Vulkan-Treiber unter Direct3D: MoltenVK oder KosmicKrisp aus Mesa, beide auf Metal. KosmicKrisp kann mehr (Feature Level 11_1, Geometry- und Tessellation-Shader nativ). Pro Spiel lässt sich das in den Startoptionen ändern."
+                     : "KosmicKrisp braucht macOS 26 oder neuer, MacProton nutzt MoltenVK.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Steam-Overlay in Windows-Spielen", isOn: $steamOverlay)
                 Text("Umschalt+Tab öffnet im Spiel Steams Overlay mit Freunden, Chat und Shop. Gilt ab dem nächsten Spielstart.")

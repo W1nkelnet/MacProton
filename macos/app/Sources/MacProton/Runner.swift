@@ -272,6 +272,7 @@ final class Runner: ObservableObject {
             environment["MTL_HUD_ENABLED"] = "1"
         }
         environment.merge(Upscaling.current.environment) { $1 }
+        environment["MACPROTON_VULKAN_DRIVER"] = VulkanDriver.effective(for: game).rawValue
         if UserDefaults.standard.object(forKey: "steamOverlay") as? Bool == false {
             environment["MACPROTON_STEAM_OVERLAY"] = "0"
         }

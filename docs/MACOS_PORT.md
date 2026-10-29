@@ -12,9 +12,19 @@ Stand der Komponenten:
 | MoltenVK | `main` nach 1.4.2 (5189f8de), SPIRV-Cross aa217aeb |
 
 Khronos hat MoltenVK im Oktober 2026 abgekündigt und empfiehlt auf Apple
-Silicon KosmicKrisp, einen Vulkan-Treiber aus Mesa. MacProton bleibt vorerst
-bei MoltenVK, weil alle macOS-Anpassungen (Geometry Shader, Ersatz-Ressourcen,
-MetalFX) darauf aufbauen; KosmicKrisp ist der Kandidat für später.
+Silicon KosmicKrisp, einen Vulkan-Treiber aus Mesa auf Metal 4 (macOS 26+).
+MacProton baut beide (`build.sh`-Schritt `kosmickrisp`, Mesa daa925c3 mit
+`macos/patches/mesa`) und wählt pro Spiel: Einstellungen und Startoptionen,
+`MACPROTON_VULKAN_DRIVER=kosmickrisp` in `run.sh`.
+
+KosmicKrisp für MacProton:
+- Gebaut werden die Werkzeuge `mesa_clc` und `kk_clc` nativ (Homebrew-LLVM, libclc, SPIRV-LLVM-Translator), der Treiber dann für x86_64 ohne LLVM, weil Wine unter Rosetta läuft
+- Wine lädt `libMoltenVK.dylib` direkt und ruft `vkGetInstanceProcAddr`; KosmicKrisp ist ein Loader-ICD. `macos/kosmickrisp/shim.c` heißt deshalb `libMoltenVK.dylib`, verhandelt die ICD-Schnittstelle und reicht weiter, dazu `vkGetDeviceProcAddr` und `vkCreateMetalSurfaceEXT`, an dem Wine `VK_EXT_metal_surface` erkennt
+- Mesa-Patch 0001: `fillModeNonSolid` (Metal zeichnet Dreieckskanten als Linien, Punkte nicht), ohne das lehnt DXVK das Gerät ab; Timestamp-Pools über 4096 Einträge auf mehrere Metal-Counter-Heaps verteilt (Unreal mit D3D12 legt 8192 an, sonst „Out of video memory“)
+- vkd3d-Patch 0008: KosmicKrisp hat kein Transform Feedback (die Grenzwerte sind Platzhalter, Shader verwerfen die XFB-Infos), vkd3d läuft dort wie auf MoltenVK ohne Stream Output
+- Getestet: Forager (D3D11, Feature Level 11_1, unter MoltenVK nur 11_0) und Medieval Dynasty mit D3D12 bis ins Hauptmenü; das Titelbild braucht dort noch rund doppelt so viel GPU-Zeit wie unter MoltenVK
+
+UE5 mit `-dx12`: Für Shader Model 6.6 verlangt vkd3d 64-Bit-Puffer-Atomics mit allen Operationen und Compute-Shader-Ableitungen. Metal kennt bei 64 Bit nur `atomic_min`/`atomic_max` (Puffer und Texturen, auf dem M3 getestet), kein `add` oder Compare-and-Swap, und keine Ableitungen in Compute-Shadern; SM 6.2 scheitert schon an der Denormal-Steuerung. Vorgaukeln würde nur die Shader scheitern lassen, die es nutzen.
 
 ## Zielbild
 

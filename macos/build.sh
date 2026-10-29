@@ -22,6 +22,8 @@ set -euo pipefail
 
 # MoltenVK main after 1.4.2, with VK_EXT_depth_clip_enable and draw indirect count
 MOLTENVK_COMMIT=5189f8de86ec365860f63bf1da736815cfaea5cd
+# Mesa main with KosmicKrisp, its Vulkan driver on Metal 4 (macOS 26 and later)
+MESA_COMMIT=daa925c3bc78697cc214317ee330a39d1acda19f
 FREETYPE_TAG=VER-2-14-3
 GMP_URL=https://ftpmirror.gnu.org/gmp/gmp-6.3.0.tar.xz
 GMP_SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
@@ -121,6 +123,64 @@ do_moltenvk() {
     done
     (cd "$src" && ./fetchDependencies --macos --spirv-cross-root "$cross" && make macos)
     cp "$src/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" "$deps/lib/"
+}
+
+# KosmicKrisp: the build tools (mesa_clc, kk_clc) natively with Homebrew's
+# LLVM, the driver for x86_64 like Wine, and the shim Wine loads in place of
+# MoltenVK (macos/kosmickrisp/shim.c). run.sh picks it with
+# MACPROTON_VULKAN_DRIVER=kosmickrisp. Needs: brew install llvm libclc
+# spirv-llvm-translator; macOS 26 to run.
+do_kosmickrisp() {
+    local src=$deps_src/mesa
+    if [ ! -d "$src" ]; then
+        git clone https://gitlab.freedesktop.org/mesa/mesa.git "$src"
+        git -C "$src" checkout -q "$MESA_COMMIT"
+    fi
+    local patch
+    for patch in "$proton/macos/patches/mesa"/*.patch; do
+        git -C "$src" apply --reverse --check "$patch" 2>/dev/null || git -C "$src" apply "$patch"
+    done
+
+    # Mesa's generators need mako and pyyaml
+    local venv=$build/venv-mesa
+    [ -x "$venv/bin/python3" ] || { python3 -m venv "$venv" && "$venv/bin/pip" install -q mako packaging pyyaml; }
+    local common=(-Dbuildtype=release -Dplatforms=macos -Dvulkan-drivers=kosmickrisp -Dgallium-drivers=
+                  -Dopengl=false -Dzstd=disabled -Dxmlconfig=disabled --prefer-static)
+
+    PATH="$(brew --prefix llvm)/bin:$venv/bin:$PATH" meson setup --reconfigure "$build/mesa-native" "$src" "${common[@]}" \
+        -Dinstall-mesa-clc=true -Dinstall-precomp-compiler=true -Dprefix="$build/mesa-native-install" 2>/dev/null \
+        || PATH="$(brew --prefix llvm)/bin:$venv/bin:$PATH" meson setup "$build/mesa-native" "$src" "${common[@]}" \
+            -Dinstall-mesa-clc=true -Dinstall-precomp-compiler=true -Dprefix="$build/mesa-native-install"
+    PATH="$(brew --prefix llvm)/bin:$venv/bin:$PATH" ninja -C "$build/mesa-native" install
+
+    local arch=(-arch x86_64 -mmacosx-version-min=26.0)
+    cat > "$build/mesa-x86_64-cross.txt" <<EOF2
+[binaries]
+c = ['clang', '-arch', 'x86_64', '-mmacosx-version-min=26.0']
+cpp = ['clang++', '-arch', 'x86_64', '-mmacosx-version-min=26.0']
+objc = ['clang', '-arch', 'x86_64', '-mmacosx-version-min=26.0']
+objcpp = ['clang++', '-arch', 'x86_64', '-mmacosx-version-min=26.0']
+ar = 'ar'
+strip = 'strip'
+pkg-config = 'false'
+
+[host_machine]
+system = 'darwin'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOF2
+    local tools="$build/mesa-native-install/bin:$venv/bin"
+    PATH="$tools:/usr/bin:/bin:$PATH" meson setup --reconfigure "$build/mesa-x86_64" "$src" --cross-file "$build/mesa-x86_64-cross.txt" \
+        "${common[@]}" -Dllvm=disabled -Dmesa-clc=system -Dprecomp-compiler=system -Dprefix="$build/mesa-x86_64-install" 2>/dev/null \
+        || PATH="$tools:/usr/bin:/bin:$PATH" meson setup "$build/mesa-x86_64" "$src" --cross-file "$build/mesa-x86_64-cross.txt" \
+            "${common[@]}" -Dllvm=disabled -Dmesa-clc=system -Dprecomp-compiler=system -Dprefix="$build/mesa-x86_64-install"
+    PATH="$tools:/usr/bin:/bin:$PATH" ninja -C "$build/mesa-x86_64" install
+
+    mkdir -p "$dist/lib/kosmickrisp"
+    cp "$build/mesa-x86_64-install/lib/libvulkan_kosmickrisp.dylib" "$dist/lib/kosmickrisp/"
+    clang "${arch[@]}" -O2 -dynamiclib -fvisibility=hidden -install_name @rpath/libMoltenVK.dylib \
+        -o "$dist/lib/kosmickrisp/libMoltenVK.dylib" "$proton/macos/kosmickrisp/shim.c"
 }
 
 do_freetype() {
@@ -357,6 +417,7 @@ do_dist() {
 step check_tools
 step submodules
 step moltenvk
+step kosmickrisp
 step freetype
 step gmp
 step nettle
