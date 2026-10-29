@@ -250,6 +250,10 @@ enum CloudSync {
         var downloaded = 0
         var uploaded = 0
         var deleted = 0
+        /// Files of this Mac that were replaced or deleted, and cloud versions
+        /// of conflicts this Mac's version won, all in the backup
+        var backedUpFromMac = 0
+        var backedUpFromCloud = 0
         var backup: URL?
     }
 
@@ -290,6 +294,7 @@ enum CloudSync {
             let target = backup.appendingPathComponent("mac").appendingPathComponent(relative)
             try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fm.copyItem(at: file, to: target)
+            summary.backedUpFromMac += 1
             summary.backup = backup
         }
         if resolution == .mac {
@@ -299,6 +304,7 @@ enum CloudSync {
                 guard let target = append(backup.appendingPathComponent("cloud", isDirectory: true), name) else { continue }
                 try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try data.write(to: target)
+                summary.backedUpFromCloud += 1
                 summary.backup = backup
             }
         }

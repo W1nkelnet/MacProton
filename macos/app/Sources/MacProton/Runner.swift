@@ -127,7 +127,17 @@ final class Runner: ObservableObject {
             let summary = try await CloudSync.apply(plan, resolving: resolution)
             cloudPulled.insert(game.appID)
             if let backup = summary.backup {
-                notice = "\(summary.downloaded) Spielstand-Dateien von \(game.name) kamen aus der Steam Cloud. Die Dateien, die sie ersetzt haben, liegen gesichert in \(backup.path)."
+                var parts: [String] = []
+                if summary.downloaded > 0 {
+                    parts.append("\(summary.downloaded) Spielstand-Dateien von \(game.name) kamen aus der Steam Cloud.")
+                }
+                if summary.backedUpFromMac > 0 {
+                    parts.append("\(summary.backedUpFromMac) Dateien dieses Macs, die dabei ersetzt wurden, liegen gesichert in \(backup.appendingPathComponent("mac").path).")
+                }
+                if summary.backedUpFromCloud > 0 {
+                    parts.append("Die Cloud-Version von \(summary.backedUpFromCloud) Dateien liegt gesichert in \(backup.appendingPathComponent("cloud").path). Nach dem Spielen lädt MacProton die Version dieses Macs hoch.")
+                }
+                notice = parts.joined(separator: " ")
             }
             return true
         } catch {
