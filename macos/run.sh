@@ -58,6 +58,13 @@ export MVK_CONFIG_SHADER_CACHE_DIR="${MVK_CONFIG_SHADER_CACHE_DIR-$WINEPREFIX/mo
 # build this runtime does not ship, so .NET would fail fast
 export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=${DOTNET_SYSTEM_GLOBALIZATION_INVARIANT-1}
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$steam_macos"
+# Steam's overlay for macOS games hooks Metal and AppKit in the game
+# process, which works for Windows games too: Shift+Tab, and the store and
+# profile pages games open. MACPROTON_STEAM_OVERLAY=0 turns it off.
+overlay="$steam_macos/gameoverlayrenderer.dylib"
+if [ "${MACPROTON_STEAM_OVERLAY-1}" != 0 ] && [ -f "$overlay" ]; then
+    export DYLD_INSERT_LIBRARIES="$overlay${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES}"
+fi
 
 # Create or update the prefix here rather than letting Wine update it on
 # the next start, with mscoree and mshtml disabled so that wineboot does

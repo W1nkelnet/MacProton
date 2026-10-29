@@ -38,6 +38,7 @@ struct SettingsView: View {
     @AppStorage("runtimePath") private var runtimePath = ""
     @AppStorage("syncSaves") private var syncSaves = true
     @AppStorage("metalHUD") private var metalHUD = false
+    @AppStorage("steamOverlay") private var steamOverlay = true
     @AppStorage("upscaling") private var upscaling = Upscaling.system
     @AppStorage("autoUpdate") private var autoUpdate = false
     @AppStorage("defaultGameLocation") private var gameLocation = ""
@@ -104,6 +105,9 @@ struct SettingsView: View {
             Section("Anzeige") {
                 Toggle("Metal-HUD mit FPS einblenden", isOn: $metalHUD)
                 Text("Zeigt Apples Metal-Leistungsanzeige mit Bildrate und GPU-Zeit in Windows-Spielen. Gilt ab dem nächsten Spielstart.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Steam-Overlay in Windows-Spielen", isOn: $steamOverlay)
+                Text("Umschalt+Tab öffnet im Spiel Steams Overlay mit Freunden, Chat und Shop. Gilt ab dem nächsten Spielstart.")
                     .font(.caption).foregroundStyle(.secondary)
                 Picker("Hochskalierung", selection: $upscaling) {
                     ForEach(Upscaling.allCases, id: \.self) { Text($0.title).tag($0) }

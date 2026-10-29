@@ -272,6 +272,9 @@ final class Runner: ObservableObject {
             environment["MTL_HUD_ENABLED"] = "1"
         }
         environment.merge(Upscaling.current.environment) { $1 }
+        if UserDefaults.standard.object(forKey: "steamOverlay") as? Bool == false {
+            environment["MACPROTON_STEAM_OVERLAY"] = "0"
+        }
         process.environment = environment
         process.currentDirectoryURL = URL(fileURLWithPath: dir)
         process.standardOutput = log

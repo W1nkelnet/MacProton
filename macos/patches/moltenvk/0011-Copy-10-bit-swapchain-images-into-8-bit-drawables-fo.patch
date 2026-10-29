@@ -1,0 +1,227 @@
+From a368070e7b7877a19efbccfa25193bf5abed671f Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 22:08:58 +0100
+Subject: [PATCH] Copy 10-bit swapchain images into 8-bit drawables for Steam's
+ overlay.
+
+Steam's overlay for macOS games draws into the drawable as if it had 8
+bits per channel and garbles 10-bit ones. With the overlay loaded, a
+swapchain in RGB10A2 or BGR10A2 renders to textures of its own format,
+and each present copies one into a BGRA8 drawable. Swapchains also log
+their extent and format.
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKImage.mm     | 12 ++-
+ MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h  |  7 +-
+ MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm | 84 ++++++++++++++++++--
+ 3 files changed, 94 insertions(+), 9 deletions(-)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+index b8e69027..b9682034 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+@@ -1654,7 +1654,13 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
+ 
+ 	if (_mtlTextureUpscaled) {
+ 		id<MTLTexture> mtlDrawableTex = getCAMetalDrawable().texture;
+-		if (mtlDrawableTex) { _swapchain->encodeUpscale(_mtlTextureUpscaled, mtlDrawableTex, mtlCmdBuff); }
++		if (mtlDrawableTex) {
++			if (_swapchain->isUpscaling()) {
++				_swapchain->encodeUpscale(_mtlTextureUpscaled, mtlDrawableTex, mtlCmdBuff);
++			} else {
++				_swapchain->encodeConversion(_mtlTextureUpscaled, mtlDrawableTex, mtlCmdBuff);
++			}
++		}
+ 	}
+ 
+ 	// According to Apple, it is more performant to call MTLDrawable present from within a
+@@ -1818,14 +1824,14 @@ MVKPresentableSwapchainImage::MVKPresentableSwapchainImage(MVKDevice* device,
+ 
+ 			_mtlTextureHeadless = [[getMTLDevice() newTextureWithDescriptor: mtlTexDesc] retain];	// retained
+ 		}
+-	} else if (swapchain->isUpscaling()) {
++	} else if (swapchain->isUpscaling() || swapchain->convertsFormat()) {
+ 		@autoreleasepool {
+ 			MTLTextureDescriptor* mtlTexDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat: getMTLPixelFormat()
+ 																								  width: pCreateInfo->extent.width
+ 																								 height: pCreateInfo->extent.height
+ 																							  mipmapped: NO];
+ 			mtlTexDesc.usage = (MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
+-								MTLTextureUsagePixelFormatView | swapchain->getUpscalerInputUsage());
++								MTLTextureUsagePixelFormatView | (swapchain->isUpscaling() ? swapchain->getUpscalerInputUsage() : 0));
+ 			mtlTexDesc.storageMode = MTLStorageModePrivate;
+ 
+ 			_mtlTextureUpscaled = [getMTLDevice() newTextureWithDescriptor: mtlTexDesc];	// retained
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h b/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h
+index e12454bf..ac68fa43 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.h
+@@ -116,9 +116,12 @@ protected:
+ 						  VkSwapchainPresentScalingCreateInfoKHR* pScalingInfo,
+ 						  uint32_t imgCnt);
+ 	void initSurfaceImages(const VkSwapchainCreateInfoKHR* pCreateInfo, uint32_t imgCnt);
+-	void initUpscaler(CAMetalLayer* mtlLayer, MTLPixelFormat mtlPixFmt);
++	void initUpscaler(CAMetalLayer* mtlLayer, MTLPixelFormat mtlPixFmt, MTLPixelFormat mtlDrawablePixFmt);
+ 	bool isUpscaling() { return _mtlUpscaler != nil; }
+ 	MTLTextureUsage getUpscalerInputUsage();
++	void initFormatConversion(MTLPixelFormat mtlPixFmt);
++	bool convertsFormat() { return _mtlConversionPipeline != nil; }
++	void encodeConversion(id<MTLTexture> mtlSrcTex, id<MTLTexture> mtlDstTex, id<MTLCommandBuffer> mtlCmdBuff);
+ 	void encodeUpscale(id<MTLTexture> mtlSrcTex, id<MTLTexture> mtlDstTex, id<MTLCommandBuffer> mtlCmdBuff);
+ 	bool getIsSurfaceLost();
+ 	bool hasOptimalSurface();
+@@ -150,5 +153,7 @@ protected:
+ 	uint32_t _presentHistoryHeadIndex = 0;
+ 	id _mtlUpscaler = nil;					// MetalFX spatial scaler, from the image extent to the display pixels
+ 	VkExtent2D _upscaledExtent = {0, 0};
++	id<MTLRenderPipelineState> _mtlConversionPipeline = nil;	// Copies 10-bit images into 8-bit drawables
++	MTLPixelFormat _mtlDrawablePixelFormat = MTLPixelFormatInvalid;
+ 	bool _isDeliberatelyScaled = false;
+ };
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm b/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm
+index 2224a9e6..0be41823 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKSwapchain.mm
+@@ -29,6 +29,7 @@
+ 
+ #import <MetalFX/MetalFX.h>
+ #include <dlfcn.h>
++#include <mach-o/dyld.h>
+ #include <libkern/OSByteOrder.h>
+ 
+ #import "CAMetalLayer+MoltenVK.h"
+@@ -494,7 +495,10 @@ void MVKSwapchain::initCAMetalLayer(const VkSwapchainCreateInfoKHR* pCreateInfo,
+ 
+ 	VkExtent2D prevSurfaceExtent = _surface->getExtent();
+ 	auto* oldSwapchain = (MVKSwapchain*)pCreateInfo->oldSwapchain;
+-	initUpscaler(mtlLayer, getPixelFormats()->getMTLPixelFormat(pCreateInfo->imageFormat));
++	MTLPixelFormat mtlImagePixFmt = getPixelFormats()->getMTLPixelFormat(pCreateInfo->imageFormat);
++	initFormatConversion(mtlImagePixFmt);
++	_mtlDrawablePixelFormat = convertsFormat() ? MTLPixelFormatBGRA8Unorm : mtlImagePixFmt;
++	initUpscaler(mtlLayer, mtlImagePixFmt, _mtlDrawablePixelFormat);
+ 	VkExtent2D drawableExtent = isUpscaling() ? _upscaledExtent : _imageExtent;
+ 
+ 	// Because of a regression in Metal, the most recent one or two presentations may not
+@@ -508,8 +512,10 @@ void MVKSwapchain::initCAMetalLayer(const VkSwapchainCreateInfoKHR* pCreateInfo,
+ 
+ 	auto minMagFilter = getMVKConfig().swapchainMinMagFilterUseNearest ? kCAFilterNearest : kCAFilterLinear;
+ 	mtlLayer.drawableSize = mvkCGSizeFromVkExtent2D(drawableExtent);
++	MVKLogInfo("Swapchain of %u x %u images in %s.", _imageExtent.width, _imageExtent.height,
++			   getPixelFormats()->getName(getPixelFormats()->getMTLPixelFormat(pCreateInfo->imageFormat)));
+ 	mtlLayer.device = getMTLDevice();
+-	mtlLayer.pixelFormat = getPixelFormats()->getMTLPixelFormat(pCreateInfo->imageFormat);
++	mtlLayer.pixelFormat = _mtlDrawablePixelFormat;
+ 	mtlLayer.maximumDrawableCount = imgCnt;
+ 	mtlLayer.displaySyncEnabledMVK = (pCreateInfo->presentMode != VK_PRESENT_MODE_IMMEDIATE_KHR);
+ 	mtlLayer.minificationFilter = minMagFilter;
+@@ -520,7 +526,7 @@ void MVKSwapchain::initCAMetalLayer(const VkSwapchainCreateInfoKHR* pCreateInfo,
+ 																			  VK_IMAGE_USAGE_SAMPLED_BIT |
+ 																			  VK_IMAGE_USAGE_STORAGE_BIT)) &&
+ 								!mvkAreAllFlagsEnabled(pCreateInfo->flags, VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR) &&
+-								!isUpscaling();
++								!isUpscaling() && !convertsFormat();
+ 
+ 	if (pCreateInfo->compositeAlpha != VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
+ 		mtlLayer.opaque = pCreateInfo->compositeAlpha == VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+@@ -668,6 +674,7 @@ void MVKSwapchain::destroy() {
+ MVKSwapchain::~MVKSwapchain() {
+     if (_licenseWatermark) { _licenseWatermark->destroy(); }
+ 	[_mtlUpscaler release];
++	[_mtlConversionPipeline release];
+ }
+ 
+ 
+@@ -677,7 +684,7 @@ MVKSwapchain::~MVKSwapchain() {
+ // image for a Retina display. With MVK_CONFIG_UPSCALING=metalfx, MetalFX upscales the images to
+ // the pixels of the display instead. The application still renders to images of its own extent,
+ // and each present upscales one into the drawable.
+-void MVKSwapchain::initUpscaler(CAMetalLayer* mtlLayer, MTLPixelFormat mtlPixFmt) {
++void MVKSwapchain::initUpscaler(CAMetalLayer* mtlLayer, MTLPixelFormat mtlPixFmt, MTLPixelFormat mtlDrawablePixFmt) {
+ 	[_mtlUpscaler release];
+ 	_mtlUpscaler = nil;
+ 
+@@ -708,7 +715,7 @@ void MVKSwapchain::initUpscaler(CAMetalLayer* mtlLayer, MTLPixelFormat mtlPixFmt
+ 
+ 	MTLFXSpatialScalerDescriptor* desc = [descClass new];	// temp retain
+ 	desc.colorTextureFormat = mtlPixFmt;
+-	desc.outputTextureFormat = mtlPixFmt;
++	desc.outputTextureFormat = mtlDrawablePixFmt;
+ 	desc.inputWidth = _imageExtent.width;
+ 	desc.inputHeight = _imageExtent.height;
+ 	desc.outputWidth = out.width;
+@@ -737,6 +744,73 @@ void MVKSwapchain::initUpscaler(CAMetalLayer* mtlLayer, MTLPixelFormat mtlPixFmt
+ 	MVKLogInfo("Upscaling the swapchain from %u x %u to %u x %u with MetalFX.", _imageExtent.width, _imageExtent.height, out.width, out.height);
+ }
+ 
++#pragma mark Format conversion
++
++// Steam's overlay for macOS games, which Wine games load too, draws into the
++// drawable as if it had 8 bits per channel, and garbles the 10-bit drawables
++// that games such as Unreal ones with Direct3D 12 use. With the overlay loaded,
++// such a swapchain renders to textures of its own format, and each present
++// copies one into an 8-bit drawable. The values are the same, only rounded.
++static bool mvkIsSteamOverlayLoaded() {
++	static bool isLoaded = [] {
++		for (uint32_t i = 0; i < _dyld_image_count(); i++) {
++			const char* name = _dyld_get_image_name(i);
++			if (name && strstr(name, "gameoverlayrenderer")) { return true; }
++		}
++		return false;
++	}();
++	return isLoaded;
++}
++
++void MVKSwapchain::initFormatConversion(MTLPixelFormat mtlPixFmt) {
++	[_mtlConversionPipeline release];
++	_mtlConversionPipeline = nil;
++
++	if (isHeadless() || !mvkIsSteamOverlayLoaded()) { return; }
++	if (mtlPixFmt != MTLPixelFormatRGB10A2Unorm && mtlPixFmt != MTLPixelFormatBGR10A2Unorm) { return; }
++
++	@autoreleasepool {
++		NSString* source = @"#include <metal_stdlib>\n"
++			"using namespace metal;\n"
++			"struct V { float4 position [[position]]; };\n"
++			"vertex V mvkCopyVertex(uint vid [[vertex_id]]) {\n"
++			"    float2 uv = float2((vid << 1) & 2, vid & 2);\n"
++			"    return { float4(uv * float2(2, -2) + float2(-1, 1), 0, 1) };\n"
++			"}\n"
++			"fragment float4 mvkCopyFragment(V in [[stage_in]], texture2d<float> src [[texture(0)]]) {\n"
++			"    return src.read(uint2(in.position.xy));\n"
++			"}\n";
++		NSError* err = nil;
++		id<MTLLibrary> lib = [[getMTLDevice() newLibraryWithSource: source options: nil error: &err] autorelease];
++		if ( !lib) {
++			reportWarning(VK_ERROR_FEATURE_NOT_PRESENT, "Could not compile the swapchain format conversion: %s", err.localizedDescription.UTF8String);
++			return;
++		}
++		MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor new] autorelease];
++		desc.vertexFunction = [[lib newFunctionWithName: @"mvkCopyVertex"] autorelease];
++		desc.fragmentFunction = [[lib newFunctionWithName: @"mvkCopyFragment"] autorelease];
++		desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
++		_mtlConversionPipeline = [getMTLDevice() newRenderPipelineStateWithDescriptor: desc error: &err];	// retained
++		if ( !_mtlConversionPipeline) {
++			reportWarning(VK_ERROR_FEATURE_NOT_PRESENT, "Could not create the swapchain format conversion: %s", err.localizedDescription.UTF8String);
++			return;
++		}
++	}
++	MVKLogInfo("Copying %s swapchain images into 8-bit drawables for the Steam overlay.", getPixelFormats()->getName(mtlPixFmt));
++}
++
++void MVKSwapchain::encodeConversion(id<MTLTexture> mtlSrcTex, id<MTLTexture> mtlDstTex, id<MTLCommandBuffer> mtlCmdBuff) {
++	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
++	pass.colorAttachments[0].texture = mtlDstTex;
++	pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
++	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
++	id<MTLRenderCommandEncoder> encoder = [mtlCmdBuff renderCommandEncoderWithDescriptor: pass];
++	[encoder setRenderPipelineState: _mtlConversionPipeline];
++	[encoder setFragmentTexture: mtlSrcTex atIndex: 0];
++	[encoder drawPrimitives: MTLPrimitiveTypeTriangle vertexStart: 0 vertexCount: 3];
++	[encoder endEncoding];
++}
++
+ MTLTextureUsage MVKSwapchain::getUpscalerInputUsage() {
+ 	return ((id<MTLFXSpatialScaler>)_mtlUpscaler).colorTextureUsage;
+ }
+-- 
+2.56.0
+
