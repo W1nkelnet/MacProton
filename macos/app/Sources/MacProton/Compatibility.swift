@@ -55,6 +55,23 @@ struct CloudSaveLocation: Codable, Hashable {
     var macPath: String
 }
 
+/// A Steam Auto-Cloud rule for the Windows version, from the app's "ufs"
+/// section: which files under which folder the cloud keeps.
+struct CloudRule: Codable, Hashable {
+    /// Root and path as the cloud names its files, e.g. WinAppDataLocalLow and
+    /// "Redbeet Interactive/Raft/User/User_{64BitSteamID}"
+    var root: String
+    var path: String
+    /// Where Windows keeps them, after the app's root overrides for Windows
+    var localRoot: String
+    var localPath: String
+    /// File name pattern such as "*.rgd"
+    var pattern: String
+    var recursive: Bool
+    /// ERemoteStoragePlatform bits
+    var platforms: UInt32
+}
+
 enum AppAnalysis {
     static let antiCheatMarkers = ["_be.exe", "battleye", "easyanticheat", "_eac.exe", "start_protected_game"]
 
@@ -122,20 +139,7 @@ enum AppAnalysis {
 
         let overrides = app["ufs", "rootoverrides"]?.entries.map(\.1) ?? []
         func resolve(_ root: String, _ path: String, os: String) -> (String, String)? {
-            guard let rule = overrides.first(where: {
-                $0["root"]?.string?.caseInsensitiveCompare(root) == .orderedSame
-                    && $0["os"]?.string?.caseInsensitiveCompare(os) == .orderedSame
-            }) else { return (root, path) }
-            var resolved = path
-            for (_, transform) in rule["pathtransforms"]?.entries ?? [] {
-                if let find = transform["find"]?.string, let replace = transform["replace"]?.string {
-                    resolved = resolved.replacingOccurrences(of: find, with: replace)
-                }
-            }
-            if let prefix = rule["addpath"]?.string, !prefix.isEmpty {
-                resolved = (prefix as NSString).appendingPathComponent(resolved)
-            }
-            return (rule["useinstead"]?.string ?? root, resolved)
+            resolveRoot(overrides, root, path, os: os)
         }
 
         var locations: [CloudSaveLocation] = []
@@ -153,5 +157,55 @@ enum AppAnalysis {
             if !locations.contains(location) { locations.append(location) }
         }
         return locations
+    }
+
+    /// A root and path after the app's root override for an OS, if any.
+    private static func resolveRoot(_ overrides: [VDF], _ root: String, _ path: String, os: String) -> (String, String)? {
+        guard let rule = overrides.first(where: {
+            $0["root"]?.string?.caseInsensitiveCompare(root) == .orderedSame
+                && $0["os"]?.string?.caseInsensitiveCompare(os) == .orderedSame
+        }) else { return (root, path) }
+        var resolved = path
+        for (_, transform) in rule["pathtransforms"]?.entries ?? [] {
+            if let find = transform["find"]?.string, let replace = transform["replace"]?.string {
+                resolved = resolved.replacingOccurrences(of: find, with: replace)
+            }
+        }
+        if let prefix = rule["addpath"]?.string, !prefix.isEmpty {
+            resolved = (prefix as NSString).appendingPathComponent(resolved)
+        }
+        return (rule["useinstead"]?.string ?? root, resolved)
+    }
+
+    /// The Auto-Cloud rules that apply to the Windows version.
+    static func cloudRules(_ app: VDF) -> [CloudRule] {
+        let overrides = app["ufs", "rootoverrides"]?.entries.map(\.1) ?? []
+        func clean(_ path: String) -> String {
+            path.replacingOccurrences(of: "\\", with: "/").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        var rules: [CloudRule] = []
+        for (_, file) in app["ufs", "savefiles"]?.entries ?? [] {
+            guard let root = file["root"]?.string else { continue }
+            var platforms: UInt32 = 0
+            for (_, platform) in file["platforms"]?.entries ?? [] {
+                switch platform.string?.lowercased() {
+                case "windows": platforms |= 1
+                case "macos": platforms |= 2
+                case "linux": platforms |= 8
+                case "all": platforms = 0xFFFF_FFFF
+                default: break
+                }
+            }
+            if platforms == 0 { platforms = 0xFFFF_FFFF }
+            guard platforms & 1 != 0 else { continue }
+            let path = clean(file["path"]?.string ?? "")
+            guard let (localRoot, localPath) = resolveRoot(overrides, root, path, os: "Windows"),
+                  localRoot.hasPrefix("Win") || localRoot.caseInsensitiveCompare("GameInstall") == .orderedSame else { continue }
+            let rule = CloudRule(root: root, path: path, localRoot: localRoot, localPath: clean(localPath),
+                                 pattern: file["pattern"]?.string ?? "*",
+                                 recursive: file["recursive"]?.string == "1", platforms: platforms)
+            if !rules.contains(rule) { rules.append(rule) }
+        }
+        return rules
     }
 }

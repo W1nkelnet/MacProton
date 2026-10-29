@@ -15,6 +15,8 @@ struct Game: Codable, Identifiable, Hashable {
     var hasNativeMac: Bool?
     var issues: [CompatibilityIssue]?
     var cloudSaves: [CloudSaveLocation]?
+    /// Auto-Cloud rules of the Windows version, nil until the next library sync
+    var cloudRules: [CloudRule]?
     /// Saves live in Steam Cloud, which macOS Steam does not download
     /// before a Windows game starts
     var steamCloud: Bool?
@@ -54,6 +56,7 @@ struct Game: Codable, Identifiable, Hashable {
         hasNativeMac = info.hasNativeMac
         issues = info.issues
         cloudSaves = info.cloudSaves
+        cloudRules = info.cloudRules
         steamCloud = info.steamCloud
     }
 

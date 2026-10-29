@@ -111,7 +111,23 @@ struct LibraryView: View {
             }
             Button("Abbrechen", role: .cancel) { runner.cloudWarningGame = nil }
         } message: {
-            Text("\(runner.cloudWarningGame?.name ?? "Dieses Spiel") speichert in der Steam Cloud, und Steam hat die Spielstände auf diesem Mac noch nicht geladen. Für Windows-Spiele lädt Steam sie erst beim Beenden.\n\nHast du auf einem anderen Gerät gespielt: Starte das Spiel nur bis ins Hauptmenü und beende es wieder. Fragt Steam dann nach einem Konflikt, wähle die Cloud-Version. Ab dem nächsten Start sind deine Spielstände da.")
+            Text(cloudWarningText)
+        }
+        .alert("Spielstände unterschiedlich", isPresented: cloudConflictBinding, presenting: runner.cloudConflict) { prompt in
+            Button("Cloud-Version") { runner.cloudConflict = nil; prompt.answer(.cloud) }
+            Button("Version dieses Macs") { runner.cloudConflict = nil; prompt.answer(.mac) }
+            Button(prompt.beforeStart ? "Abbrechen" : "Später entscheiden", role: .cancel) {
+                runner.cloudConflict = nil
+                prompt.answer(nil)
+            }
+        } message: { prompt in
+            Text("\(prompt.game.name): \(prompt.files.count == 1 ? "Eine Datei hat" : "\(prompt.files.count) Dateien haben") sich seit dem letzten Abgleich in der Steam Cloud und auf diesem Mac geändert, etwa \(prompt.files.first.map { ($0 as NSString).lastPathComponent } ?? ""). Welche Version soll gelten? Die andere wird vorher gesichert.")
+        }
+        .alert("Steam Cloud nicht erreichbar", isPresented: cloudFailureBinding, presenting: runner.cloudFailure) { prompt in
+            Button("Ohne Abgleich starten") { runner.cloudFailure = nil; prompt.answer(true) }
+            Button("Abbrechen", role: .cancel) { runner.cloudFailure = nil; prompt.answer(false) }
+        } message: { prompt in
+            Text("Die Spielstände von \(prompt.game.name) konnten nicht abgeglichen werden: \(prompt.message)\n\nOhne Abgleich lädt MacProton nach dem Spielen nur neue und geänderte Dateien hoch und löscht nichts in der Cloud.")
         }
         .alert("Steam ist offline", isPresented: offlineBinding) {
             Button("Offline spielen") {
@@ -187,6 +203,24 @@ struct LibraryView: View {
 
     /// steamcmd's login replaced the Steam client's session
     private var steamcmdBusy: Bool { installer.isDownloading || sync.running || login.isPresented }
+
+    private var cloudConflictBinding: Binding<Bool> {
+        Binding(get: { runner.cloudConflict != nil }, set: { _ in })
+    }
+
+    private var cloudFailureBinding: Binding<Bool> {
+        Binding(get: { runner.cloudFailure != nil }, set: { _ in })
+    }
+
+    /// Windows-only games with Auto-Cloud rules get nothing from macOS Steam;
+    /// games saving through Steam's cloud API sync when they end.
+    private var cloudWarningText: String {
+        let name = runner.cloudWarningGame?.name ?? "Dieses Spiel"
+        if let game = runner.cloudWarningGame, !game.runsNatively, !(game.cloudRules ?? []).isEmpty {
+            return "\(name) speichert in Windows-Ordnern in der Steam Cloud, und die gleicht Steam für macOS nicht ab. Melde dich in den Einstellungen unter „Steam Cloud“ an, dann lädt MacProton die Spielstände vor jedem Start und danach wieder hoch.\n\nOhne Anmeldung kannst du sie per Rechtsklick mit „Cloud-Spielstände holen …“ von Hand holen."
+        }
+        return "\(name) speichert in der Steam Cloud, und Steam hat die Spielstände auf diesem Mac noch nicht geladen. Für Windows-Spiele lädt Steam sie erst beim Beenden.\n\nHast du auf einem anderen Gerät gespielt: Starte das Spiel nur bis ins Hauptmenü und beende es wieder. Fragt Steam dann nach einem Konflikt, wähle die Cloud-Version. Ab dem nächsten Start sind deine Spielstände da."
+    }
 
     private var cloudWarningBinding: Binding<Bool> {
         Binding(get: { runner.cloudWarningGame != nil }, set: { if !$0 { runner.cloudWarningGame = nil } })

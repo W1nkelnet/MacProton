@@ -1,5 +1,22 @@
 import Foundation
 
+/// A Steam Cloud conflict for the user to decide
+struct CloudConflictPrompt: Identifiable {
+    let id = UUID()
+    let game: Game
+    let files: [String]
+    let beforeStart: Bool
+    let answer: (CloudSync.Resolution?) -> Void
+}
+
+/// The sync before a start failed; the user decides whether to start anyway
+struct CloudFailurePrompt: Identifiable {
+    let id = UUID()
+    let game: Game
+    let message: String
+    let answer: (Bool) -> Void
+}
+
 /// Starts games through the runtime's run.sh and tracks running ones.
 @MainActor
 final class Runner: ObservableObject {
@@ -13,6 +30,10 @@ final class Runner: ObservableObject {
     @Published private(set) var reconnecting = false
     /// What a starting game waits for, e.g. its install scripts
     @Published private(set) var preparing: [Int: String] = [:]
+    @Published var cloudConflict: CloudConflictPrompt?
+    @Published var cloudFailure: CloudFailurePrompt?
+    /// Games whose cloud saves all came into the prefix before this start
+    private var cloudPulled: Set<Int> = []
 
     static var syncSaves: Bool { UserDefaults.standard.object(forKey: "syncSaves") as? Bool ?? true }
 
@@ -56,7 +77,7 @@ final class Runner: ObservableObject {
             return
         }
         // macOS Steam does not download cloud saves before a Windows game starts
-        if game.steamCloud == true, !Self.cloudWarned.contains(game.appID),
+        if game.steamCloud == true, !CloudSync.applies(to: game), !Self.cloudWarned.contains(game.appID),
            SteamClient.cloudNeverSynced(game.appID) == true {
             cloudWarningGame = game
             return
@@ -77,7 +98,82 @@ final class Runner: ObservableObject {
             await runInstallScripts(game, prefix: prefix)
             preparing[game.appID] = nil
             if Self.syncSaves, !(game.cloudSaves ?? []).isEmpty { await linkSaves(game) }
+            if CloudSync.applies(to: game) {
+                preparing[game.appID] = "Gleiche Spielstände mit der Steam Cloud ab …"
+                let start = await syncCloudBeforeStart(game, prefix: prefix)
+                preparing[game.appID] = nil
+                guard start else {
+                    running.remove(game.appID)
+                    return
+                }
+            }
             launch(game)
+        }
+    }
+
+    /// Brings the cloud's saves into the prefix. False if the user cancelled the start.
+    private func syncCloudBeforeStart(_ game: Game, prefix: URL) async -> Bool {
+        cloudPulled.remove(game.appID)
+        do {
+            let plan = try await CloudSync.prepare(game, prefix: prefix, beforeStart: true)
+            var resolution: CloudSync.Resolution?
+            if !plan.conflicts.isEmpty {
+                guard let choice = await askCloudConflict(game, plan.conflicts.map(\.path), beforeStart: true) else {
+                    plan.connection.disconnect()
+                    return false
+                }
+                resolution = choice
+            }
+            let summary = try await CloudSync.apply(plan, resolving: resolution)
+            cloudPulled.insert(game.appID)
+            if let backup = summary.backup {
+                notice = "\(summary.downloaded) Spielstand-Dateien von \(game.name) kamen aus der Steam Cloud. Die Dateien, die sie ersetzt haben, liegen gesichert in \(backup.path)."
+            }
+            return true
+        } catch {
+            return await withCheckedContinuation { continuation in
+                cloudFailure = CloudFailurePrompt(game: game, message: error.localizedDescription) { continuation.resume(returning: $0) }
+            }
+        }
+    }
+
+    /// Uploads what the game saved. Files that do not make it stay on this
+    /// Mac and go up after the next session.
+    private func syncCloudAfterExit(_ game: Game) async {
+        let allowDeletes = cloudPulled.remove(game.appID) != nil
+        do {
+            let plan = try await CloudSync.prepare(game, prefix: prefix(of: game), beforeStart: false,
+                                                   allowCloudDeletes: allowDeletes)
+            var resolution: CloudSync.Resolution?
+            if !plan.conflicts.isEmpty {
+                resolution = await askCloudConflict(game, plan.conflicts.map(\.path), beforeStart: false)
+            }
+            _ = try await CloudSync.apply(plan, resolving: resolution)
+        } catch {
+            lastError = "Die Spielstände von \(game.name) konnten nicht in die Steam Cloud geladen werden: \(error.localizedDescription) Sie bleiben auf diesem Mac und gehen nach dem nächsten Spielen mit hoch."
+        }
+    }
+
+    private func askCloudConflict(_ game: Game, _ paths: [String], beforeStart: Bool) async -> CloudSync.Resolution? {
+        await withCheckedContinuation { continuation in
+            cloudConflict = CloudConflictPrompt(game: game, files: paths, beforeStart: beforeStart) {
+                continuation.resume(returning: $0)
+            }
+        }
+    }
+
+    /// Waits until nothing runs in the game's prefix anymore, such as a game
+    /// its launcher started.
+    private func waitForPrefix(_ game: Game) async {
+        let server = Process()
+        server.executableURL = Paths.runtime.appendingPathComponent("files/bin/wineserver")
+        server.arguments = ["-w"]
+        var env = ProcessInfo.processInfo.environment
+        env["WINEPREFIX"] = prefix(of: game).path
+        server.environment = env
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            server.terminationHandler = { _ in continuation.resume() }
+            do { try server.run() } catch { continuation.resume() }
         }
     }
 
@@ -165,11 +261,17 @@ final class Runner: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.processes[appID] = nil
-                self.running.remove(appID)
                 // A quick non-zero exit means the game did not start at all
                 if status != 0 && Date().timeIntervalSince(started) < 15 {
                     self.lastError = "Das Spiel konnte nicht gestartet werden (Code \(status)). Protokoll: \(logURL.path)"
                 }
+                if CloudSync.applies(to: game) {
+                    self.preparing[appID] = "Lade Spielstände in die Steam Cloud …"
+                    await self.waitForPrefix(game)
+                    await self.syncCloudAfterExit(game)
+                    self.preparing[appID] = nil
+                }
+                self.running.remove(appID)
             }
         }
 

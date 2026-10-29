@@ -31,6 +31,9 @@ enum Upscaling: String, CaseIterable {
 
 struct SettingsView: View {
     @EnvironmentObject private var login: SteamLogin
+    @EnvironmentObject private var cloud: SteamCloudAccount
+    @AppStorage("cloudSync") private var cloudSync = true
+    @State private var showCloudSignIn = false
     @AppStorage("steamAccount") private var steamAccount = ""
     @AppStorage("runtimePath") private var runtimePath = ""
     @AppStorage("syncSaves") private var syncSaves = true
@@ -49,6 +52,20 @@ struct SettingsView: View {
                     login.present(account: steamAccount.isEmpty ? (detectSteamAccount() ?? "") : steamAccount)
                 }
                 Text("steamcmd, mit dem MacProton Spiele lädt, braucht einmalig deine Steam-Anmeldung.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Steam Cloud") {
+                if let name = cloud.accountName {
+                    LabeledContent("Angemeldet als", value: name.isEmpty ? "Steam-Konto" : name)
+                    Toggle("Spielstände von Windows-Spielen abgleichen", isOn: $cloudSync)
+                    Button("Abmelden") { cloud.signOut() }
+                } else {
+                    Button("Mit der Steam-App anmelden …") {
+                        showCloudSignIn = true
+                        cloud.startSignIn()
+                    }
+                }
+                Text("Steam für macOS gleicht Spielstände nicht ab, die Windows-Spiele in Windows-Ordnern speichern. Mit dieser Anmeldung lädt MacProton sie vor jedem Start aus der Steam Cloud und nach dem Spielen wieder hoch. Was MacProton ersetzt, sichert es vorher. Du bestätigst die Anmeldung in der Steam-App auf dem Handy, MacProton sieht dein Passwort nicht.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Spielstände") {
@@ -114,5 +131,54 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520)
         .padding()
+        .sheet(isPresented: $showCloudSignIn) { CloudSignInView() }
+    }
+}
+
+/// The QR code for MacProton's Steam sign-in, renewed while it waits.
+private struct CloudSignInView: View {
+    @EnvironmentObject private var cloud: SteamCloudAccount
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Label("Bei Steam anmelden", systemImage: "qrcode")
+                .font(.title2.weight(.semibold))
+            Text("Öffne die Steam-App auf deinem Handy, tippe auf Steam Guard und dann auf „QR-Code scannen“. Bestätige danach die Anmeldung für „MacProton“.")
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Group {
+                if let image = cloud.qrCode {
+                    Image(nsImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 240, height: 240)
+                } else if cloud.signingIn {
+                    ProgressView().frame(width: 240, height: 240)
+                } else {
+                    Color.clear.frame(width: 240, height: 240)
+                }
+            }
+            .background(Color.white)
+            if let error = cloud.error {
+                Label(error, systemImage: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Erneut versuchen") { cloud.startSignIn() }
+            }
+            HStack {
+                Spacer()
+                Button("Abbrechen") {
+                    cloud.cancelSignIn()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
+        .onChange(of: cloud.accountName) { _, name in
+            if name != nil { dismiss() }
+        }
     }
 }

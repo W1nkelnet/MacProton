@@ -10,6 +10,7 @@ struct MacProtonApp: App {
     @StateObject private var steamcmdSetup = SteamCMDSetup()
     @StateObject private var updates = UpdateChecker()
     @StateObject private var appUpdates = AppUpdateChecker()
+    @StateObject private var cloudAccount = SteamCloudAccount()
 
     var body: some Scene {
         WindowGroup("MacProton") {
@@ -27,6 +28,7 @@ struct MacProtonApp: App {
         Settings {
             SettingsView()
                 .environmentObject(login)
+                .environmentObject(cloudAccount)
         }
     }
 }
