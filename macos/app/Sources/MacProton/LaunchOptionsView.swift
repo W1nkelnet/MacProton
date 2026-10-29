@@ -55,7 +55,7 @@ struct LaunchOptionsView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Picker("Grafiktreiber", selection: $driver) {
-                Text("Standard (\(VulkanDriver.standard.title))").tag(VulkanDriver?.none)
+                Text("Standard (\(defaultDriver.title))").tag(VulkanDriver?.none)
                 ForEach(VulkanDriver.allCases, id: \.self) { Text($0.title).tag(VulkanDriver?.some($0)) }
             }
             .disabled(!VulkanDriver.kosmicKrispAvailable)
@@ -86,6 +86,14 @@ struct LaunchOptionsView: View {
         }
         .padding(20)
         .frame(width: 460)
+    }
+
+    /// The driver without a choice for this game, which may differ from the
+    /// settings for games known to need MoltenVK
+    private var defaultDriver: VulkanDriver {
+        var game = game
+        game.vulkanDriver = nil
+        return VulkanDriver.effective(for: game)
     }
 
     private func save() {
