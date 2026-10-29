@@ -119,15 +119,21 @@ fi
 export VKD3D_SHADER_CACHE_PATH="${VKD3D_SHADER_CACHE_PATH-$WINEPREFIX}"
 # MACPROTON_OPENGL=zink runs OpenGL on Vulkan through Mesa's Zink instead of
 # macOS' OpenGL, which stops at 4.1; otherwise Wine's own opengl32 stays
-zink="$dist/lib/wine/zink/x86_64-windows"
-if [ "${MACPROTON_OPENGL-}" = zink ] && [ -d "$zink" ]; then
-    install_dlls "$zink/"*.dll "$windows/system32/"
+zink="$dist/lib/wine/zink"
+if [ "${MACPROTON_OPENGL-}" = zink ] && [ -d "$zink/x86_64-windows" ]; then
+    install_dlls "$zink/x86_64-windows/"*.dll "$windows/system32/"
+    if [ -d "$zink/i386-windows" ]; then
+        install_dlls "$zink/i386-windows/"*.dll "$windows/syswow64/"
+    fi
     export WINEDLLOVERRIDES="opengl32=n;$WINEDLLOVERRIDES"
     # Metal has no RGB32 texel buffers, which alone hold Zink at OpenGL 3.3;
     # games hardly use them
     export MESA_EXTENSION_OVERRIDE="${MESA_EXTENSION_OVERRIDE-GL_ARB_texture_buffer_object_rgb32}"
-elif ! cmp -s "$dist/lib/wine/x86_64-windows/opengl32.dll" "$windows/system32/opengl32.dll"; then
-    install_dlls "$dist/lib/wine/x86_64-windows/opengl32.dll" "$windows/system32/"
+else
+    cmp -s "$dist/lib/wine/x86_64-windows/opengl32.dll" "$windows/system32/opengl32.dll" ||
+        install_dlls "$dist/lib/wine/x86_64-windows/opengl32.dll" "$windows/system32/"
+    cmp -s "$dist/lib/wine/i386-windows/opengl32.dll" "$windows/syswow64/opengl32.dll" ||
+        install_dlls "$dist/lib/wine/i386-windows/opengl32.dll" "$windows/syswow64/"
 fi
 
 # The game's steam_api loads steamclient(64).dll from SteamPath; Wine's

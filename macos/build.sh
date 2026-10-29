@@ -189,38 +189,45 @@ EOF2
 # Needs: brew install bison flex
 do_zink() {
     local src=$deps_src/mesa venv=$build/venv-mesa
-    cat > "$build/mesa-mingw64-cross.txt" <<EOF2
+    local tools="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$venv/bin:$PATH"
+    local arch triple cpu_family cpu
+    for arch in x86_64 i386; do
+        case $arch in
+            x86_64) triple=x86_64-w64-mingw32 cpu_family=x86_64 cpu=x86_64 ;;
+            i386) triple=i686-w64-mingw32 cpu_family=x86 cpu=i686 ;;
+        esac
+        cat > "$build/mesa-zink-$arch-cross.txt" <<EOF2
 [binaries]
-c = 'x86_64-w64-mingw32-gcc'
-cpp = 'x86_64-w64-mingw32-g++'
-ar = 'x86_64-w64-mingw32-ar'
-strip = 'x86_64-w64-mingw32-strip'
-windres = 'x86_64-w64-mingw32-windres'
+c = '$triple-gcc'
+cpp = '$triple-g++'
+ar = '$triple-ar'
+strip = '$triple-strip'
+windres = '$triple-windres'
 pkg-config = 'false'
 
 [host_machine]
 system = 'windows'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
+cpu_family = '$cpu_family'
+cpu = '$cpu'
 endian = 'little'
 EOF2
-    # Static, so the DLLs need no MinGW runtime next to them
-    local options=(--cross-file "$build/mesa-mingw64-cross.txt" --buildtype=release -Db_ndebug=true
-                   -Dc_link_args=-static -Dcpp_link_args=-static
-                   -Dplatforms=windows -Dgallium-drivers=zink -Dvulkan-drivers= -Dllvm=disabled
-                   -Dgles1=disabled -Dgles2=disabled -Degl=disabled -Dglx=disabled -Dzlib=disabled -Dzstd=disabled
-                   -Dexpat=disabled -Dxmlconfig=disabled -Dshader-cache=disabled -Dvalgrind=disabled
-                   -Dlibunwind=disabled -Dlmsensors=disabled -Dbuild-tests=false -Dmicrosoft-clc=disabled
-                   -Dgallium-d3d12-video=disabled -Dprefix="$build/mesa-zink-x64-install")
-    local tools="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$venv/bin:$PATH"
-    PATH="$tools" meson setup --reconfigure "$build/mesa-zink-x64" "$src" "${options[@]}" 2>/dev/null \
-        || PATH="$tools" meson setup "$build/mesa-zink-x64" "$src" "${options[@]}"
-    PATH="$tools" ninja -C "$build/mesa-zink-x64" install
+        # Static, so the DLLs need no MinGW runtime next to them
+        local options=(--cross-file "$build/mesa-zink-$arch-cross.txt" --buildtype=release -Db_ndebug=true
+                       -Dc_link_args=-static -Dcpp_link_args=-static
+                       -Dplatforms=windows -Dgallium-drivers=zink -Dvulkan-drivers= -Dllvm=disabled
+                       -Dgles1=disabled -Dgles2=disabled -Degl=disabled -Dglx=disabled -Dzlib=disabled -Dzstd=disabled
+                       -Dexpat=disabled -Dxmlconfig=disabled -Dshader-cache=disabled -Dvalgrind=disabled
+                       -Dlibunwind=disabled -Dlmsensors=disabled -Dbuild-tests=false -Dmicrosoft-clc=disabled
+                       -Dgallium-d3d12-video=disabled -Dprefix="$build/mesa-zink-$arch-install")
+        PATH="$tools" meson setup --reconfigure "$build/mesa-zink-$arch" "$src" "${options[@]}" 2>/dev/null \
+            || PATH="$tools" meson setup "$build/mesa-zink-$arch" "$src" "${options[@]}"
+        PATH="$tools" ninja -C "$build/mesa-zink-$arch" install
 
-    mkdir -p "$dist/lib/wine/zink/x86_64-windows"
-    local f
-    for f in opengl32.dll libgallium_wgl.dll; do
-        x86_64-w64-mingw32-strip -o "$dist/lib/wine/zink/x86_64-windows/$f" "$build/mesa-zink-x64-install/bin/$f"
+        mkdir -p "$dist/lib/wine/zink/$arch-windows"
+        local f
+        for f in opengl32.dll libgallium_wgl.dll; do
+            "$triple-strip" -o "$dist/lib/wine/zink/$arch-windows/$f" "$build/mesa-zink-$arch-install/bin/$f"
+        done
     done
 }
 
