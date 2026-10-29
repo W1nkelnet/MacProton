@@ -1,21 +1,28 @@
-# Geometry Shader auf Metal – Entwurf
+# Geometry Shader auf Metal
 
-Metal hat keine Geometry-Shader-Stufe, MoltenVK meldet `geometryShader` nicht und übergeht die Stufe beim Anlegen einer Pipeline. Metal lehnt die Pipeline dann ab, weil der Fragment-Shader Eingaben erwartet, die der Vertex-Shader nicht schreibt. D3D11 und D3D12 setzen Geometry Shader aber voraus, und Spiele nutzen sie vor allem für Partikel: Aus jedem Punkt wird ein Quad. Horizon Zero Dawn legt so neun Pipelines an, deren Partikel heute fehlen.
+Metal hat keine Geometry-Shader-Stufe, MoltenVK übergab sie früher einfach nicht an Metal. Was ein Geometry Shader ausgibt, fehlte dann: Partikel, die aus Punkten zu Quads werden, Dreiecke, die er aussortiert, verdoppelt oder in andere Layer lenkt. MoltenVK-Patch 0007 bildet die Stufe mit Compute-Kernels nach, nach dem Vorbild der Tessellation.
 
-## Ansatz: Compute wie bei der Tessellation
+## Ablauf eines Draws
 
-MoltenVK emuliert Tessellation bereits mit Compute-Stufen mitten im Render-Pass (`MVKCmdDraw`, `kMVKGraphicsStageVertex` und `kMVKGraphicsStageTessControl`). Ein Geometry Shader passt in dasselbe Schema:
+1. **Vertex-Stufe als Compute-Kernel.** Der Vertex-Shader läuft wie bei der Tessellation als Kernel mit Stage-in. Er schreibt alle Ausgaben, die der Geometry Shader liest, gepackt in ein Array aus `uint4`, einen Datensatz pro Vertex und Instanz (bei indizierten Draws pro Index).
+2. **Geometry-Stufe als Compute-Kernel.** Ein Thread pro Eingabe-Primitiv, Instanz und Invocation. Er liest die Vertices seines Primitivs aus dem Puffer: Punkte, Linien und Dreiecke, als Liste oder Strip, mit Adjacency. `OpEmitVertex` schreibt die aktuellen Ausgaben gepackt in einen festen Bereich von `OutputVertices` Plätzen dieses Threads und dazu einen Index. `OpEndPrimitive` schreibt einen Restart-Index (`0xFFFFFFFF`), ungenutzte Plätze werden ebenfalls Restarts. So braucht es keine Atomics, und die Reihenfolge der Primitive bleibt wie in D3D.
+3. **Rasterisierung.** Ein indizierter Draw zeichnet Triangle- oder Line-Strips beziehungsweise Punkte aus diesem Index-Buffer. Sein Vertex-Shader spielt die ausgegebenen Vertices mit den Ausgaben des Geometry Shaders wieder ab, dahinter der unveränderte Fragment-Shader. Punktlisten kennen in Metal keinen Restart; der Shader schiebt solche Vertices aus dem Bild.
 
-1. **Vertex-Stufe als Compute-Kernel.** SPIRV-Cross übersetzt den Vertex-Shader mit `capture_output_to_buffer` wie für die Tessellation, die Ausgaben landen in einem Buffer, ein Eintrag pro Vertex (bei indizierten Draws pro Index).
-2. **Geometry-Stufe als Compute-Kernel.** Neuer Modus in SPIRV-Cross für `ExecutionModelGeometry`: ein Thread pro Eingabe-Primitiv und Invocation. Die Eingabe-Arrays lesen aus dem Vertex-Buffer an den Indizes des Primitivs (Punkte, Linien, Dreiecke, mit Adjacency). `OpEmitVertex` schreibt die aktuellen Ausgaben in einen festen Bereich von `OutputVertices` Plätzen pro Primitiv, `OpEndPrimitive` beginnt einen neuen Strip. Aus den Strips entstehen Dreiecke (oder Linien und Punkte) in einem Index-Buffer, ungenutzte Plätze werden degenerierte Primitive. So braucht es keine Atomics, und die Reihenfolge bleibt wie in D3D.
-3. **Rasterisierung.** Ein durchreichender Vertex-Shader, den SPIRV-Cross aus der Ausgabe-Schnittstelle des Geometry Shaders erzeugt, liest den Ausgabe-Buffer an `[[vertex_id]]`. Dazu kommt der unveränderte Fragment-Shader und ein indizierter Draw über den erzeugten Index-Buffer.
+Alle drei Shader sind SPIR-V-Module, die `MVKGeometryShaderEmulation.h` aus Vertex- und Geometry-Shader ableitet. SPIRV-Cross übersetzt sie wie jeden anderen Shader. Die Schnittstelle zwischen den Stufen sind Location und Component der Ein- und Ausgaben. Built-ins wie Position, PointSize, Layer, ViewportIndex und ClipDistance belegen eigene Plätze, CullDistance kennt Metal nicht. Ausgaben, die der Geometry Shader nie schreibt, etwa ungenutzte Member von `gl_PerVertex`, bleiben weg, sonst würden zufällige Clip-Distanzen Dreiecke abschneiden.
 
-Built-ins: `PrimitiveIdIn` ist der Primitiv-Index, `InvocationId` die Invocation. `Layer` und `ViewportIndex` als Ausgaben gibt der durchreichende Vertex-Shader als `[[render_target_array_index]]` und `[[viewport_array_index]]` aus. Mehrere Streams und Transform Feedback bleiben außen vor.
+Die Geometry-Stufe läuft an der Stelle der Tessellation Control und nutzt deren Ressourcen. Deskriptoren mit `VK_SHADER_STAGE_GEOMETRY_BIT` werden deshalb auch dieser Stufe zugeordnet. `PrimitiveIdIn` ist der Primitiv-Index innerhalb der Instanz, `InvocationId` die Invocation.
 
-## Aufwand
+Indirekte Draws (`vkCmdDrawIndirect`, `vkCmdDrawIndexedIndirect`, auch mehrere auf einmal) rechnet ein kleiner Kernel auf der GPU in die Argumente der drei Stufen um: Stage-in-Region, Threadgroups beider Kernels, Parameter der Geometry-Stufe und den indizierten Draw. Weil die Anzahl erst auf der GPU feststeht, haben die Puffer eine feste Größe von 128 Ki Vertices und höchstens 128 MiB Ausgabe; größere Draws werden gekürzt.
 
-- SPIRV-Cross: Geometry-Modus für MSL (Eingaben, Emit/EndPrimitive, Strip-Zerlegung, durchreichender Vertex-Shader).
-- MoltenVK: Pipeline mit drei Stufen, Buffer-Größen aus `OutputVertices`, alle Draw-Varianten (direkt, indiziert, indirekt) und Multiview.
-- Test: kleines D3D12-Programm in `docs/macos/` mit Punkt-zu-Quad-Shader, danach Horizon Zero Dawn.
+Leitet ein Geometry Shader Dreiecke nur durch und wählt den Layer aus einer Eingabe, wie Unreal für Volumentexturen, schreibt weiterhin der Vertex-Shader den Layer (Patch 0006). Das spart die Compute-Stufen.
 
-Ein Weg über Metal-Mesh-Shader wäre schneller zur Laufzeit, braucht aber Mesh-Pipelines in MoltenVK und ein Zusammenführen von Vertex- und Geometry-Shader auf SPIR-V-Ebene.
+## Grenzen
+
+- Geometry Shader zusammen mit Tessellation, Triangle Strips mit Adjacency, mehrere Streams und Transform Feedback werden nicht nachgebildet. Dann bleibt der Geometry Shader wie früher weg.
+- Kann eine nachgebildete Pipeline nicht kompiliert werden, bleibt der Geometry Shader ebenfalls weg, statt dass die Pipeline scheitert. MoltenVK warnt dann.
+- Jeder Draw mit Geometry Shader unterbricht den Render-Pass zweimal für die Compute-Stufen, wie bei der Tessellation.
+- `MVK_CONFIG_EMULATE_GEOMETRY_SHADERS=0` schaltet die Nachbildung zum Vergleich ab.
+
+## Test
+
+`macos/tests/geometry/run.sh` zeichnet mit MoltenVK ohne Fenster und prüft Pixel: Punkte zu Quads (direkt, indiziert, instanziert, indirekt, mehrere indirekte Draws, indiziert indirekt), Dreiecke mit zwei Invocations und `PrimitiveIdIn`, Strip-Neustarts mitten im Shader und Punkt-Ausgabe mit ungenutzten Plätzen. Mit `MVK_CONFIG_EMULATE_GEOMETRY_SHADERS=0` scheitern diese Tests, wie es sein muss.

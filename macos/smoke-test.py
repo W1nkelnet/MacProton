@@ -65,8 +65,9 @@ def processes():
 
 
 def windows_game_running():
-    return any(re.search(r"\.exe\b", p, re.I) and "\\windows\\system32\\" not in p.lower()
-               and "/wine/x86_64-windows/steam.exe" not in p for p in processes())
+    # Wine names its processes by their Windows path; other command lines may mention .exe too.
+    return any(re.match(r"[a-z]:\\.*\.exe\b", p, re.I) and "\\windows\\system32\\" not in p.lower()
+               for p in processes())
 
 
 def steamcmd_running():

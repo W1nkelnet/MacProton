@@ -1,0 +1,2183 @@
+From e1212ef9b188e31d8a1608abfb2b418174eab3a2 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 07:38:16 +0100
+Subject: [PATCH] Emulate geometry shaders with compute stages.
+
+Metal has no geometry stage, and MoltenVK left geometry shaders out of
+a pipeline, so whatever they emit was missing, such as particles or the
+triangles a shader culls, duplicates or routes to other layers.
+
+Emulate them like tessellation. The vertex shader runs as a compute
+kernel and writes its outputs packed into a buffer. The geometry shader
+runs as a compute kernel, with one thread per input primitive and
+invocation, using the resources of the tessellation control stage. It
+writes each vertex it emits, packed the same way, into a fixed range of
+slots, along with its index, and ending a primitive writes a restart
+index. Rasterization then draws these strips with a vertex shader that
+replays the emitted vertices. All three are SPIR-V modules derived from
+the vertex and geometry shaders, so they are compiled like any other.
+Indirect draws are converted into the arguments of each stage on the
+GPU. If an emulated pipeline cannot be compiled, the geometry shader is
+left out as before, and MVK_CONFIG_EMULATE_GEOMETRY_SHADERS=0 turns the
+emulation off.
+---
+ MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm      |  374 +++++-
+ .../Commands/MVKCommandEncoderState.mm        |    6 +-
+ .../MoltenVK/GPUObjects/MVKDescriptorSet.mm   |    3 +-
+ .../GPUObjects/MVKGeometryShaderEmulation.h   | 1121 +++++++++++++++++
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h    |   40 +-
+ MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm   |  291 ++++-
+ MoltenVK/MoltenVK/Vulkan/mvk_datatypes.hpp    |   10 +
+ 7 files changed, 1825 insertions(+), 20 deletions(-)
+ create mode 100644 MoltenVK/MoltenVK/GPUObjects/MVKGeometryShaderEmulation.h
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+index 0d28d68..a840ef5 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
+@@ -23,6 +23,341 @@
+ #include "MVKPipeline.h"
+ #include "MVKFoundation.h"
+ #include "mvk_datatypes.hpp"
++#include "../GPUObjects/MVKGeometryShaderEmulation.h"
++
++
++#pragma mark -
++#pragma mark Geometry shader emulation
++
++#define MVKLogWarnOnce(fmt, ...) do { static bool warned = false; if ( !warned) { warned = true; MVKBaseObject::reportMessage(nullptr, MVK_CONFIG_LOG_LEVEL_WARNING, fmt, ##__VA_ARGS__); } } while (0)
++
++/** The buffers and parameters of a draw through an emulated geometry shader. */
++struct MVKGeometryDraw {
++	mvk_gs::Params params = {};
++	const MVKMTLBufferAllocation* gsOutBuff = nullptr;
++	const MVKMTLBufferAllocation* gsIdxBuff = nullptr;
++};
++
++// Finds the input primitives of a draw of vertexCount vertices per instance. Returns false if there are none.
++static bool mvkGetGeometryParams(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline,
++								 uint32_t vertexCount, uint32_t instanceCount, mvk_gs::Params& params) {
++	const auto& gsInfo = pipeline->getGeometryStageInfo();
++	VkPrimitiveTopology topology = pipeline->getVkPrimitiveTopology();
++	switch (topology) {
++		case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
++		case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
++		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
++		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
++			break;
++		default:
++			// The topology may be dynamic, within its class
++			switch (cmdEncoder->getVkGraphics().pickRenderState(MVKRenderStateFlag::PrimitiveTopology).primitiveType) {
++				case MTLPrimitiveTypePoint:         topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
++				case MTLPrimitiveTypeLine:          topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
++				case MTLPrimitiveTypeLineStrip:     topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
++				case MTLPrimitiveTypeTriangle:      topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; break;
++				case MTLPrimitiveTypeTriangleStrip: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
++				default: break;
++			}
++			break;
++	}
++	uint32_t n = gsInfo.inputVertices;
++	params = {};
++	switch (topology) {
++		case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
++		case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
++		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
++			params.primitivesPerInstance = vertexCount >= n ? vertexCount - n + 1 : 0;
++			params.primitiveStride = 1;
++			params.triangleStrip = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
++			break;
++		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
++			MVKLogWarnOnce("Geometry shaders are not supported with triangle strips with adjacency.");
++			return false;
++		default:
++			params.primitivesPerInstance = vertexCount / n;
++			params.primitiveStride = n;
++			break;
++	}
++	params.verticesPerInstance = vertexCount;
++	uint64_t threads = uint64_t(params.primitivesPerInstance) * instanceCount * gsInfo.invocations;
++	params.threadCount = uint32_t(std::min<uint64_t>(threads, UINT32_MAX / std::max(gsInfo.indicesPerThread, 1u)));
++	return params.threadCount > 0;
++}
++
++// The size of the buffer the vertex stage writes to, for a geometry or tessellation pipeline.
++static NSUInteger mvkGetVertexOutputSize(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, NSUInteger vertexCount) {
++	if (pipeline->isGeometryPipeline()) { return vertexCount * 16 * pipeline->getGeometryStageInfo().inputSlots; }
++	return vertexCount * 4 * cmdEncoder->getDeviceProperties().limits.maxVertexOutputComponents;
++}
++
++// Runs the geometry stage on what the vertex stage wrote to vtxOutBuff.
++static void mvkEncodeGeometryStage(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline,
++								   const MVKMTLBufferAllocation* vtxOutBuff, MVKGeometryDraw& gs) {
++	const auto& gsInfo = pipeline->getGeometryStageInfo();
++	const auto& implicit = pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids;
++	id<MTLComputeCommandEncoder> mtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
++	NSUInteger threads = gs.params.threadCount;
++	gs.gsOutBuff = cmdEncoder->getTempMTLBuffer(threads * gsInfo.maxOutputVertices * gsInfo.outputSlots * 16, true);
++	gs.gsIdxBuff = cmdEncoder->getTempMTLBuffer(threads * gsInfo.indicesPerThread * sizeof(uint32_t), true);
++	[mtlEncoder setBuffer: vtxOutBuff->_mtlBuffer
++				   offset: vtxOutBuff->_offset
++				  atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessCtlInputBufferBinding)];
++	[mtlEncoder setBuffer: gs.gsOutBuff->_mtlBuffer offset: gs.gsOutBuff->_offset atIndex: implicit[MVKImplicitBuffer::Output]];
++	[mtlEncoder setBuffer: gs.gsIdxBuff->_mtlBuffer offset: gs.gsIdxBuff->_offset atIndex: implicit[MVKImplicitBuffer::PatchOutput]];
++	cmdEncoder->setComputeBytes(mtlEncoder, &gs.params, sizeof(gs.params), implicit[MVKImplicitBuffer::IndirectParams]);
++	NSUInteger wgSize = pipeline->getTessControlStageState().threadExecutionWidth;
++	if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
++		[mtlEncoder dispatchThreads: MTLSizeMake(threads, 1, 1) threadsPerThreadgroup: MTLSizeMake(wgSize, 1, 1)];
++	} else {
++		[mtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(threads, wgSize), 1, 1)
++				   threadsPerThreadgroup: MTLSizeMake(wgSize, 1, 1)];
++	}
++	// Running this stage prematurely ended the render pass, so we have to start it up again.
++	cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
++}
++
++// Kernels converting indirect draws for an emulated geometry shader into the arguments of its stages.
++static const char* kMVKGeometryIndirectSource = R"(
++#include <metal_stdlib>
++using namespace metal;
++
++struct Layout {
++	uint inputVertices;		// Vertices of an input primitive
++	uint strip;				// Primitives advance by one vertex
++	uint triangleStrip;
++	uint invocations;
++	uint indicesPerThread;
++	uint vertexWidth;		// Threads per threadgroup of the vertex stage
++	uint geometryWidth;		// Threads per threadgroup of the geometry stage
++	uint maxRecords;		// Vertices the vertex stage can write
++	uint maxThreads;		// Threads the geometry stage can write for
++	uint indexed;
++	uint drawStride;		// Bytes between indirect draws
++};
++
++// Per draw, 64 words: kernel parameters, stage-in region, vertex and geometry threadgroups, and the indexed draw.
++kernel void mvkGeometryIndirectConvert(const device uchar* draws [[buffer(0)]],
++									   device uint* out [[buffer(1)]],
++									   constant Layout& l [[buffer(2)]],
++									   constant uint& drawCount [[buffer(3)]],
++									   uint i [[thread_position_in_grid]]) {
++	if (i >= drawCount) { return; }
++	const device uint* a = (const device uint*)(draws + i * l.drawStride);
++	uint count = min(a[0], l.maxRecords);
++	uint instances = a[1];
++	uint origin = l.indexed ? a[3] : a[2];
++	uint firstInstance = l.indexed ? a[4] : a[3];
++	// The vertex stage writes the vertices of each instance after those of the previous one.
++	instances = count ? min(instances, l.maxRecords / count) : 0;
++	uint n = l.inputVertices;
++	uint prims = l.strip ? (count >= n ? count - n + 1 : 0) : count / n;
++	uint threadsPerInstance = prims * l.invocations;
++	instances = threadsPerInstance ? min(instances, l.maxThreads / threadsPerInstance) : 0;
++	uint threads = threadsPerInstance * instances;
++
++	device uint* o = out + i * 64;
++	o[0] = threads; o[1] = prims; o[2] = l.strip ? 1 : n; o[3] = l.triangleStrip; o[4] = count;
++	o[8] = origin; o[9] = firstInstance; o[10] = 0; o[11] = count; o[12] = instances; o[13] = 1;
++	o[16] = instances ? (count + l.vertexWidth - 1) / l.vertexWidth : 0; o[17] = instances; o[18] = 1;
++	o[20] = (threads + l.geometryWidth - 1) / l.geometryWidth; o[21] = 1; o[22] = 1;
++	o[24] = threads * l.indicesPerThread; o[25] = 1; o[26] = 0; o[27] = 0; o[28] = 0;
++}
++
++// The indices of an indexed indirect draw, copied to the start of a buffer for the vertex stage.
++kernel void mvkGeometryIndirectCopyIndices(const device uint* draw [[buffer(0)]],
++										   const device uchar* src [[buffer(1)]],
++										   device uchar* dst [[buffer(2)]],
++										   constant uint4& p [[buffer(3)]],	// Index size, first index offset, max records
++										   uint i [[thread_position_in_grid]]) {
++	if (i >= min(draw[0], p.z)) { return; }
++	uint first = draw[2] + p.y;
++	if (p.x == 2) {
++		((device ushort*)dst)[i] = ((const device ushort*)src)[first + i];
++	} else {
++		((device uint*)dst)[i] = ((const device uint*)src)[first + i];
++	}
++}
++)";
++
++static id<MTLComputePipelineState> mvkGetGeometryIndirectState(MVKCommandEncoder* cmdEncoder, NSString* name) {
++	static NSMutableDictionary* states = [NSMutableDictionary new];
++	id<MTLDevice> mtlDevice = cmdEncoder->getPhysicalDevice()->getMTLDevice();
++	NSString* key = [NSString stringWithFormat: @"%p-%@", mtlDevice, name];
++	@synchronized (states) {
++		id<MTLComputePipelineState> state = states[key];
++		if (state) { return state; }
++		@autoreleasepool {
++			NSError* err = nil;
++			id<MTLLibrary> lib = [[mtlDevice newLibraryWithSource: @(kMVKGeometryIndirectSource) options: nil error: &err] autorelease];
++			id<MTLFunction> func = [[lib newFunctionWithName: name] autorelease];
++			state = func ? [[mtlDevice newComputePipelineStateWithFunction: func error: &err] autorelease] : nil;
++			if ( !state) {
++				MVKBaseObject::reportMessage(nullptr, MVK_CONFIG_LOG_LEVEL_ERROR, "Could not compile %s: %s", name.UTF8String, err.description.UTF8String);
++				return nil;
++			}
++			states[key] = state;
++			return state;
++		}
++	}
++}
++
++static const uint32_t kMVKMaxGeometryIndirectVertexCount = 128 * KIBI;
++static const NSUInteger kMVKMaxGeometryIndirectOutputBytes = 128 * MEBI;
++
++// Draws indirect draws through an emulated geometry shader. Since their counts are only known to the GPU,
++// a kernel converts them into the arguments of each stage, within buffers of a fixed size.
++static void mvkEncodeGeometryIndirect(MVKCommandEncoder* cmdEncoder, id<MTLBuffer> indBuff, VkDeviceSize indOffset,
++									  uint32_t indStride, uint32_t drawCount, const MVKIndexMTLBufferBinding* ibb) {
++	auto* pipeline = cmdEncoder->getGraphicsPipeline();
++	const auto& gsInfo = pipeline->getGeometryStageInfo();
++	if (drawCount == 0) { return; }
++	cmdEncoder->_isIndexedDraw = ibb != nullptr;
++
++	struct {
++		uint32_t inputVertices, strip, triangleStrip, invocations, indicesPerThread;
++		uint32_t vertexWidth, geometryWidth, maxRecords, maxThreads, indexed, drawStride;
++	} layout = {};
++	VkPrimitiveTopology topology = pipeline->getVkPrimitiveTopology();
++	if (topology != VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY && topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY) {
++		switch (cmdEncoder->getVkGraphics().pickRenderState(MVKRenderStateFlag::PrimitiveTopology).primitiveType) {
++			case MTLPrimitiveTypeLineStrip:     topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
++			case MTLPrimitiveTypeTriangleStrip: topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
++			default: break;
++		}
++	}
++	if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY) {
++		MVKLogWarnOnce("Geometry shaders are not supported with triangle strips with adjacency.");
++		return;
++	}
++	layout.inputVertices = gsInfo.inputVertices;
++	layout.strip = topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP || topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY || topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
++	layout.triangleStrip = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
++	layout.invocations = gsInfo.invocations;
++	layout.indicesPerThread = gsInfo.indicesPerThread;
++	layout.indexed = ibb != nullptr;
++	layout.drawStride = indStride;
++	id<MTLComputePipelineState> vtxState = !ibb ? pipeline->getTessVertexStageState() :
++		ibb->mtlIndexType == MTLIndexTypeUInt16 ? pipeline->getTessVertexStageIndex16State() : pipeline->getTessVertexStageIndex32State();
++	id<MTLComputePipelineState> gsState = pipeline->getTessControlStageState();
++	layout.vertexWidth = uint32_t(vtxState.threadExecutionWidth);
++	layout.geometryWidth = uint32_t(gsState.threadExecutionWidth);
++	layout.maxRecords = kMVKMaxGeometryIndirectVertexCount;
++	NSUInteger bytesPerThread = NSUInteger(gsInfo.maxOutputVertices) * gsInfo.outputSlots * 16 + gsInfo.indicesPerThread * sizeof(uint32_t);
++	layout.maxThreads = uint32_t(std::max<NSUInteger>(std::min<NSUInteger>(kMVKMaxGeometryIndirectOutputBytes / bytesPerThread, NSUInteger(layout.maxRecords) * gsInfo.invocations), 1));
++
++	id<MTLComputePipelineState> convertState = mvkGetGeometryIndirectState(cmdEncoder, @"mvkGeometryIndirectConvert");
++	id<MTLComputePipelineState> copyState = ibb ? mvkGetGeometryIndirectState(cmdEncoder, @"mvkGeometryIndirectCopyIndices") : nil;
++	if ( !convertState || (ibb && !copyState)) { return; }
++
++	static const NSUInteger kArgsStride = 256;
++	auto* argsBuff = cmdEncoder->getTempMTLBuffer(drawCount * kArgsStride, true);
++	auto* vtxOutBuff = cmdEncoder->getTempMTLBuffer(NSUInteger(layout.maxRecords) * 16 * gsInfo.inputSlots, true);
++	auto* gsOutBuff = cmdEncoder->getTempMTLBuffer(NSUInteger(layout.maxThreads) * gsInfo.maxOutputVertices * gsInfo.outputSlots * 16, true);
++	auto* gsIdxBuff = cmdEncoder->getTempMTLBuffer(NSUInteger(layout.maxThreads) * gsInfo.indicesPerThread * sizeof(uint32_t), true);
++	uint32_t idxSize = ibb ? uint32_t(mvkMTLIndexTypeSizeInBytes((MTLIndexType)ibb->mtlIndexType)) : 0;
++	auto* idxCopyBuff = ibb ? cmdEncoder->getTempMTLBuffer(NSUInteger(layout.maxRecords) * idxSize, true) : nullptr;
++	const MVKMTLBufferAllocation* drawIDBuff = nullptr;
++	if (pipeline->needsDrawIdBuffer()) {
++		drawIDBuff = cmdEncoder->getTempMTLBuffer(drawCount * sizeof(uint32_t));
++		auto* drawIDs = (uint32_t*)drawIDBuff->getContents();
++		for (uint32_t i = 0; i < drawCount; i++) { drawIDs[i] = i; }
++	}
++	auto& mtlFeats = cmdEncoder->getMetalFeatures();
++	auto dispatch = [&](id<MTLComputeCommandEncoder> enc, NSUInteger threads, NSUInteger width) {
++		if (mtlFeats.nonUniformThreadgroups) {
++			[enc dispatchThreads: MTLSizeMake(threads, 1, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
++		} else {
++			[enc dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(threads, width), 1, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
++		}
++	};
++
++	// This must happen before finalizing draw state, so it binds the stage pipelines again afterwards.
++	cmdEncoder->encodeStoreActions(true);
++	id<MTLComputeCommandEncoder> mtlEnc = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
++	MVKMetalComputeCommandEncoderState& mtlState = cmdEncoder->getMtlCompute();
++	mtlState.bindPipeline(mtlEnc, convertState);
++	mtlState.bindBuffer(mtlEnc, indBuff, indOffset, 0);
++	mtlState.bindBuffer(mtlEnc, argsBuff->_mtlBuffer, argsBuff->_offset, 1);
++	mtlState.bindBytes(mtlEnc, &layout, sizeof(layout), 2);
++	mtlState.bindBytes(mtlEnc, &drawCount, sizeof(drawCount), 3);
++	dispatch(mtlEnc, drawCount, convertState.threadExecutionWidth);
++
++	const auto& vtxImplicit = pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids;
++	const auto& gsImplicit = pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids;
++	for (uint32_t d = 0; d < drawCount; d++) {
++		NSUInteger args = argsBuff->_offset + d * kArgsStride;
++		if (ibb) {
++			// Buffer offsets must be four-byte aligned, the first index need not be.
++			uint32_t copyParams[4] = { idxSize, uint32_t(ibb->offset & 3) / idxSize, layout.maxRecords, 0 };
++			mtlEnc = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
++			mtlState.bindPipeline(mtlEnc, copyState);
++			mtlState.bindBuffer(mtlEnc, indBuff, indOffset + d * indStride, 0);
++			mtlState.bindBuffer(mtlEnc, ibb->mtlBuffer, ibb->offset & ~VkDeviceSize(3), 1);
++			mtlState.bindBuffer(mtlEnc, idxCopyBuff->_mtlBuffer, idxCopyBuff->_offset, 2);
++			mtlState.bindBytes(mtlEnc, copyParams, sizeof(copyParams), 3);
++			dispatch(mtlEnc, layout.maxRecords, copyState.threadExecutionWidth);
++		}
++
++		cmdEncoder->finalizeDrawState(kMVKGraphicsStageVertex);
++		if ( !pipeline->hasValidMTLPipelineStates()) { return; }
++		mtlEnc = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
++		[mtlEnc setBuffer: vtxOutBuff->_mtlBuffer offset: vtxOutBuff->_offset atIndex: vtxImplicit[MVKImplicitBuffer::Output]];
++		if (drawIDBuff) {
++			[mtlEnc setBuffer: drawIDBuff->_mtlBuffer offset: drawIDBuff->_offset + d * sizeof(uint32_t) atIndex: vtxImplicit[MVKImplicitBuffer::DrawId]];
++		}
++		if (ibb) {
++			[mtlEnc setBuffer: idxCopyBuff->_mtlBuffer offset: idxCopyBuff->_offset atIndex: vtxImplicit[MVKImplicitBuffer::Index]];
++		}
++		[mtlEnc setStageInRegion: MTLRegionMake2D(0, 0, layout.maxRecords, layout.maxRecords)];
++		[mtlEnc setStageInRegionWithIndirectBuffer: argsBuff->_mtlBuffer indirectBufferOffset: args + 8 * sizeof(uint32_t)];
++		[mtlEnc dispatchThreadgroupsWithIndirectBuffer: argsBuff->_mtlBuffer
++								  indirectBufferOffset: args + 16 * sizeof(uint32_t)
++								 threadsPerThreadgroup: MTLSizeMake(layout.vertexWidth, 1, 1)];
++
++		cmdEncoder->finalizeDrawState(kMVKGraphicsStageTessControl);
++		if ( !pipeline->hasValidMTLPipelineStates()) { return; }
++		mtlEnc = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
++		[mtlEnc setBuffer: vtxOutBuff->_mtlBuffer
++				   offset: vtxOutBuff->_offset
++				  atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessCtlInputBufferBinding)];
++		[mtlEnc setBuffer: gsOutBuff->_mtlBuffer offset: gsOutBuff->_offset atIndex: gsImplicit[MVKImplicitBuffer::Output]];
++		[mtlEnc setBuffer: gsIdxBuff->_mtlBuffer offset: gsIdxBuff->_offset atIndex: gsImplicit[MVKImplicitBuffer::PatchOutput]];
++		[mtlEnc setBuffer: argsBuff->_mtlBuffer offset: args atIndex: gsImplicit[MVKImplicitBuffer::IndirectParams]];
++		[mtlEnc dispatchThreadgroupsWithIndirectBuffer: argsBuff->_mtlBuffer
++								  indirectBufferOffset: args + 20 * sizeof(uint32_t)
++								 threadsPerThreadgroup: MTLSizeMake(layout.geometryWidth, 1, 1)];
++		cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
++
++		cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
++		[cmdEncoder->_mtlRenderEncoder setVertexBuffer: gsOutBuff->_mtlBuffer
++												offset: gsOutBuff->_offset
++											   atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalInputBufferBinding)];
++		[cmdEncoder->_mtlRenderEncoder drawIndexedPrimitives: gsInfo.outputPrimitiveType
++												   indexType: MTLIndexTypeUInt32
++												 indexBuffer: gsIdxBuff->_mtlBuffer
++										   indexBufferOffset: gsIdxBuff->_offset
++											  indirectBuffer: argsBuff->_mtlBuffer
++										indirectBufferOffset: args + 24 * sizeof(uint32_t)];
++		if (d + 1 < drawCount) {
++			cmdEncoder->encodeStoreActions(true);
++		}
++	}
++}
++
++// Draws the strips, lines or points the geometry stage emitted.
++static void mvkEncodeGeometryRasterization(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, const MVKGeometryDraw& gs) {
++	const auto& gsInfo = pipeline->getGeometryStageInfo();
++	[cmdEncoder->_mtlRenderEncoder setVertexBuffer: gs.gsOutBuff->_mtlBuffer
++											offset: gs.gsOutBuff->_offset
++										   atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalInputBufferBinding)];
++	[cmdEncoder->_mtlRenderEncoder drawIndexedPrimitives: gsInfo.outputPrimitiveType
++											  indexCount: NSUInteger(gs.params.threadCount) * gsInfo.indicesPerThread
++											   indexType: MTLIndexTypeUInt32
++											 indexBuffer: gs.gsIdxBuff->_mtlBuffer
++									   indexBufferOffset: gs.gsIdxBuff->_offset
++										   instanceCount: 1];
++}
+ 
+ 
+ #pragma mark -
+@@ -212,6 +547,10 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
+         outControlPointCount = pipeline->getOutputControlPointCount();
+         tessParams.patchCount = mvkCeilingDivide(_vertexCount, tessParams.inControlPointCount) * _instanceCount;
+     }
++    MVKGeometryDraw gsDraw;
++    if (pipeline->isGeometryPipeline() && !mvkGetGeometryParams(cmdEncoder, pipeline, _vertexCount, _instanceCount, gsDraw.params)) {
++        return;
++    }
+     if (pipeline->needsDrawIdBuffer()) {
+         tempDrawIDBuff = cmdEncoder->getTempMTLBuffer(sizeof(uint32_t));
+ 
+@@ -230,7 +569,7 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
+             case kMVKGraphicsStageVertex: {
+                 mtlTessCtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+                 if (pipeline->needsVertexOutputBuffer()) {
+-                    vtxOutBuff = cmdEncoder->getTempMTLBuffer(_vertexCount * _instanceCount * 4 * dvcLimits.maxVertexOutputComponents, true);
++                    vtxOutBuff = cmdEncoder->getTempMTLBuffer(mvkGetVertexOutputSize(cmdEncoder, pipeline, _vertexCount * _instanceCount), true);
+                     [mtlTessCtlEncoder setBuffer: vtxOutBuff->_mtlBuffer
+                                           offset: vtxOutBuff->_offset
+                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Output]];
+@@ -255,6 +594,10 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
+                 break;
+ 			}
+             case kMVKGraphicsStageTessControl: {
++                if (pipeline->isGeometryPipeline()) {
++                    mvkEncodeGeometryStage(cmdEncoder, pipeline, vtxOutBuff, gsDraw);
++                    break;
++                }
+                 mtlTessCtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+                 if (pipeline->needsTessCtlOutputBuffer()) {
+                     tcOutBuff = cmdEncoder->getTempMTLBuffer(outControlPointCount * tessParams.patchCount * 4 * dvcLimits.maxTessellationControlPerVertexOutputComponents, true);
+@@ -301,7 +644,9 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
+                 break;
+ 			}
+             case kMVKGraphicsStageRasterization:
+-                if (pipeline->isTessellationPipeline()) {
++                if (pipeline->isGeometryPipeline()) {
++                    mvkEncodeGeometryRasterization(cmdEncoder, pipeline, gsDraw);
++                } else if (pipeline->isTessellationPipeline()) {
+                     if (pipeline->needsTessCtlOutputBuffer()) {
+                         [cmdEncoder->_mtlRenderEncoder setVertexBuffer: tcOutBuff->_mtlBuffer
+                                                                 offset: tcOutBuff->_offset
+@@ -495,6 +840,10 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
+         outControlPointCount = pipeline->getOutputControlPointCount();
+         tessParams.patchCount = mvkCeilingDivide(_indexCount, tessParams.inControlPointCount) * _instanceCount;
+     }
++    MVKGeometryDraw gsDraw;
++    if (pipeline->isGeometryPipeline() && !mvkGetGeometryParams(cmdEncoder, pipeline, _indexCount, _instanceCount, gsDraw.params)) {
++        return;
++    }
+     if (pipeline->needsDrawIdBuffer()) {
+         tempDrawIDBuff = cmdEncoder->getTempMTLBuffer(sizeof(uint32_t));
+ 
+@@ -512,7 +861,7 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
+             case kMVKGraphicsStageVertex: {
+                 mtlTessCtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+                 if (pipeline->needsVertexOutputBuffer()) {
+-                    vtxOutBuff = cmdEncoder->getTempMTLBuffer(_indexCount * _instanceCount * 4 * dvcLimits.maxVertexOutputComponents, true);
++                    vtxOutBuff = cmdEncoder->getTempMTLBuffer(mvkGetVertexOutputSize(cmdEncoder, pipeline, _indexCount * _instanceCount), true);
+                     [mtlTessCtlEncoder setBuffer: vtxOutBuff->_mtlBuffer
+                                           offset: vtxOutBuff->_offset
+                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Output]];
+@@ -540,6 +889,10 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
+                 break;
+ 			}
+             case kMVKGraphicsStageTessControl: {
++                if (pipeline->isGeometryPipeline()) {
++                    mvkEncodeGeometryStage(cmdEncoder, pipeline, vtxOutBuff, gsDraw);
++                    break;
++                }
+                 mtlTessCtlEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+                 if (pipeline->needsTessCtlOutputBuffer()) {
+                     tcOutBuff = cmdEncoder->getTempMTLBuffer(outControlPointCount * tessParams.patchCount * 4 * dvcLimits.maxTessellationControlPerVertexOutputComponents, true);
+@@ -587,7 +940,9 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
+                 break;
+ 			}
+             case kMVKGraphicsStageRasterization:
+-                if (pipeline->isTessellationPipeline()) {
++                if (pipeline->isGeometryPipeline()) {
++                    mvkEncodeGeometryRasterization(cmdEncoder, pipeline, gsDraw);
++                } else if (pipeline->isTessellationPipeline()) {
+                     if (pipeline->needsTessCtlOutputBuffer()) {
+                         [cmdEncoder->_mtlRenderEncoder setVertexBuffer: tcOutBuff->_mtlBuffer
+                                                                 offset: tcOutBuff->_offset
+@@ -731,6 +1086,10 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
+ 	cmdEncoder->restartMetalRenderPassIfNeeded();
+ 
+ 	auto* pipeline = cmdEncoder->getGraphicsPipeline();
++	if (pipeline->isGeometryPipeline()) {
++		mvkEncodeGeometryIndirect(cmdEncoder, _mtlIndirectBuffer, _mtlIndirectBufferOffset, _mtlIndirectBufferStride, _drawCount, nullptr);
++		return;
++	}
+ 	auto& mtlFeats = cmdEncoder->getMetalFeatures();
+ 	auto& dvcLimits = cmdEncoder->getDeviceProperties().limits;
+ 
+@@ -1047,8 +1406,13 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
+         ibb.offset = converted->_offset;
+     }
+ 
+-	MVKIndexMTLBufferBinding ibbTriFan = ibb;
+     auto* pipeline = cmdEncoder->getGraphicsPipeline();
++	if (pipeline->isGeometryPipeline()) {
++		mvkEncodeGeometryIndirect(cmdEncoder, _mtlIndirectBuffer, _mtlIndirectBufferOffset, _mtlIndirectBufferStride, _drawCount, &ibb);
++		return;
++	}
++
++	MVKIndexMTLBufferBinding ibbTriFan = ibb;
+ 	auto& mtlFeats = cmdEncoder->getMetalFeatures();
+ 	auto& dvcLimits = cmdEncoder->getDeviceProperties().limits;
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+index 3509dbb..838adfe 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+@@ -353,7 +353,7 @@ static void bindDescriptorSets(MVKImplicitBufferData& target,
+                                uint32_t firstSet, uint32_t setCount, MVKDescriptorSet*const* sets,
+                                uint32_t dynamicOffsetCount, const uint32_t* dynamicOffsets) {
+ 	[[maybe_unused]] const uint32_t* dynamicOffsetsEnd = dynamicOffsets + dynamicOffsetCount;
+-	VkShaderStageFlags vkStage = mvkVkShaderStageFlagBitsFromMVKShaderStage(stage);
++	VkShaderStageFlags vkStage = mvkVkShaderStagesBoundByMVKShaderStage(stage);
+ 	for (uint32_t i = 0; i < setCount; i++) {
+ 		MVKDescriptorSet* set = sets[i];
+ 		MVKDescriptorSetLayout* setLayout = layout->getDescriptorSetLayout(firstSet + i);
+@@ -1448,7 +1448,7 @@ void MVKMetalGraphicsCommandEncoderState::prepareDraw(
+ 		_flags.add(MVKMetalRenderEncoderStateFlag::PipelineReady);
+ 		id<MTLRenderPipelineState> mtlPipeline;
+ 		const MVKRenderSubpass* subpass = mvkEncoder.getSubpass();
+-		if (subpass->isMultiview() && !pipeline->isTessellationPipeline()) {
++		if (subpass->isMultiview() && !pipeline->hasComputeVertexStage()) {
+ 			mtlPipeline = pipeline->getMultiviewPipelineState(subpass->getViewCountInMetalPass(mvkEncoder.getMultiviewPassIndex()));
+ 		} else {
+ 			mtlPipeline = pipeline->getMainPipelineState();
+@@ -1463,7 +1463,7 @@ void MVKMetalGraphicsCommandEncoderState::prepareDraw(
+ 	bindState(encoder, mvkEncoder, vk);
+ 
+ 	// Resources
+-	if (pipeline->isTessellationPipeline()) {
++	if (pipeline->hasComputeVertexStage()) {
+ 		bindVulkanGraphicsToMetalGraphics(encoder, mvkEncoder, vk, vkShared, *this, pipeline, kMVKShaderStageTessEval, MVKMetalGraphicsStage::Vertex);
+ 	} else {
+ 		bindVulkanGraphicsToMetalGraphics(encoder, mvkEncoder, vk, vkShared, *this, pipeline, kMVKShaderStageVertex,   MVKMetalGraphicsStage::Vertex);
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
+index 21a41f1..5a5afe5 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
+@@ -18,6 +18,7 @@
+ 
+ #include "MVKDescriptorSet.h"
+ #include "MVKBuffer.h"
++#include "mvk_datatypes.hpp"
+ #include "MVKCommandBuffer.h"
+ #include "MVKCommandEncoderState.h"
+ #include "MVKPipeline.h"
+@@ -662,7 +663,7 @@ MVKDescriptorSetLayout* MVKDescriptorSetLayout::Create(MVKDevice* device, const
+ 		MVKShaderStageResourceBinding resourceCount = binding.totalResourceCount();
+ 		for (uint32_t i = 0; i < kMVKShaderStageCount; i++) {
+ 			auto stage = static_cast<MVKShaderStage>(i);
+-			if (mvkIsAnyFlagEnabled(binding.stageFlags, mvkVkShaderStageFlagBitsFromMVKShaderStage(stage)))
++			if (mvkIsAnyFlagEnabled(binding.stageFlags, mvkVkShaderStagesBoundByMVKShaderStage(stage)))
+ 				ret->_totalResourceCount.stages[stage] += resourceCount;
+ 		}
+ 		if (!binding.isVariable())
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKGeometryShaderEmulation.h b/MoltenVK/MoltenVK/GPUObjects/MVKGeometryShaderEmulation.h
+new file mode 100644
+index 0000000..3d739d8
+--- /dev/null
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKGeometryShaderEmulation.h
+@@ -0,0 +1,1121 @@
++/*
++ * MVKGeometryShaderEmulation.h
++ *
++ * Copyright (c) 2015-2026 The Brenwill Workshop Ltd. (http://www.brenwill.com)
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#ifndef SPV_ENABLE_UTILITY_CODE
++#	define SPV_ENABLE_UTILITY_CODE
++#endif
++#include <spirv.hpp>
++
++#include <algorithm>
++#include <cstdint>
++#include <cstring>
++#include <initializer_list>
++#include <map>
++#include <string>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++
++// Metal has no geometry stage. A geometry shader runs here as a compute kernel between two other stages.
++// The vertex shader runs first, as a compute kernel like for tessellation, and writes its outputs packed
++// into an array of uint4 per vertex. The kernel runs one thread per input primitive and invocation, reads
++// the vertices of its primitive, and writes each vertex it emits, packed the same way, into a fixed range of
++// OutputVertices slots, along with an index for it. Ending a primitive writes a restart index, so the
++// rasterization draw renders strips from that index buffer, through a vertex shader that replays the
++// emitted vertices with the outputs of the geometry shader.
++//
++// All three are SPIR-V modules derived from the vertex and geometry shaders, compiled to MSL as usual.
++
++namespace mvk_gs {
++
++/** Descriptor set of the buffers the emulation adds, which is not one of the pipeline layout. */
++static constexpr uint32_t kDescSet = 24;
++static constexpr uint32_t kBindingVertices = 0;		// Vertex stage outputs, read by the kernel
++static constexpr uint32_t kBindingOutVertices = 1;	// Emitted vertices, read by the replay vertex shader
++static constexpr uint32_t kBindingOutIndices = 2;	// Indices of emitted vertices and strip restarts
++static constexpr uint32_t kBindingParams = 3;
++static constexpr uint32_t kRestartIndex = 0xFFFFFFFFu;
++
++/** The parameters of a draw, matching the parameter block of the kernel. */
++struct Params {
++	uint32_t threadCount;			// Primitives * instances * invocations
++	uint32_t primitivesPerInstance;
++	uint32_t primitiveStride;		// Vertices from one input primitive to the next
++	uint32_t triangleStrip;			// Odd triangles of a strip swap their second and third vertex
++	uint32_t verticesPerInstance;	// Records the vertex stage wrote per instance
++};
++
++struct Emulation {
++	std::vector<uint32_t> vertexSPIRV;		// The vertex shader, writing its outputs packed
++	std::vector<uint32_t> geometrySPIRV;	// The geometry shader as compute kernel
++	std::vector<uint32_t> replaySPIRV;		// The vertex shader of the rasterization stage
++	uint32_t inputVertices = 0;				// Vertices of an input primitive
++	uint32_t maxOutputVertices = 0;
++	uint32_t invocations = 1;
++	uint32_t outputPrimitive = 0;			// spv::ExecutionModeOutputPoints, OutputLineStrip or OutputTriangleStrip
++	uint32_t inputSlots = 0;				// uint4 per vertex written by the vertex stage
++	uint32_t outputSlots = 0;				// uint4 per vertex emitted by the kernel
++	uint32_t indicesPerThread = 0;
++	bool writesLayer = false;
++	bool writesViewportIndex = false;
++	std::string error;
++};
++
++namespace detail {
++
++typedef std::vector<uint32_t> Words;
++
++struct Inst {
++	Words w;
++	uint32_t op() const { return w[0] & 0xffff; }
++};
++
++inline Inst makeInst(uint32_t op, const Words& operands) {
++	Inst in;
++	in.w.reserve(operands.size() + 1);
++	in.w.push_back(uint32_t((operands.size() + 1) << 16) | op);
++	in.w.insert(in.w.end(), operands.begin(), operands.end());
++	return in;
++}
++
++inline Words stringWords(const char* str) {
++	size_t len = strlen(str);
++	Words w((len + 4) / 4, 0);
++	memcpy(w.data(), str, len);
++	return w;
++}
++
++inline uint32_t stringWordCount(const Inst& in, size_t pos) {
++	const char* str = reinterpret_cast<const char*>(&in.w[pos]);
++	size_t maxLen = (in.w.size() - pos) * 4;
++	return uint32_t(strnlen(str, maxLen) / 4 + 1);
++}
++
++inline uint32_t resultId(const Inst& in) {
++	bool hasResult = false, hasType = false;
++	spv::HasResultAndType(spv::Op(in.op()), &hasResult, &hasType);
++	if ( !hasResult || in.w.size() < (hasType ? 3u : 2u)) { return 0; }
++	return in.w[hasType ? 2 : 1];
++}
++
++inline uint32_t resultType(const Inst& in) {
++	bool hasResult = false, hasType = false;
++	spv::HasResultAndType(spv::Op(in.op()), &hasResult, &hasType);
++	return hasType && in.w.size() > 1 ? in.w[1] : 0;
++}
++
++enum Kind { kKindNone, kKindFloat, kKindInt, kKindUInt };
++
++// Interface keys: a location is location * 4 + component; built-ins follow.
++static constexpr uint32_t kMaxLocations = 32;
++static constexpr uint32_t kKeyPosition = kMaxLocations * 4;	// Four components
++static constexpr uint32_t kKeyPointSize = kKeyPosition + 4;
++static constexpr uint32_t kKeyLayer = kKeyPosition + 5;
++static constexpr uint32_t kKeyViewportIndex = kKeyPosition + 6;
++static constexpr uint32_t kKeyClipDistance = kKeyPosition + 8;	// Eight floats
++static constexpr uint32_t kKeyCullDistance = kKeyPosition + 16;	// Eight floats
++static constexpr uint32_t kKeyNone = UINT32_MAX;
++
++inline uint32_t builtinKey(uint32_t builtin, uint32_t index) {
++	switch (builtin) {
++		case spv::BuiltInPosition:      return index < 4 ? kKeyPosition + index : kKeyNone;
++		case spv::BuiltInPointSize:     return kKeyPointSize;
++		case spv::BuiltInLayer:         return kKeyLayer;
++		case spv::BuiltInViewportIndex: return kKeyViewportIndex;
++		case spv::BuiltInClipDistance:  return index < 8 ? kKeyClipDistance + index : kKeyNone;
++		default:                        return kKeyNone;	// Metal has no cull distances
++	}
++}
++
++/** A scalar of an interface variable, reached by indexing the variable with path. */
++struct Leaf {
++	Words path;
++	uint32_t type = 0;
++	Kind kind = kKindNone;
++	uint32_t key = kKeyNone;
++};
++
++struct Var {
++	uint32_t id = 0;
++	uint32_t type = 0;			// Pointee type
++	uint32_t storage = 0;
++	uint32_t builtin = UINT32_MAX;
++	std::vector<Leaf> leaves;	// For per-vertex inputs, of one vertex
++};
++
++class Module {
++public:
++	uint32_t version = 0, generator = 0, bound = 0, schema = 0;
++	std::vector<Inst> preamble, entryPoints, execModes, debug, annotations, globals, functions;
++	std::string error;
++
++	bool fail(const std::string& msg) { if (error.empty()) { error = msg; } return false; }
++
++	bool parse(const Words& spv) {
++		if (spv.size() < 5 || spv[0] != spv::MagicNumber) { return fail("Not a SPIR-V module"); }
++		version = spv[1]; generator = spv[2]; bound = spv[3]; schema = spv[4];
++		bool inFunctions = false;
++		for (size_t pos = 5; pos < spv.size(); ) {
++			uint32_t len = spv[pos] >> 16;
++			if (len == 0 || pos + len > spv.size()) { return fail("Truncated SPIR-V module"); }
++			Inst in;
++			in.w.assign(spv.begin() + pos, spv.begin() + pos + len);
++			pos += len;
++			uint32_t op = in.op();
++			if (op == spv::OpFunction) { inFunctions = true; }
++			if (inFunctions) { functions.push_back(std::move(in)); continue; }
++			switch (op) {
++				case spv::OpCapability: case spv::OpExtension: case spv::OpExtInstImport: case spv::OpMemoryModel:
++					preamble.push_back(std::move(in)); break;
++				case spv::OpEntryPoint:
++					entryPoints.push_back(std::move(in)); break;
++				case spv::OpExecutionMode: case spv::OpExecutionModeId:
++					execModes.push_back(std::move(in)); break;
++				case spv::OpString: case spv::OpSourceExtension: case spv::OpSource: case spv::OpSourceContinued:
++				case spv::OpName: case spv::OpMemberName: case spv::OpModuleProcessed:
++					debug.push_back(std::move(in)); break;
++				case spv::OpDecorate: case spv::OpMemberDecorate: case spv::OpDecorationGroup: case spv::OpGroupDecorate:
++				case spv::OpGroupMemberDecorate: case spv::OpDecorateId: case spv::OpDecorateString: case spv::OpMemberDecorateString:
++					annotations.push_back(std::move(in)); break;
++				default:
++					globals.push_back(std::move(in)); break;
++			}
++		}
++		reindex();
++		return true;
++	}
++
++	Words serialize() const {
++		Words out = { spv::MagicNumber, version, generator, bound, schema };
++		for (auto* section : { &preamble, &entryPoints, &execModes, &debug, &annotations, &globals, &functions }) {
++			for (auto& in : *section) { out.insert(out.end(), in.w.begin(), in.w.end()); }
++		}
++		return out;
++	}
++
++	uint32_t newId() { return bound++; }
++
++	void reindex() {
++		_globalDefs.clear();
++		for (uint32_t i = 0; i < globals.size(); i++) {
++			if (uint32_t id = resultId(globals[i])) { _globalDefs[id] = i; }
++		}
++	}
++
++	const Inst* def(uint32_t id) const {
++		auto it = _globalDefs.find(id);
++		return it == _globalDefs.end() ? nullptr : &globals[it->second];
++	}
++
++	uint32_t addGlobal(Inst in) {
++		uint32_t id = resultId(in);
++		_globalDefs[id] = uint32_t(globals.size());
++		globals.push_back(std::move(in));
++		return id;
++	}
++
++	uint32_t findOrAddType(uint32_t op, const Words& operands) {
++		for (auto& g : globals) {
++			if (g.op() == op && g.w.size() == operands.size() + 2 && std::equal(operands.begin(), operands.end(), g.w.begin() + 2)) {
++				return g.w[1];
++			}
++		}
++		return addType(op, operands);
++	}
++
++	uint32_t addType(uint32_t op, const Words& operands) {
++		Words w = { newId() };
++		w.insert(w.end(), operands.begin(), operands.end());
++		return addGlobal(makeInst(op, w));
++	}
++
++	uint32_t typeVoid() { return findOrAddType(spv::OpTypeVoid, {}); }
++	uint32_t typeBool() { return findOrAddType(spv::OpTypeBool, {}); }
++	uint32_t typeUInt() { return findOrAddType(spv::OpTypeInt, { 32, 0 }); }
++	uint32_t typeInt() { return findOrAddType(spv::OpTypeInt, { 32, 1 }); }
++	uint32_t typeFloat() { return findOrAddType(spv::OpTypeFloat, { 32 }); }
++	uint32_t typeVector(uint32_t elem, uint32_t count) { return findOrAddType(spv::OpTypeVector, { elem, count }); }
++	uint32_t typePointer(uint32_t storage, uint32_t type) { return findOrAddType(spv::OpTypePointer, { storage, type }); }
++	uint32_t typeFunctionVoid() { return findOrAddType(spv::OpTypeFunction, { typeVoid() }); }
++
++	/** A pointer type declared before the given global, which is to use it. */
++	uint32_t typePointerBefore(uint32_t storage, uint32_t type, uint32_t user) {
++		for (auto& g : globals) {
++			if (g.op() == spv::OpTypePointer && g.w[2] == storage && g.w[3] == type) {
++				if (_globalDefs[g.w[1]] < _globalDefs[user]) { return g.w[1]; }
++				break;
++			}
++		}
++		uint32_t id = newId();
++		globals.insert(globals.begin() + _globalDefs[user], makeInst(spv::OpTypePointer, { id, storage, type }));
++		reindex();
++		return id;
++	}
++
++	uint32_t constant(uint32_t type, uint32_t value) {
++		for (auto& g : globals) {
++			if (g.op() == spv::OpConstant && g.w.size() == 4 && g.w[1] == type && g.w[3] == value) { return g.w[2]; }
++		}
++		return addGlobal(makeInst(spv::OpConstant, { type, newId(), value }));
++	}
++	uint32_t constUInt(uint32_t value) { return constant(typeUInt(), value); }
++
++	/** The value of a 32-bit integer constant, or UINT32_MAX. */
++	uint32_t constantValue(uint32_t id) const {
++		const Inst* c = def(id);
++		return c && c->op() == spv::OpConstant && c->w.size() == 4 ? c->w[3] : UINT32_MAX;
++	}
++
++	Kind kind(uint32_t type) const {
++		const Inst* t = def(type);
++		if ( !t ) { return kKindNone; }
++		if (t->op() == spv::OpTypeFloat && t->w[2] == 32) { return kKindFloat; }
++		if (t->op() == spv::OpTypeInt && t->w[2] == 32) { return t->w[3] ? kKindInt : kKindUInt; }
++		return kKindNone;
++	}
++
++	bool decoration(uint32_t id, uint32_t dec, uint32_t* value = nullptr) const {
++		for (auto& a : annotations) {
++			if (a.op() == spv::OpDecorate && a.w.size() >= 3 && a.w[1] == id && a.w[2] == dec) {
++				if (value) { *value = a.w.size() > 3 ? a.w[3] : 0; }
++				return true;
++			}
++		}
++		return false;
++	}
++
++	bool memberDecoration(uint32_t type, uint32_t member, uint32_t dec, uint32_t* value = nullptr) const {
++		for (auto& a : annotations) {
++			if (a.op() == spv::OpMemberDecorate && a.w.size() >= 4 && a.w[1] == type && a.w[2] == member && a.w[3] == dec) {
++				if (value) { *value = a.w.size() > 4 ? a.w[4] : 0; }
++				return true;
++			}
++		}
++		return false;
++	}
++
++	void decorate(uint32_t id, uint32_t dec, std::initializer_list<uint32_t> values = {}) {
++		Words w = { id, dec };
++		w.insert(w.end(), values);
++		annotations.push_back(makeInst(spv::OpDecorate, w));
++	}
++
++	void memberDecorate(uint32_t type, uint32_t member, uint32_t dec, std::initializer_list<uint32_t> values = {}) {
++		Words w = { type, member, dec };
++		w.insert(w.end(), values);
++		annotations.push_back(makeInst(spv::OpMemberDecorate, w));
++	}
++
++	void name(uint32_t id, const char* str) {
++		Words w = { id };
++		Words s = stringWords(str);
++		w.insert(w.end(), s.begin(), s.end());
++		debug.push_back(makeInst(spv::OpName, w));
++	}
++
++	void addCapability(uint32_t cap) {
++		for (auto& p : preamble) { if (p.op() == spv::OpCapability && p.w[1] == cap) { return; } }
++		preamble.insert(preamble.begin(), makeInst(spv::OpCapability, { cap }));
++	}
++
++	void addExtension(const char* ext) {
++		Words s = stringWords(ext);
++		for (auto& p : preamble) { if (p.op() == spv::OpExtension && Words(p.w.begin() + 1, p.w.end()) == s) { return; } }
++		auto it = preamble.begin();
++		while (it != preamble.end() && it->op() == spv::OpCapability) { ++it; }
++		preamble.insert(it, makeInst(spv::OpExtension, s));
++	}
++
++	/** Finds the entry point of the given model and name. */
++	Inst* entryPoint(uint32_t model, const char* entryName) {
++		for (auto& ep : entryPoints) {
++			if (ep.w[1] == model && (!entryName || strcmp(reinterpret_cast<const char*>(&ep.w[3]), entryName) == 0)) { return &ep; }
++		}
++		return nullptr;
++	}
++
++	static Words entryInterface(const Inst& ep) {
++		uint32_t start = 3 + stringWordCount(ep, 3);
++		return Words(ep.w.begin() + std::min<size_t>(start, ep.w.size()), ep.w.end());
++	}
++
++	static std::string entryName(const Inst& ep) { return reinterpret_cast<const char*>(&ep.w[3]); }
++
++	/** Replaces all entry points with one. */
++	void setEntryPoint(uint32_t model, uint32_t func, const std::string& entryName, const Words& iface) {
++		Words w = { model, func };
++		Words s = stringWords(entryName.c_str());
++		w.insert(w.end(), s.begin(), s.end());
++		w.insert(w.end(), iface.begin(), iface.end());
++		entryPoints.clear();
++		entryPoints.push_back(makeInst(spv::OpEntryPoint, w));
++	}
++
++	/** The pointee and storage class of a variable. */
++	bool variable(uint32_t id, uint32_t& pointee, uint32_t& storage) const {
++		const Inst* v = def(id);
++		if ( !v || v->op() != spv::OpVariable) { return false; }
++		const Inst* p = def(v->w[1]);
++		if ( !p || p->op() != spv::OpTypePointer) { return false; }
++		pointee = p->w[3];
++		storage = v->w[3];
++		return true;
++	}
++
++	/** Collects the scalars of an interface variable of the given type. */
++	bool collectLeaves(uint32_t type, Words& path, uint32_t& location, uint32_t component,
++					   uint32_t builtin, std::vector<Leaf>& leaves) {
++		const Inst* t = def(type);
++		if ( !t ) { return fail("Unknown interface type"); }
++		switch (t->op()) {
++			case spv::OpTypeFloat:
++			case spv::OpTypeInt:
++			case spv::OpTypeVector: {
++				uint32_t elem = t->op() == spv::OpTypeVector ? t->w[2] : type;
++				uint32_t count = t->op() == spv::OpTypeVector ? t->w[3] : 1;
++				Kind k = kind(elem);
++				if (k == kKindNone) { return fail("Interface variable of unsupported type"); }
++				if (builtin == UINT32_MAX && (component + count > 4 || location >= kMaxLocations)) { return fail("Interface location out of range"); }
++				for (uint32_t i = 0; i < count; i++) {
++					Leaf leaf;
++					leaf.path = path;
++					if (t->op() == spv::OpTypeVector) { leaf.path.push_back(i); }
++					leaf.type = elem;
++					leaf.kind = k;
++					leaf.key = builtin != UINT32_MAX ? builtinKey(builtin, i) : location * 4 + component + i;
++					if (leaf.key != kKeyNone) { leaves.push_back(leaf); }
++				}
++				if (builtin == UINT32_MAX) { location++; }
++				return true;
++			}
++			case spv::OpTypeMatrix:
++				for (uint32_t c = 0; c < t->w[3]; c++) {
++					path.push_back(c);
++					bool ok = collectLeaves(t->w[2], path, location, 0, builtin, leaves);
++					path.pop_back();
++					if ( !ok ) { return false; }
++				}
++				return true;
++			case spv::OpTypeArray: {
++				uint32_t len = constantValue(t->w[3]);
++				if (len == UINT32_MAX || len > 64) { return fail("Interface array of unknown size"); }
++				for (uint32_t i = 0; i < len; i++) {
++					path.push_back(i);
++					bool ok;
++					if (builtin != UINT32_MAX && kind(t->w[2]) != kKindNone) {
++						// Clip and cull distances are arrays of scalars
++						Kind k = kind(t->w[2]);
++						Leaf leaf;
++						leaf.path = path;
++						leaf.type = t->w[2];
++						leaf.kind = k;
++						leaf.key = builtinKey(builtin, i);
++						if (leaf.key != kKeyNone) { leaves.push_back(leaf); }
++						ok = true;
++					} else {
++						ok = collectLeaves(t->w[2], path, location, component, builtin, leaves);
++					}
++					path.pop_back();
++					if ( !ok ) { return false; }
++				}
++				return true;
++			}
++			case spv::OpTypeStruct:
++				for (uint32_t m = 0; m + 2 < t->w.size(); m++) {
++					uint32_t memberBuiltin = UINT32_MAX, memberLocation = 0, memberComponent = 0;
++					memberDecoration(type, m, spv::DecorationBuiltIn, &memberBuiltin);
++					if (memberDecoration(type, m, spv::DecorationLocation, &memberLocation)) { location = memberLocation; }
++					memberDecoration(type, m, spv::DecorationComponent, &memberComponent);
++					path.push_back(m);
++					bool ok = collectLeaves(t->w[2 + m], path, location, memberComponent,
++											memberBuiltin != UINT32_MAX ? memberBuiltin : builtin, leaves);
++					path.pop_back();
++					if ( !ok ) { return false; }
++				}
++				return true;
++			default:
++				return fail("Interface variable of unsupported type");
++		}
++	}
++
++	/** Describes an interface variable. With perVertex, its outermost array is the vertices of a primitive. */
++	bool describeVar(uint32_t id, bool perVertex, Var& var) {
++		var.id = id;
++		if ( !variable(id, var.type, var.storage)) { return fail("Interface variable not found"); }
++		decoration(id, spv::DecorationBuiltIn, &var.builtin);
++		uint32_t type = var.type;
++		if (perVertex) {
++			const Inst* t = def(type);
++			if ( !t || t->op() != spv::OpTypeArray) { return fail("Per-vertex input is not an array"); }
++			type = t->w[2];
++		}
++		uint32_t location = 0, component = 0;
++		decoration(id, spv::DecorationLocation, &location);
++		decoration(id, spv::DecorationComponent, &component);
++		Words path;
++		if ( !collectLeaves(type, path, location, component, var.builtin, var.leaves)) { return false; }
++
++		// Leave out what the shader does not access, such as the members of gl_PerVertex it does not write.
++		const Inst* t = def(type);
++		if (t && t->op() == spv::OpTypeStruct) {
++			std::unordered_set<uint32_t> members;
++			if ( !accessesAllMembers(id, perVertex ? 1 : 0, members)) {
++				var.leaves.erase(std::remove_if(var.leaves.begin(), var.leaves.end(), [&](const Leaf& leaf) {
++					return leaf.path.empty() || !members.count(leaf.path[0]);
++				}), var.leaves.end());
++			}
++		} else if ( !isAccessed(id)) {
++			var.leaves.clear();
++		}
++		return true;
++	}
++
++	bool isAccessed(uint32_t id) const {
++		for (auto& in : functions) {
++			for (size_t i = 1; i < in.w.size(); i++) { if (in.w[i] == id && resultId(in) != id) { return true; } }
++		}
++		return false;
++	}
++
++	/** Whether a struct variable is accessed as a whole; if not, collects the members it accesses. */
++	bool accessesAllMembers(uint32_t id, uint32_t memberIndexPos, std::unordered_set<uint32_t>& members) const {
++		std::unordered_map<uint32_t, uint32_t> constants;
++		for (auto& g : globals) { if (g.op() == spv::OpConstant && g.w.size() == 4) { constants[g.w[2]] = g.w[3]; } }
++		for (auto& in : functions) {
++			uint32_t op = in.op();
++			bool chain = op == spv::OpAccessChain || op == spv::OpInBoundsAccessChain;
++			if (chain && in.w[3] == id) {
++				if (in.w.size() <= 4 + memberIndexPos) { return true; }
++				auto c = constants.find(in.w[4 + memberIndexPos]);
++				if (c == constants.end()) { return true; }
++				members.insert(c->second);
++				continue;
++			}
++			for (size_t i = 1; i < in.w.size(); i++) { if (in.w[i] == id) { return true; } }
++		}
++		return false;
++	}
++
++	/** Interface variables of an entry point, which for SPIR-V before 1.4 are only inputs and outputs. */
++	std::vector<uint32_t> interfaceVars(const Inst& ep, uint32_t storage) const {
++		std::vector<uint32_t> vars;
++		for (uint32_t id : entryInterface(ep)) {
++			uint32_t pointee, sc;
++			if (variable(id, pointee, sc) && sc == storage) { vars.push_back(id); }
++		}
++		return vars;
++	}
++
++	/** Struct types contained in a type. */
++	void containedStructs(uint32_t type, std::unordered_set<uint32_t>& structs) const {
++		const Inst* t = def(type);
++		if ( !t ) { return; }
++		switch (t->op()) {
++			case spv::OpTypeArray: case spv::OpTypeRuntimeArray:
++				containedStructs(t->w[2], structs);
++				break;
++			case spv::OpTypeStruct:
++				if (structs.insert(type).second) {
++					for (size_t m = 2; m < t->w.size(); m++) { containedStructs(t->w[m], structs); }
++				}
++				break;
++			default:
++				break;
++		}
++	}
++
++	/** Turns interface variables into private ones, along with the pointers derived from them. */
++	bool makePrivate(const std::unordered_set<uint32_t>& vars) {
++		std::unordered_set<uint32_t> derived(vars.begin(), vars.end());
++		std::unordered_set<uint32_t> structs;
++		for (uint32_t id : vars) {
++			auto it = _globalDefs.find(id);
++			if (it == _globalDefs.end()) { return fail("Interface variable not found"); }
++			uint32_t pointee, storage;
++			variable(id, pointee, storage);
++			containedStructs(pointee, structs);
++			uint32_t ptr = typePointerBefore(spv::StorageClassPrivate, pointee, id);
++			Inst& v = globals[_globalDefs[id]];
++			v.w[1] = ptr;
++			v.w[3] = spv::StorageClassPrivate;
++		}
++
++		for (auto& in : functions) {
++			uint32_t op = in.op();
++			switch (op) {
++				case spv::OpAccessChain: case spv::OpInBoundsAccessChain: case spv::OpPtrAccessChain:
++				case spv::OpInBoundsPtrAccessChain: case spv::OpCopyObject: {
++					if ( !derived.count(in.w[3])) { break; }
++					for (size_t i = 4; i < in.w.size(); i++) {
++						if (derived.count(in.w[i])) { return fail("Interface pointer used as index"); }
++					}
++					const Inst* p = def(in.w[1]);
++					if ( !p || p->op() != spv::OpTypePointer) { return fail("Access chain without pointer type"); }
++					in.w[1] = typePointer(spv::StorageClassPrivate, p->w[3]);
++					derived.insert(in.w[2]);
++					continue;
++				}
++				case spv::OpLoad:
++					continue;
++				case spv::OpStore:
++					if (derived.count(in.w[2])) { return fail("Interface pointer stored"); }
++					continue;
++				case spv::OpCopyMemory: case spv::OpCopyMemorySized:
++				case spv::OpCompositeExtract: case spv::OpCompositeInsert: case spv::OpVectorShuffle:
++				case spv::OpExtInst: case spv::OpSwitch: case spv::OpSelectionMerge: case spv::OpLoopMerge:
++				case spv::OpLine: case spv::OpNoLine: case spv::OpLabel: case spv::OpBranch: case spv::OpFunction:
++				case spv::OpFunctionEnd: case spv::OpReturn: case spv::OpUnreachable: case spv::OpKill:
++					continue;
++				default:
++					break;
++			}
++			for (size_t i = 1; i < in.w.size(); i++) {
++				if (derived.count(in.w[i])) { return fail("Interface pointer escapes"); }
++			}
++		}
++
++		// Interface decorations do not apply to private variables
++		annotations.erase(std::remove_if(annotations.begin(), annotations.end(), [&](const Inst& a) {
++			if (a.op() == spv::OpDecorate || a.op() == spv::OpDecorateId || a.op() == spv::OpDecorateString) {
++				return vars.count(a.w[1]) || (structs.count(a.w[1]) && a.w[2] == spv::DecorationBlock);
++			}
++			if (a.op() == spv::OpMemberDecorate || a.op() == spv::OpMemberDecorateString) {
++				if ( !structs.count(a.w[1])) { return false; }
++				switch (a.w[3]) {
++					case spv::DecorationBuiltIn: case spv::DecorationLocation: case spv::DecorationComponent:
++					case spv::DecorationFlat: case spv::DecorationNoPerspective: case spv::DecorationCentroid:
++					case spv::DecorationSample: case spv::DecorationInvariant: case spv::DecorationStream:
++					case spv::DecorationXfbBuffer: case spv::DecorationXfbStride: case spv::DecorationOffset:
++						return true;
++					default:
++						return false;
++				}
++			}
++			return false;
++		}), annotations.end());
++		return true;
++	}
++
++	/** Rewrites the uses of the given execution modes, or drops them where the target is zero. */
++	void retargetExecutionModes(uint32_t from, uint32_t to, const std::unordered_set<uint32_t>& drop) {
++		execModes.erase(std::remove_if(execModes.begin(), execModes.end(), [&](const Inst& m) {
++			return m.w[1] == from && drop.count(m.w[2]);
++		}), execModes.end());
++		for (auto& m : execModes) { if (m.w[1] == from) { m.w[1] = to; } }
++	}
++
++	/** SPIR-V 1.4 lists all global variables an entry point uses in its interface. */
++	bool listsAllGlobals() const { return version >= 0x00010400; }
++
++	/** Uses the StorageBuffer storage class, which modules before SPIR-V 1.3 need an extension for. */
++	void enableStorageBuffers() {
++		if (version < 0x00010300) { addExtension("SPV_KHR_storage_buffer_storage_class"); }
++	}
++
++private:
++	std::unordered_map<uint32_t, uint32_t> _globalDefs;
++};
++
++/** Appends instructions of a new function. */
++class Builder {
++public:
++	Builder(Module& m) : mod(m) {}
++
++	Module& mod;
++	std::vector<Inst> code;
++
++	uint32_t op(uint32_t opcode, uint32_t type, const Words& args) {
++		uint32_t id = mod.newId();
++		Words w = { type, id };
++		w.insert(w.end(), args.begin(), args.end());
++		code.push_back(makeInst(opcode, w));
++		return id;
++	}
++	void opNoResult(uint32_t opcode, const Words& args) { code.push_back(makeInst(opcode, args)); }
++
++	uint32_t label() { uint32_t id = mod.newId(); code.push_back(makeInst(spv::OpLabel, { id })); return id; }
++	void label(uint32_t id) { code.push_back(makeInst(spv::OpLabel, { id })); }
++	void branch(uint32_t target) { opNoResult(spv::OpBranch, { target }); }
++
++	uint32_t u(uint32_t v) { return mod.constUInt(v); }
++	uint32_t add(uint32_t a, uint32_t b) { return op(spv::OpIAdd, mod.typeUInt(), { a, b }); }
++	uint32_t sub(uint32_t a, uint32_t b) { return op(spv::OpISub, mod.typeUInt(), { a, b }); }
++	uint32_t mul(uint32_t a, uint32_t b) { return op(spv::OpIMul, mod.typeUInt(), { a, b }); }
++	uint32_t div(uint32_t a, uint32_t b) { return op(spv::OpUDiv, mod.typeUInt(), { a, b }); }
++	uint32_t mod_(uint32_t a, uint32_t b) { return op(spv::OpUMod, mod.typeUInt(), { a, b }); }
++	uint32_t load(uint32_t type, uint32_t ptr) { return op(spv::OpLoad, type, { ptr }); }
++	void store(uint32_t ptr, uint32_t val) { opNoResult(spv::OpStore, { ptr, val }); }
++
++	uint32_t chain(uint32_t storage, uint32_t type, uint32_t base, const Words& constIndices, const Words& idIndices = {}) {
++		if (constIndices.empty() && idIndices.empty()) { return base; }
++		Words args = { base };
++		args.insert(args.end(), idIndices.begin(), idIndices.end());
++		for (uint32_t i : constIndices) { args.push_back(u(i)); }
++		return op(spv::OpAccessChain, mod.typePointer(storage, type), args);
++	}
++
++	/** Reinterprets a 32-bit scalar as another kind. */
++	uint32_t bitcast(uint32_t val, Kind from, uint32_t toType, Kind to) {
++		return from == to ? val : op(spv::OpBitcast, toType, { val });
++	}
++
++	/** Begins a function without parameters returning void. */
++	uint32_t beginFunction() {
++		uint32_t id = mod.newId();
++		code.push_back(makeInst(spv::OpFunction, { mod.typeVoid(), id, spv::FunctionControlMaskNone, mod.typeFunctionVoid() }));
++		label();
++		return id;
++	}
++	void endFunction() {
++		opNoResult(spv::OpReturn, {});
++		opNoResult(spv::OpFunctionEnd, {});
++		mod.functions.insert(mod.functions.end(), code.begin(), code.end());
++		code.clear();
++	}
++};
++
++/** A storage buffer of a runtime array, decorated as such. */
++inline uint32_t addStorageBuffer(Module& m, uint32_t elemType, uint32_t stride, uint32_t binding, bool readOnly, const char* name) {
++	m.enableStorageBuffers();
++	uint32_t arr = m.addType(spv::OpTypeRuntimeArray, { elemType });
++	m.decorate(arr, spv::DecorationArrayStride, { stride });
++	uint32_t block = m.addType(spv::OpTypeStruct, { arr });
++	m.decorate(block, spv::DecorationBlock);
++	m.memberDecorate(block, 0, spv::DecorationOffset, { 0 });
++	if (readOnly) { m.memberDecorate(block, 0, spv::DecorationNonWritable); }
++	uint32_t var = m.addGlobal(makeInst(spv::OpVariable, { m.typePointer(spv::StorageClassStorageBuffer, block), m.newId(), spv::StorageClassStorageBuffer }));
++	m.decorate(var, spv::DecorationDescriptorSet, { kDescSet });
++	m.decorate(var, spv::DecorationBinding, { binding });
++	m.name(var, name);
++	return var;
++}
++
++/** Maps interface keys to uint4 slots, a slot per four consecutive keys in use. */
++struct Slots {
++	std::map<uint32_t, uint32_t> slotOfGroup;
++
++	void add(uint32_t key) { slotOfGroup[key / 4] = 0; }
++	uint32_t finish() {
++		uint32_t n = 0;
++		for (auto& s : slotOfGroup) { s.second = n++; }
++		return std::max(n, 1u);
++	}
++	bool has(uint32_t key) const { return slotOfGroup.count(key / 4); }
++	uint32_t slot(uint32_t key) const { return slotOfGroup.at(key / 4); }
++};
++
++/** Loads a packed scalar of an interface variable from a uint4 element of a storage buffer. */
++inline uint32_t loadPacked(Builder& b, uint32_t buffer, uint32_t base, const Slots& slots, const Leaf& leaf) {
++	Module& m = b.mod;
++	uint32_t elem = b.add(base, b.u(slots.slot(leaf.key)));
++	uint32_t ptr = b.chain(spv::StorageClassStorageBuffer, m.typeUInt(), buffer, { leaf.key % 4 }, { b.u(0), elem });
++	uint32_t val = b.load(m.typeUInt(), ptr);
++	return b.bitcast(val, kKindUInt, leaf.type, leaf.kind);
++}
++
++/** Stores a scalar of an interface variable packed into a uint4 element of a storage buffer. */
++inline void storePacked(Builder& b, uint32_t buffer, uint32_t base, const Slots& slots, const Leaf& leaf, uint32_t val) {
++	Module& m = b.mod;
++	uint32_t elem = b.add(base, b.u(slots.slot(leaf.key)));
++	uint32_t ptr = b.chain(spv::StorageClassStorageBuffer, m.typeUInt(), buffer, { leaf.key % 4 }, { b.u(0), elem });
++	b.store(ptr, b.bitcast(val, leaf.kind, m.typeUInt(), kKindUInt));
++}
++
++/** Renames the entry function, to be called by a new entry point wrapping it. */
++inline uint32_t entryFunction(const Inst& ep) { return ep.w[2]; }
++
++static const std::unordered_set<uint32_t> kGeometryExecutionModes = {
++	spv::ExecutionModeInputPoints, spv::ExecutionModeInputLines, spv::ExecutionModeInputLinesAdjacency,
++	spv::ExecutionModeTriangles, spv::ExecutionModeInputTrianglesAdjacency, spv::ExecutionModeInvocations,
++	spv::ExecutionModeOutputVertices, spv::ExecutionModeOutputPoints, spv::ExecutionModeOutputLineStrip,
++	spv::ExecutionModeOutputTriangleStrip,
++};
++
++}	// namespace detail
++
++/**
++ * Builds the vertex shader, geometry kernel and replay vertex shader that emulate a geometry stage.
++ * Returns false, with the reason in emu.error, for shaders it cannot handle.
++ */
++inline bool buildEmulation(const std::vector<uint32_t>& vsSPIRV, const char* vsEntry,
++						   const std::vector<uint32_t>& gsSPIRV, const char* gsEntry, Emulation& emu) {
++	using namespace detail;
++
++	// Geometry shader
++	Module gs;
++	if ( !gs.parse(gsSPIRV)) { emu.error = gs.error; return false; }
++	Inst* gsEP = gs.entryPoint(spv::ExecutionModelGeometry, gsEntry);
++	if ( !gsEP) { emu.error = "Geometry entry point not found"; return false; }
++	uint32_t gsFunc = entryFunction(*gsEP);
++	std::string gsName = Module::entryName(*gsEP);
++	Words gsIface = Module::entryInterface(*gsEP);
++	for (auto& m : gs.execModes) {
++		if (m.w[1] != gsFunc) { continue; }
++		switch (m.w[2]) {
++			case spv::ExecutionModeInputPoints:             emu.inputVertices = 1; break;
++			case spv::ExecutionModeInputLines:              emu.inputVertices = 2; break;
++			case spv::ExecutionModeInputLinesAdjacency:     emu.inputVertices = 4; break;
++			case spv::ExecutionModeTriangles:               emu.inputVertices = 3; break;
++			case spv::ExecutionModeInputTrianglesAdjacency: emu.inputVertices = 6; break;
++			case spv::ExecutionModeInvocations:             emu.invocations = std::max(m.w[3], 1u); break;
++			case spv::ExecutionModeOutputVertices:          emu.maxOutputVertices = m.w[3]; break;
++			case spv::ExecutionModeOutputPoints:
++			case spv::ExecutionModeOutputLineStrip:
++			case spv::ExecutionModeOutputTriangleStrip:     emu.outputPrimitive = m.w[2]; break;
++			default: break;
++		}
++	}
++	if ( !emu.inputVertices || !emu.maxOutputVertices || !emu.outputPrimitive) { emu.error = "Incomplete geometry execution modes"; return false; }
++	bool strips = emu.outputPrimitive != spv::ExecutionModeOutputPoints;
++	emu.indicesPerThread = strips ? emu.maxOutputVertices * 2 : emu.maxOutputVertices;
++
++	std::vector<Var> gsInputs, gsOutputs;
++	uint32_t primIdVar = 0, invIdVar = 0;
++	std::unordered_set<uint32_t> gsIfaceVars;
++	Slots inSlots, outSlots;
++	for (uint32_t id : gs.interfaceVars(*gsEP, spv::StorageClassInput)) {
++		gsIfaceVars.insert(id);
++		uint32_t builtin = UINT32_MAX;
++		gs.decoration(id, spv::DecorationBuiltIn, &builtin);
++		if (builtin == spv::BuiltInPrimitiveId) { primIdVar = id; continue; }
++		if (builtin == spv::BuiltInInvocationId) { invIdVar = id; continue; }
++		Var var;
++		if ( !gs.describeVar(id, true, var)) { emu.error = gs.error; return false; }
++		for (auto& leaf : var.leaves) { inSlots.add(leaf.key); }
++		gsInputs.push_back(var);
++	}
++	for (uint32_t id : gs.interfaceVars(*gsEP, spv::StorageClassOutput)) {
++		gsIfaceVars.insert(id);
++		Var var;
++		if ( !gs.describeVar(id, false, var)) { emu.error = gs.error; return false; }
++		for (auto& leaf : var.leaves) {
++			outSlots.add(leaf.key);
++			if (leaf.key == kKeyLayer) { emu.writesLayer = true; }
++			if (leaf.key == kKeyViewportIndex) { emu.writesViewportIndex = true; }
++		}
++		gsOutputs.push_back(var);
++	}
++	emu.inputSlots = inSlots.finish();
++	emu.outputSlots = outSlots.finish();
++
++	// The replay vertex shader starts from the geometry shader, before it changes.
++	Module replay = gs;
++
++	// Vertex shader: run as before, then write the outputs the geometry shader reads, packed.
++	{
++		Module vs;
++		if ( !vs.parse(vsSPIRV)) { emu.error = vs.error; return false; }
++		Inst* ep = vs.entryPoint(spv::ExecutionModelVertex, vsEntry);
++		if ( !ep) { emu.error = "Vertex entry point not found"; return false; }
++		uint32_t func = entryFunction(*ep);
++		std::string name = Module::entryName(*ep);
++		Words iface = Module::entryInterface(*ep);
++		std::vector<Var> outputs;
++		std::unordered_set<uint32_t> outVars;
++		for (uint32_t id : vs.interfaceVars(*ep, spv::StorageClassOutput)) {
++			Var var;
++			if ( !vs.describeVar(id, false, var)) { emu.error = vs.error; return false; }
++			outputs.push_back(var);
++			outVars.insert(id);
++		}
++		if ( !vs.makePrivate(outVars)) { emu.error = vs.error; return false; }
++
++		uint32_t uint4 = vs.typeVector(vs.typeUInt(), 4);
++		uint32_t packedType = vs.addType(spv::OpTypeArray, { uint4, vs.constUInt(emu.inputSlots) });
++		uint32_t packed = vs.addGlobal(makeInst(spv::OpVariable, { vs.typePointer(spv::StorageClassOutput, packedType), vs.newId(), spv::StorageClassOutput }));
++		vs.decorate(packed, spv::DecorationLocation, { 0 });
++		vs.name(packed, "mvkPackedOutput");
++
++		Builder b(vs);
++		uint32_t main = b.beginFunction();
++		b.op(spv::OpFunctionCall, vs.typeVoid(), { func });
++		std::unordered_set<uint32_t> written;
++		for (auto& var : outputs) {
++			for (auto& leaf : var.leaves) {
++				if ( !inSlots.has(leaf.key) || !written.insert(leaf.key).second) { continue; }
++				uint32_t src = b.chain(spv::StorageClassPrivate, leaf.type, var.id, leaf.path);
++				uint32_t val = b.bitcast(b.load(leaf.type, src), leaf.kind, vs.typeUInt(), kKindUInt);
++				uint32_t dst = b.chain(spv::StorageClassOutput, vs.typeUInt(), packed, { inSlots.slot(leaf.key), leaf.key % 4 });
++				b.store(dst, val);
++			}
++		}
++		b.endFunction();
++		vs.name(main, "mvkPackOutputs");
++
++		Words newIface;
++		for (uint32_t id : iface) { if (vs.listsAllGlobals() || !outVars.count(id)) { newIface.push_back(id); } }
++		newIface.push_back(packed);
++		vs.setEntryPoint(spv::ExecutionModelVertex, main, name, newIface);
++		vs.retargetExecutionModes(func, main, {});
++		emu.vertexSPIRV = vs.serialize();
++	}
++
++	// Geometry kernel
++	{
++		if ( !gs.makePrivate(gsIfaceVars)) { emu.error = gs.error; return false; }
++		uint32_t u32 = gs.typeUInt(), uint4 = gs.typeVector(u32, 4), boolT = gs.typeBool();
++		uint32_t inBuf = addStorageBuffer(gs, uint4, 16, kBindingVertices, true, "mvkVertices");
++		uint32_t outBuf = addStorageBuffer(gs, uint4, 16, kBindingOutVertices, false, "mvkOutVertices");
++		uint32_t idxBuf = addStorageBuffer(gs, u32, 4, kBindingOutIndices, false, "mvkOutIndices");
++
++		uint32_t paramsType = gs.addType(spv::OpTypeStruct, { u32, u32, u32, u32, u32 });
++		gs.decorate(paramsType, spv::DecorationBlock);
++		for (uint32_t i = 0; i < 5; i++) { gs.memberDecorate(paramsType, i, spv::DecorationOffset, { i * 4 }); }
++		uint32_t params = gs.addGlobal(makeInst(spv::OpVariable, { gs.typePointer(spv::StorageClassUniform, paramsType), gs.newId(), spv::StorageClassUniform }));
++		gs.decorate(params, spv::DecorationDescriptorSet, { kDescSet });
++		gs.decorate(params, spv::DecorationBinding, { kBindingParams });
++		gs.name(params, "mvkParams");
++
++		uint32_t uint3 = gs.typeVector(u32, 3);
++		uint32_t gidIn = gs.addGlobal(makeInst(spv::OpVariable, { gs.typePointer(spv::StorageClassInput, uint3), gs.newId(), spv::StorageClassInput }));
++		gs.decorate(gidIn, spv::DecorationBuiltIn, { spv::BuiltInGlobalInvocationId });
++		auto privateUInt = [&](const char* name) {
++			uint32_t v = gs.addGlobal(makeInst(spv::OpVariable, { gs.typePointer(spv::StorageClassPrivate, u32), gs.newId(), spv::StorageClassPrivate }));
++			gs.name(v, name);
++			return v;
++		};
++		uint32_t threadVar = privateUInt("mvkThread"), vertexCountVar = privateUInt("mvkVertexCount");
++		uint32_t indexCountVar = privateUInt("mvkIndexCount"), stripLengthVar = privateUInt("mvkStripLength");
++		uint32_t M = emu.maxOutputVertices, IS = emu.indicesPerThread;
++
++		// EmitVertex: write the outputs and an index, as long as there are slots left.
++		Builder b(gs);
++		uint32_t emitFunc = b.beginFunction();
++		{
++			uint32_t vc = b.load(u32, vertexCountVar);
++			uint32_t room = b.op(spv::OpULessThan, boolT, { vc, b.u(M) });
++			uint32_t body = gs.newId(), done = gs.newId();
++			b.opNoResult(spv::OpSelectionMerge, { done, spv::SelectionControlMaskNone });
++			b.opNoResult(spv::OpBranchConditional, { room, body, done });
++			b.label(body);
++			uint32_t thread = b.load(u32, threadVar);
++			uint32_t vertex = b.add(b.mul(thread, b.u(M)), vc);
++			uint32_t base = b.mul(vertex, b.u(emu.outputSlots));
++			std::unordered_set<uint32_t> written;
++			for (auto& var : gsOutputs) {
++				for (auto& leaf : var.leaves) {
++					if ( !written.insert(leaf.key).second) { continue; }
++					uint32_t src = b.chain(spv::StorageClassPrivate, leaf.type, var.id, leaf.path);
++					storePacked(b, outBuf, base, outSlots, leaf, b.load(leaf.type, src));
++				}
++			}
++			uint32_t ic = b.load(u32, indexCountVar);
++			uint32_t idxPtr = b.chain(spv::StorageClassStorageBuffer, u32, idxBuf, {}, { b.u(0), b.add(b.mul(thread, b.u(IS)), ic) });
++			b.store(idxPtr, vertex);
++			b.store(indexCountVar, b.add(ic, b.u(1)));
++			b.store(vertexCountVar, b.add(vc, b.u(1)));
++			b.store(stripLengthVar, b.add(b.load(u32, stripLengthVar), b.u(1)));
++			b.branch(done);
++			b.label(done);
++		}
++		b.endFunction();
++		gs.name(emitFunc, "mvkEmitVertex");
++
++		// EndPrimitive: restart the strip, unless it is empty.
++		uint32_t endFunc = b.beginFunction();
++		if (strips) {
++			uint32_t len = b.load(u32, stripLengthVar);
++			uint32_t open = b.op(spv::OpINotEqual, boolT, { len, b.u(0) });
++			uint32_t body = gs.newId(), done = gs.newId();
++			b.opNoResult(spv::OpSelectionMerge, { done, spv::SelectionControlMaskNone });
++			b.opNoResult(spv::OpBranchConditional, { open, body, done });
++			b.label(body);
++			uint32_t thread = b.load(u32, threadVar);
++			uint32_t ic = b.load(u32, indexCountVar);
++			uint32_t idxPtr = b.chain(spv::StorageClassStorageBuffer, u32, idxBuf, {}, { b.u(0), b.add(b.mul(thread, b.u(IS)), ic) });
++			b.store(idxPtr, b.u(kRestartIndex));
++			b.store(indexCountVar, b.add(ic, b.u(1)));
++			b.store(stripLengthVar, b.u(0));
++			b.branch(done);
++			b.label(done);
++		}
++		b.endFunction();
++		gs.name(endFunc, "mvkEndPrimitive");
++
++		// Calls replace the emit instructions, of stream 0 only.
++		for (auto& in : gs.functions) {
++			uint32_t op = in.op();
++			bool emit = op == spv::OpEmitVertex || op == spv::OpEmitStreamVertex;
++			bool end = op == spv::OpEndPrimitive || op == spv::OpEndStreamPrimitive;
++			if ( !emit && !end) { continue; }
++			bool stream0 = (op != spv::OpEmitStreamVertex && op != spv::OpEndStreamPrimitive) || gs.constantValue(in.w[1]) == 0;
++			if (stream0) {
++				in = makeInst(spv::OpFunctionCall, { gs.typeVoid(), gs.newId(), emit ? emitFunc : endFunc });
++			} else {
++				in = makeInst(spv::OpNop, {});
++			}
++		}
++		gs.functions.erase(std::remove_if(gs.functions.begin(), gs.functions.end(), [](const Inst& in) { return in.op() == spv::OpNop; }), gs.functions.end());
++
++		// The kernel: one thread per primitive of an instance and invocation.
++		uint32_t main = b.beginFunction();
++		{
++			uint32_t counter = b.op(spv::OpVariable, gs.typePointer(spv::StorageClassFunction, u32), { spv::StorageClassFunction });
++			uint32_t gid = b.op(spv::OpCompositeExtract, u32, { b.load(uint3, gidIn), 0 });
++			auto param = [&](uint32_t member) {
++				return b.load(u32, b.chain(spv::StorageClassUniform, u32, params, { member }));
++			};
++			uint32_t total = param(0);
++			uint32_t inRange = b.op(spv::OpULessThan, boolT, { gid, total });
++			uint32_t body = gs.newId(), done = gs.newId();
++			b.opNoResult(spv::OpSelectionMerge, { done, spv::SelectionControlMaskNone });
++			b.opNoResult(spv::OpBranchConditional, { inRange, body, done });
++			b.label(body);
++
++			b.store(threadVar, gid);
++			uint32_t I = emu.invocations;
++			uint32_t perInstance = param(1);
++			uint32_t invocation = b.mod_(gid, b.u(I));
++			uint32_t t = b.div(gid, b.u(I));
++			uint32_t prim = b.mod_(t, perInstance);
++			uint32_t instance = b.div(t, perInstance);
++			auto storeBuiltin = [&](uint32_t var, uint32_t val) {
++				if ( !var) { return; }
++				uint32_t pointee, storage;
++				gs.variable(var, pointee, storage);
++				b.store(var, b.bitcast(val, kKindUInt, pointee, gs.kind(pointee)));
++			};
++			storeBuiltin(primIdVar, prim);
++			storeBuiltin(invIdVar, invocation);
++
++			uint32_t first = b.add(b.mul(instance, param(4)), b.mul(prim, param(2)));
++			uint32_t swap = b.mul(b.op(spv::OpBitwiseAnd, u32, { prim, b.u(1) }), param(3));
++			for (uint32_t v = 0; v < emu.inputVertices; v++) {
++				uint32_t vertex = b.add(first, b.u(v));
++				if (v == 1) { vertex = b.add(vertex, swap); }
++				if (v == 2) { vertex = b.sub(vertex, swap); }
++				uint32_t base = b.mul(vertex, b.u(emu.inputSlots));
++				for (auto& var : gsInputs) {
++					for (auto& leaf : var.leaves) {
++						Words path = { v };
++						path.insert(path.end(), leaf.path.begin(), leaf.path.end());
++						uint32_t dst = b.chain(spv::StorageClassPrivate, leaf.type, var.id, path);
++						b.store(dst, loadPacked(b, inBuf, base, inSlots, leaf));
++					}
++				}
++			}
++			b.store(vertexCountVar, b.u(0));
++			b.store(indexCountVar, b.u(0));
++			b.store(stripLengthVar, b.u(0));
++			b.op(spv::OpFunctionCall, gs.typeVoid(), { gsFunc });
++
++			// Restart indices fill the slots left.
++			b.store(counter, b.load(u32, indexCountVar));
++			uint32_t header = gs.newId(), cond = gs.newId(), loop = gs.newId(), cont = gs.newId(), merge = gs.newId();
++			b.branch(header);
++			b.label(header);
++			b.opNoResult(spv::OpLoopMerge, { merge, cont, spv::LoopControlMaskNone });
++			b.branch(cond);
++			b.label(cond);
++			uint32_t i = b.load(u32, counter);
++			b.opNoResult(spv::OpBranchConditional, { b.op(spv::OpULessThan, boolT, { i, b.u(IS) }), loop, merge });
++			b.label(loop);
++			uint32_t idxPtr = b.chain(spv::StorageClassStorageBuffer, u32, idxBuf, {}, { b.u(0), b.add(b.mul(gid, b.u(IS)), i) });
++			b.store(idxPtr, b.u(kRestartIndex));
++			b.branch(cont);
++			b.label(cont);
++			b.store(counter, b.add(i, b.u(1)));
++			b.branch(header);
++			b.label(merge);
++			b.branch(done);
++			b.label(done);
++		}
++		b.endFunction();
++		gs.name(main, "mvkGeometryKernel");
++
++		Words iface = { gidIn };
++		if (gs.listsAllGlobals()) {
++			for (auto& g : gs.globals) {
++				if (g.op() == spv::OpVariable && g.w[3] != spv::StorageClassFunction && g.w[2] != gidIn) { iface.push_back(g.w[2]); }
++			}
++		}
++		gs.setEntryPoint(spv::ExecutionModelGLCompute, main, gsName, iface);
++		gs.retargetExecutionModes(gsFunc, main, kGeometryExecutionModes);
++		gs.execModes.push_back(makeInst(spv::OpExecutionMode, { main, spv::ExecutionModeLocalSize, 64, 1, 1 }));
++		emu.geometrySPIRV = gs.serialize();
++	}
++
++	// Replay vertex shader: the outputs of the geometry shader, read from the vertex its index names.
++	{
++		Module& r = replay;
++		std::unordered_set<uint32_t> removed;
++		for (auto& in : r.functions) { if (uint32_t id = resultId(in)) { removed.insert(id); } }
++		std::unordered_set<uint32_t> keptOutputs;
++		for (auto& var : gsOutputs) { if (var.builtin != spv::BuiltInPrimitiveId) { keptOutputs.insert(var.id); } }
++		for (uint32_t id : gsIfaceVars) { if ( !keptOutputs.count(id)) { removed.insert(id); } }
++		r.functions.clear();
++		r.execModes.clear();
++		r.globals.erase(std::remove_if(r.globals.begin(), r.globals.end(), [&](const Inst& g) { return removed.count(resultId(g)); }), r.globals.end());
++		r.reindex();
++		r.debug.erase(std::remove_if(r.debug.begin(), r.debug.end(), [&](const Inst& d) {
++			return (d.op() == spv::OpName || d.op() == spv::OpMemberName) && removed.count(d.w[1]);
++		}), r.debug.end());
++		r.annotations.erase(std::remove_if(r.annotations.begin(), r.annotations.end(), [&](const Inst& a) {
++			return a.w.size() > 1 && (removed.count(a.w[1]) || (a.op() == spv::OpDecorate && a.w[2] == spv::DecorationStream) ||
++									  (a.op() == spv::OpMemberDecorate && a.w[3] == spv::DecorationStream));
++		}), r.annotations.end());
++		if (emu.writesLayer || emu.writesViewportIndex) {
++			r.addCapability(spv::CapabilityShaderViewportIndexLayerEXT);
++			r.addExtension("SPV_EXT_shader_viewport_index_layer");
++		}
++
++		uint32_t u32 = r.typeUInt(), i32 = r.typeInt(), uint4 = r.typeVector(u32, 4), boolT = r.typeBool();
++		uint32_t vtxBuf = addStorageBuffer(r, uint4, 16, kBindingOutVertices, true, "mvkOutVertices");
++		uint32_t vidIn = r.addGlobal(makeInst(spv::OpVariable, { r.typePointer(spv::StorageClassInput, i32), r.newId(), spv::StorageClassInput }));
++		r.decorate(vidIn, spv::DecorationBuiltIn, { spv::BuiltInVertexIndex });
++
++		Builder b(r);
++		uint32_t main = b.beginFunction();
++		uint32_t vid = b.op(spv::OpBitcast, u32, { b.load(i32, vidIn) });
++		// Point lists do not restart, so restart indices reach the shader, which moves them off screen.
++		uint32_t isRestart = 0;
++		if ( !strips) {
++			isRestart = b.op(spv::OpIEqual, boolT, { vid, b.u(kRestartIndex) });
++			vid = b.op(spv::OpSelect, u32, { isRestart, b.u(0), vid });
++		}
++		uint32_t base = b.mul(vid, b.u(emu.outputSlots));
++		std::unordered_set<uint32_t> written;
++		for (auto& var : gsOutputs) {
++			if ( !keptOutputs.count(var.id)) { continue; }
++			for (auto& leaf : var.leaves) {
++				uint32_t val = loadPacked(b, vtxBuf, base, outSlots, leaf);
++				if (isRestart && leaf.key >= kKeyPosition && leaf.key < kKeyPosition + 4 && leaf.kind == kKindFloat) {
++					float off = leaf.key == kKeyPosition + 3 ? 1.0f : 2.0f;
++					uint32_t bits;
++					memcpy(&bits, &off, 4);
++					val = b.op(spv::OpSelect, leaf.type, { isRestart, r.constant(leaf.type, bits), val });
++				}
++				b.store(b.chain(spv::StorageClassOutput, leaf.type, var.id, leaf.path), val);
++			}
++		}
++		b.endFunction();
++		r.name(main, "mvkReplayVertices");
++
++		Words iface(keptOutputs.begin(), keptOutputs.end());
++		std::sort(iface.begin(), iface.end());
++		iface.push_back(vidIn);
++		if (r.listsAllGlobals()) { iface.push_back(vtxBuf); }
++		r.setEntryPoint(spv::ExecutionModelVertex, main, gsName, iface);
++		emu.replaySPIRV = r.serialize();
++	}
++	return true;
++}
++
++}	// namespace mvk_gs
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+index 3eb3adb..6ede899 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+@@ -229,6 +229,17 @@ typedef std::pair<uint32_t, uint32_t> MVKZeroDivisorVertexBinding;
+ typedef MVKSmallVector<MVKGraphicsStage, 4> MVKPiplineStages;
+ 
+ 
++/** Describes the emulation of a geometry shader by compute stages. */
++struct MVKGeometryStageInfo {
++	uint32_t inputVertices = 0;			// Vertices of an input primitive
++	uint32_t maxOutputVertices = 0;		// Emitted vertices per primitive and invocation
++	uint32_t invocations = 1;
++	uint32_t inputSlots = 0;			// uint4 per vertex written by the vertex stage
++	uint32_t outputSlots = 0;			// uint4 per vertex emitted by the geometry stage
++	uint32_t indicesPerThread = 0;
++	MTLPrimitiveType outputPrimitiveType = MTLPrimitiveTypeTriangleStrip;
++};
++
+ struct MVKPipelineStageResourceInfo {
+ 	MVKPipelineBindScript bindScript;
+ 	MVKImplicitBufferBindings implicitBuffers;
+@@ -250,6 +261,19 @@ public:
+ 	/** Returns whether this pipeline has tessellation shaders. */
+ 	bool isTessellationPipeline() { return _isTessellationPipeline; }
+ 
++	/**
++	 * Returns whether this pipeline emulates a geometry shader. The vertex shader then runs as a compute
++	 * stage as for tessellation, the geometry shader as a compute stage in place of tessellation control,
++	 * and its emitted vertices are drawn by a vertex shader in place of tessellation evaluation.
++	 */
++	bool isGeometryPipeline() { return _isGeometryPipeline; }
++
++	/** Returns whether the vertex shader runs as a compute stage before rasterization. */
++	bool hasComputeVertexStage() { return _isTessellationPipeline || _isGeometryPipeline; }
++
++	/** Returns how the geometry shader of this pipeline is emulated. */
++	const MVKGeometryStageInfo& getGeometryStageInfo() { return _geometryStage; }
++
+ 	/** Returns the number of output tessellation patch control points. */
+ 	uint32_t getOutputControlPointCount() { return _outputControlPointCount; }
+ 
+@@ -270,7 +294,7 @@ public:
+ 	/** Returns the MTLComputePipelineState object for the vertex stage of a tessellated draw with 32-bit indices. */
+ 	id<MTLComputePipelineState> getTessVertexStageIndex32State() { return _mtlTessVertexStageIndex32State; }
+ 
+-	/** Returns the MTLComputePipelineState object for the tessellation control stage of a tessellated draw. */
++	/** Returns the MTLComputePipelineState object for the tessellation control stage of a tessellated draw, or the geometry stage. */
+ 	id<MTLComputePipelineState> getTessControlStageState() { return _mtlTessControlStageState; }
+ 
+ 	/** Returns true if the vertex shader needs the draw ID in a buffer. */
+@@ -339,7 +363,12 @@ protected:
+ 	bool compileTessControlStageState(MTLComputePipelineDescriptor* tcPLDesc, VkPipelineCreationFeedback* pTessCtlFB);
+ 	void initDynamicState(const VkGraphicsPipelineCreateInfo* pCreateInfo);
+ 	void initSampleLocations(const VkGraphicsPipelineCreateInfo* pCreateInfo);
+-    void initMTLRenderPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, VkPipelineCreationFeedback* pPipelineFB, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pTessCtlSS, VkPipelineCreationFeedback* pTessCtlFB, const VkPipelineShaderStageCreateInfo* pTessEvalSS, VkPipelineCreationFeedback* pTessEvalFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
++    void initMTLRenderPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, VkPipelineCreationFeedback* pPipelineFB, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pTessCtlSS, VkPipelineCreationFeedback* pTessCtlFB, const VkPipelineShaderStageCreateInfo* pTessEvalSS, VkPipelineCreationFeedback* pTessEvalFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB, const VkPipelineShaderStageCreateInfo* pGeometrySS);
++	void initGeometryEmulation(MVKShaderModule* geometryModule, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pGeometrySS);
++	void endGeometryEmulation();
++	void initMTLGeometryPipelineStates(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pGeometrySS, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
++	MTLComputePipelineDescriptor* newMTLGeometryStageDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo, mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pGeometrySS);
++	MTLRenderPipelineDescriptor* newMTLGeometryRasterStageDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo, mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pGeometrySS, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
+     void initShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData);
+     void disableMismatchedFragmentOutputs(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo,
+                                           const VkPipelineRenderingCreateInfo* pRendInfo, bool hasA2C);
+@@ -404,6 +433,12 @@ protected:
+ 	MVKShaderModule* _tessCtlModule = nullptr;
+ 	MVKShaderModule* _tessEvalModule = nullptr;
+ 	MVKShaderModule* _fragmentModule = nullptr;
++	MVKShaderModule* _geometryModule = nullptr;			// Geometry shader as compute kernel
++	MVKShaderModule* _geometryReplayModule = nullptr;	// Vertex shader drawing what the kernel emitted
++	MVKGeometryStageInfo _geometryStage;
++	MVKShaderModule* _unemulatedVertexModule = nullptr;	// The vertex shader, if geometry emulation fails
++	bool _ownsUnemulatedVertexModule = false;
++	uint8_t _unemulatedPrimitiveTopologyClass = 0;
+ 	bool _ownsVertexModule = false;
+ 	bool _ownsTessCtlModule = false;
+ 	bool _ownsTessEvalModule = false;
+@@ -413,6 +448,7 @@ protected:
+ 	bool _isRasterizing = false;
+ 	bool _isRasterizingColor = false;
+ 	bool _isTessellationPipeline = false;
++	bool _isGeometryPipeline = false;
+ 	bool _inputAttachmentIsDSAttachment = false;
+ 	bool _hasRemappedAttachmentLocations = false;
+ };
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index 9469e6d..c169afb 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -24,6 +24,7 @@
+ #include "MVKOSExtensions.h"
+ #include "MVKStrings.h"
+ #include "MTLRenderPipelineDescriptor+MoltenVK.h"
++#include "MVKGeometryShaderEmulation.h"
+ #include "mvk_datatypes.hpp"
+ #include <sys/stat.h>
+ #include <sstream>
+@@ -47,7 +48,7 @@ using namespace SPIRV_CROSS_NAMESPACE;
+ #pragma mark - MVKPipelineLayout
+ 
+ bool MVKPipelineLayout::stageUsesPushConstants(MVKShaderStage stage) const {
+-	return mvkIsAnyFlagEnabled(_pushConstantStages, mvkVkShaderStageFlagBitsFromMVKShaderStage(stage));
++	return mvkIsAnyFlagEnabled(_pushConstantStages, mvkVkShaderStagesBoundByMVKShaderStage(stage));
+ }
+ 
+ /** Gets the layout for use with the Metal binding API (rather than argument buffers). */
+@@ -187,7 +188,7 @@ void MVKPipelineLayout::populateShaderConversionConfig(SPIRVToMSLConversionConfi
+ 			MVKShaderStageResourceBinding resCount = desc.totalResourceCount();
+ 			for (uint32_t i = 0; i < kMVKShaderStageCount; i++) {
+ 				auto stage = static_cast<MVKShaderStage>(i);
+-				bool used = mvkIsAnyFlagEnabled(desc.stageFlags, mvkVkShaderStageFlagBitsFromMVKShaderStage(stage));
++				bool used = mvkIsAnyFlagEnabled(desc.stageFlags, mvkVkShaderStagesBoundByMVKShaderStage(stage));
+ 				if (argbuf) {
+ 					binding.stages[stage].textureIndex = argBufResIdx;
+ 					binding.stages[stage].bufferIndex = argBufResIdx + resCount.textureIndex;
+@@ -498,7 +499,7 @@ void MVKGraphicsPipeline::wasBound(MVKCommandEncoder* cmdEncoder) {
+ }
+ 
+ void MVKGraphicsPipeline::getStages(MVKPiplineStages& stages) {
+-    if (isTessellationPipeline()) {
++    if (hasComputeVertexStage()) {
+         stages.push_back(kMVKGraphicsStageVertex);
+         stages.push_back(kMVKGraphicsStageTessControl);
+     }
+@@ -1080,7 +1081,7 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
+ 	_tessEvalModule = getOrCreateShaderModule(device, pTessEvalSS, _ownsTessEvalModule);
+ 	_fragmentModule = getOrCreateShaderModule(device, pFragmentSS, _ownsFragmentModule);
+ 
+-	// Without geometry shaders, a layer-routing one can still be honored by the vertex shader.
++	// Metal has no geometry shaders. A layer-routing one is honored by the vertex shader, others are emulated.
+ 	if (pGeometrySS && _vertexModule && !pTessCtlSS) {
+ 		bool ownsGeometryModule = false;
+ 		MVKShaderModule* geometryModule = getOrCreateShaderModule(device, pGeometrySS, ownsGeometryModule);
+@@ -1098,9 +1099,12 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
+ 			_ownsVertexModule = true;
+ 			MVKLogDebug("Replaced a layer-routing geometry shader by a vertex shader writing the layer from location %u.%u.",
+ 						layerSrc.location, layerSrc.component);
++		} else if (geometryModule) {
++			initGeometryEmulation(geometryModule, pVertexSS, pGeometrySS);
+ 		}
+ 		if (ownsGeometryModule) { delete geometryModule; }
+ 	}
++	if ( !_isGeometryPipeline) { pGeometrySS = nullptr; }
+ 
+ 	warnIfUnsupportedRobustnessEnabled(this, pVertexSS);
+ 	warnIfUnsupportedRobustnessEnabled(this, pTessCtlSS);
+@@ -1165,7 +1169,7 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
+ 	}
+ 
+ 	// Render pipeline state. Do this as early as possible, to fail fast if pipeline requires a fail on cache-miss.
+-	initMTLRenderPipelineState(pCreateInfo, reflectData, pPipelineFB, pVertexSS, pVertexFB, pTessCtlSS, pTessCtlFB, pTessEvalSS, pTessEvalFB, pFragmentSS, pFragmentFB);
++	initMTLRenderPipelineState(pCreateInfo, reflectData, pPipelineFB, pVertexSS, pVertexFB, pTessCtlSS, pTessCtlFB, pTessEvalSS, pTessEvalFB, pFragmentSS, pFragmentFB, pGeometrySS);
+ 	if ( !_hasValidMTLPipelineStates ) { return; }
+ 
+ 	// Blending - must ignore allowed bad pColorBlendState pointer if rasterization disabled or no color attachments
+@@ -1363,7 +1367,8 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
+ 													 const VkPipelineShaderStageCreateInfo* pTessEvalSS,
+ 													 VkPipelineCreationFeedback* pTessEvalFB,
+ 													 const VkPipelineShaderStageCreateInfo* pFragmentSS,
+-													 VkPipelineCreationFeedback* pFragmentFB) {
++													 VkPipelineCreationFeedback* pFragmentFB,
++													 const VkPipelineShaderStageCreateInfo* pGeometrySS) {
+ 	_mtlTessVertexStageState = nil;
+ 	_mtlTessVertexStageIndex16State = nil;
+ 	_mtlTessVertexStageIndex32State = nil;
+@@ -1393,6 +1398,7 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
+ 		addShader(" VS", _vertexModule);
+ 		addShader("TCS", _tessCtlModule);
+ 		addShader("TES", _tessEvalModule);
++		addShader(" GS", _geometryModule);
+ 		addShader(" FS", _fragmentModule);
+ 		mkdir(dumpDir, 0755);
+ 		snprintf(filename, sizeof(filename), "%s/pipeline%s-%016zx.txt", dumpDir, type, full_hash);
+@@ -1403,7 +1409,14 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
+ 		}
+ 	}
+ 
+-	if (!isTessellationPipeline()) {
++	// If it turns out that an emulated geometry shader cannot be compiled, it is left out, as before it was emulated.
++	if (isGeometryPipeline()) {
++		initMTLGeometryPipelineStates(pCreateInfo, reflectData, pVertexSS, pVertexFB, pGeometrySS, pFragmentSS, pFragmentFB);
++	}
++
++	if (isGeometryPipeline()) {
++		// Compiled above
++	} else if (!isTessellationPipeline()) {
+ 		MTLRenderPipelineDescriptor* plDesc = newMTLRenderPipelineDescriptor(pCreateInfo, reflectData, pVertexSS, pVertexFB, pFragmentSS, pFragmentFB);	// temp retain
+ 		if (plDesc) {
+ 			auto viewMask = getRenderingCreateInfo(pCreateInfo)->viewMask;
+@@ -1472,6 +1485,50 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
+ 	}
+ }
+ 
++// Like for tessellation, compiles the vertex stage in three variants, then the geometry stage and rasterization.
++void MVKGraphicsPipeline::initMTLGeometryPipelineStates(const VkGraphicsPipelineCreateInfo* pCreateInfo,
++														const SPIRVTessReflectionData& reflectData,
++														const VkPipelineShaderStageCreateInfo* pVertexSS,
++														VkPipelineCreationFeedback* pVertexFB,
++														const VkPipelineShaderStageCreateInfo* pGeometrySS,
++														const VkPipelineShaderStageCreateInfo* pFragmentSS,
++														VkPipelineCreationFeedback* pFragmentFB) {
++	SPIRVToMSLConversionConfiguration shaderConfig;
++	initShaderConversionConfig(shaderConfig, pCreateInfo, reflectData);
++
++	MVKMTLFunction vtxFunctions[3] = {};
++	MTLComputePipelineDescriptor* vtxPLDesc = newMTLTessVertexStageDescriptor(pCreateInfo, reflectData, shaderConfig, pVertexSS, pVertexFB, nullptr, vtxFunctions);	// temp retained
++	MTLComputePipelineDescriptor* gsPLDesc = vtxPLDesc ? newMTLGeometryStageDescriptor(pCreateInfo, shaderConfig, pGeometrySS) : nil;							// temp retained
++	MTLRenderPipelineDescriptor* rastPLDesc = gsPLDesc ? newMTLGeometryRasterStageDescriptor(pCreateInfo, shaderConfig, pGeometrySS, pFragmentSS, pFragmentFB) : nil;	// temp retained
++	bool compiled = (vtxPLDesc && gsPLDesc && rastPLDesc &&
++					 compileTessVertexStageState(vtxPLDesc, vtxFunctions, pVertexFB) &&
++					 getOrCompilePipeline(gsPLDesc, _mtlTessControlStageState, "Geometry") &&
++					 getOrCompilePipeline(rastPLDesc, _mtlPipelineState) &&
++					 _hasValidMTLPipelineStates);
++	[vtxPLDesc release];	// temp release
++	[gsPLDesc release];		// temp release
++	[rastPLDesc release];	// temp release
++
++	// A pipeline that must not be compiled now is no reason to leave the geometry shader out.
++	if (compiled || getConfigurationResult() == VK_PIPELINE_COMPILE_REQUIRED) { return; }
++
++	reportWarning(VK_ERROR_FEATURE_NOT_PRESENT, "The emulated geometry shader could not be compiled, so it is ignored.");
++	[_mtlTessVertexStageState release];
++	[_mtlTessVertexStageIndex16State release];
++	[_mtlTessVertexStageIndex32State release];
++	[_mtlTessControlStageState release];
++	[_mtlPipelineState release];
++	_mtlTessVertexStageState = nil;
++	_mtlTessVertexStageIndex16State = nil;
++	_mtlTessVertexStageIndex32State = nil;
++	_mtlTessControlStageState = nil;
++	_mtlPipelineState = nil;
++	for (auto& res : _stageResources) { res = {}; }
++	endGeometryEmulation();
++	_hasValidMTLPipelineStates = true;
++	clearConfigurationResult();
++}
++
+ // Returns a retained MTLRenderPipelineDescriptor constructed from this instance, or nil if an error occurs.
+ // It is the responsibility of the caller to release the returned descriptor.
+ MTLRenderPipelineDescriptor* MVKGraphicsPipeline::newMTLRenderPipelineDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo,
+@@ -1524,9 +1581,10 @@ MTLComputePipelineDescriptor* MVKGraphicsPipeline::newMTLTessVertexStageDescript
+ 																				   MVKMTLFunction* pVtxFunctions) {
+ 	MTLComputePipelineDescriptor* plDesc = [MTLComputePipelineDescriptor new];	// retained
+ 
++	// For a geometry shader, there is no tessellation control shader, and the vertex shader writes all its outputs packed.
+ 	SPIRVShaderInputs tcInputs;
+ 	std::string errorLog;
+-	if (!getShaderInputs(_tessCtlModule->getSPIRV(), spv::ExecutionModelTessellationControl, pTessCtlSS->pName, tcInputs, errorLog) ) {
++	if (pTessCtlSS && !getShaderInputs(_tessCtlModule->getSPIRV(), spv::ExecutionModelTessellationControl, pTessCtlSS->pName, tcInputs, errorLog) ) {
+ 		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to get tessellation control inputs: %s", errorLog.c_str()));
+ 		return nil;
+ 	}
+@@ -1785,6 +1843,218 @@ static void setEmulatedReversedDepthViewportConfig(SPIRVToMSLConversionConfigura
+ 	shaderConfig.options.mslOptions.reversed_depth_viewport_buffer_index = enable ? implicit[MVKImplicitBuffer::EmulatedReversedDepthViewport] : 0;
+ }
+ 
++// Emulates the geometry shader with compute stages, if it can be.
++void MVKGraphicsPipeline::initGeometryEmulation(MVKShaderModule* geometryModule,
++												const VkPipelineShaderStageCreateInfo* pVertexSS,
++												const VkPipelineShaderStageCreateInfo* pGeometrySS) {
++	const char* enable = getenv("MVK_CONFIG_EMULATE_GEOMETRY_SHADERS");
++	if (enable && *enable == '0') { return; }
++
++	mvk_gs::Emulation emu;
++	if ( !mvk_gs::buildEmulation(_vertexModule->getSPIRV(), pVertexSS->pName, geometryModule->getSPIRV(), pGeometrySS->pName, emu)) {
++		reportWarning(VK_ERROR_FEATURE_NOT_PRESENT, "The geometry shader cannot be emulated, so it is ignored: %s", emu.error.c_str());
++		return;
++	}
++
++	auto newModule = [this](const std::vector<uint32_t>& spv) {
++		VkShaderModuleCreateInfo smInfo = {};
++		smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
++		smInfo.codeSize = spv.size() * sizeof(uint32_t);
++		smInfo.pCode = spv.data();
++		return new MVKShaderModule(getDevice(), &smInfo);
++	};
++	_unemulatedVertexModule = _vertexModule;
++	_ownsUnemulatedVertexModule = _ownsVertexModule;
++	_unemulatedPrimitiveTopologyClass = _primitiveTopologyClass;
++	_vertexModule = newModule(emu.vertexSPIRV);
++	_ownsVertexModule = true;
++	_geometryModule = newModule(emu.geometrySPIRV);
++	_geometryReplayModule = newModule(emu.replaySPIRV);
++
++	_geometryStage.inputVertices = emu.inputVertices;
++	_geometryStage.maxOutputVertices = emu.maxOutputVertices;
++	_geometryStage.invocations = emu.invocations;
++	_geometryStage.inputSlots = emu.inputSlots;
++	_geometryStage.outputSlots = emu.outputSlots;
++	_geometryStage.indicesPerThread = emu.indicesPerThread;
++	switch (emu.outputPrimitive) {
++		case spv::ExecutionModeOutputPoints:
++			_geometryStage.outputPrimitiveType = MTLPrimitiveTypePoint;
++			_primitiveTopologyClass = MTLPrimitiveTopologyClassPoint;
++			break;
++		case spv::ExecutionModeOutputLineStrip:
++			_geometryStage.outputPrimitiveType = MTLPrimitiveTypeLineStrip;
++			_primitiveTopologyClass = MTLPrimitiveTopologyClassLine;
++			break;
++		default:
++			_geometryStage.outputPrimitiveType = MTLPrimitiveTypeTriangleStrip;
++			_primitiveTopologyClass = MTLPrimitiveTopologyClassTriangle;
++			break;
++	}
++	_isGeometryPipeline = true;
++	MVKLogInfo("Emulating a geometry shader with %u input vertices, up to %u output vertices and %u invocations.",
++				emu.inputVertices, emu.maxOutputVertices, emu.invocations);
++}
++
++// Goes back to ignoring the geometry shader.
++void MVKGraphicsPipeline::endGeometryEmulation() {
++	if ( !_isGeometryPipeline) { return; }
++	if (_ownsVertexModule) { delete _vertexModule; }
++	_vertexModule = _unemulatedVertexModule;
++	_ownsVertexModule = _ownsUnemulatedVertexModule;
++	_unemulatedVertexModule = nullptr;
++	_ownsUnemulatedVertexModule = false;
++	delete _geometryModule;
++	delete _geometryReplayModule;
++	_geometryModule = nullptr;
++	_geometryReplayModule = nullptr;
++	_primitiveTopologyClass = _unemulatedPrimitiveTopologyClass;
++	_isGeometryPipeline = false;
++}
++
++// Adds the resource bindings of the buffers that connect the emulated geometry stages.
++static void addGeometryEmulationBinding(SPIRVToMSLConversionConfiguration& shaderConfig, spv::ExecutionModel stage, uint32_t binding, uint32_t mtlBuffer) {
++	mvk::MSLResourceBinding rb;
++	auto& rbb = rb.resourceBinding;
++	rbb.stage = stage;
++	rbb.basetype = SPIRType::Void;
++	rbb.desc_set = mvk_gs::kDescSet;
++	rbb.binding = binding;
++	rbb.count = 1;
++	rbb.msl_buffer = mtlBuffer;
++	shaderConfig.resourceBindings.push_back(rb);
++}
++
++// They are bound by the draw, not from descriptor sets.
++static void removeGeometryEmulationBindings(SPIRVToMSLConversionConfiguration& shaderConfig) {
++	auto& rbs = shaderConfig.resourceBindings;
++	rbs.erase(std::remove_if(rbs.begin(), rbs.end(), [](const mvk::MSLResourceBinding& rb) {
++		return rb.resourceBinding.desc_set == mvk_gs::kDescSet;
++	}), rbs.end());
++}
++
++// Returns a retained MTLComputePipelineDescriptor for the geometry stage, or nil if an error occurs.
++// The geometry stage runs as a compute kernel, with the resources of the tessellation control stage.
++MTLComputePipelineDescriptor* MVKGraphicsPipeline::newMTLGeometryStageDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo,
++																				 SPIRVToMSLConversionConfiguration& shaderConfig,
++																				 const VkPipelineShaderStageCreateInfo* pGeometrySS) {
++	SPIRVToMSLConversionConfiguration gsConfig = shaderConfig;
++	const auto& implicit = _stageResources[kMVKShaderStageTessCtl].implicitBuffers.ids;
++	auto& opts = gsConfig.options.mslOptions;
++	gsConfig.options.entryPointStage = spv::ExecutionModelGLCompute;
++	gsConfig.options.entryPointName = pGeometrySS->pName;
++	addCommonImplicitBuffersToShaderConfig(gsConfig, implicit);
++	opts.capture_output_to_buffer = false;
++	opts.vertex_for_tessellation = false;
++	opts.disable_rasterization = false;
++	opts.vertex_index_type = CompilerMSL::Options::IndexType::None;
++	setEmulatedReversedDepthViewportConfig(gsConfig, implicit, false);
++	gsConfig.shaderInputs.clear();
++	gsConfig.shaderOutputs.clear();
++
++	// The bindings of the geometry shader are those of the tessellation control stage, for a compute kernel.
++	auto& rbs = gsConfig.resourceBindings;
++	rbs.erase(std::remove_if(rbs.begin(), rbs.end(), [](const mvk::MSLResourceBinding& rb) {
++		return rb.resourceBinding.stage == spv::ExecutionModelGLCompute;
++	}), rbs.end());
++	for (size_t i = 0, n = rbs.size(); i < n; i++) {
++		if (rbs[i].resourceBinding.stage == spv::ExecutionModelTessellationControl) {
++			mvk::MSLResourceBinding rb = rbs[i];
++			rb.resourceBinding.stage = spv::ExecutionModelGLCompute;
++			rbs.push_back(rb);
++		}
++	}
++	auto& dbs = gsConfig.dynamicBufferDescriptors;
++	dbs.erase(std::remove_if(dbs.begin(), dbs.end(), [](const mvk::DescriptorBinding& db) {
++		return db.stage == spv::ExecutionModelGLCompute;
++	}), dbs.end());
++	for (size_t i = 0, n = dbs.size(); i < n; i++) {
++		if (dbs[i].stage == spv::ExecutionModelTessellationControl) {
++			mvk::DescriptorBinding db = dbs[i];
++			db.stage = spv::ExecutionModelGLCompute;
++			dbs.push_back(db);
++		}
++	}
++	addGeometryEmulationBinding(gsConfig, spv::ExecutionModelGLCompute, mvk_gs::kBindingVertices, getMetalBufferIndexForVertexAttributeBinding(kMVKTessCtlInputBufferBinding));
++	addGeometryEmulationBinding(gsConfig, spv::ExecutionModelGLCompute, mvk_gs::kBindingOutVertices, implicit[MVKImplicitBuffer::Output]);
++	addGeometryEmulationBinding(gsConfig, spv::ExecutionModelGLCompute, mvk_gs::kBindingOutIndices, implicit[MVKImplicitBuffer::PatchOutput]);
++	addGeometryEmulationBinding(gsConfig, spv::ExecutionModelGLCompute, mvk_gs::kBindingParams, implicit[MVKImplicitBuffer::IndirectParams]);
++
++	MVKMTLFunction func = getMTLFunction(gsConfig, pGeometrySS, nullptr, _geometryModule, "Geometry");
++	id<MTLFunction> mtlFunc = func.getMTLFunction();
++	if ( !mtlFunc ) { return nil; }
++
++	MTLComputePipelineDescriptor* plDesc = [MTLComputePipelineDescriptor new];	// retained
++	plDesc.computeFunction = mtlFunc;
++	removeGeometryEmulationBindings(gsConfig);
++	auto& res = _stageResources[kMVKShaderStageTessCtl];
++	res.implicitBuffers.needed.addAll({ // Bound by the draw
++		MVKImplicitBuffer::IndirectParams,
++		MVKImplicitBuffer::Output,
++		MVKImplicitBuffer::PatchOutput,
++	});
++	populateResourceUsage(res, gsConfig, func.shaderConversionResults, spv::ExecutionModelGLCompute);
++	_layout->populateBindOperations(res.bindScript, gsConfig, spv::ExecutionModelGLCompute);
++	setMetalObjectLabel(plDesc, ((MVKPipelineLayout*)pCreateInfo->layout)->getDebugName());
++
++	if ( !verifyImplicitBuffers(kMVKShaderStageTessCtl)) {
++		[plDesc release];
++		return nil;
++	}
++	return plDesc;
++}
++
++// Returns a retained MTLRenderPipelineDescriptor for drawing what the geometry stage emitted, or nil if an error occurs.
++// Its vertex shader replays the emitted vertices, with the resources of the tessellation evaluation stage.
++MTLRenderPipelineDescriptor* MVKGraphicsPipeline::newMTLGeometryRasterStageDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo,
++																					  SPIRVToMSLConversionConfiguration& shaderConfig,
++																					  const VkPipelineShaderStageCreateInfo* pGeometrySS,
++																					  const VkPipelineShaderStageCreateInfo* pFragmentSS,
++																					  VkPipelineCreationFeedback* pFragmentFB) {
++	SPIRVShaderOutputs replayOutputs;
++	std::string errorLog;
++	if ( !getShaderOutputs(_geometryReplayModule->getSPIRV(), spv::ExecutionModelVertex, pGeometrySS->pName, replayOutputs, errorLog)) {
++		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to get geometry outputs: %s", errorLog.c_str()));
++		return nil;
++	}
++
++	const auto& implicit = _stageResources[kMVKShaderStageTessEval].implicitBuffers.ids;
++	auto& opts = shaderConfig.options.mslOptions;
++	shaderConfig.options.entryPointStage = spv::ExecutionModelVertex;
++	shaderConfig.options.entryPointName = pGeometrySS->pName;
++	addCommonImplicitBuffersToShaderConfig(shaderConfig, implicit);
++	opts.capture_output_to_buffer = false;
++	opts.vertex_for_tessellation = false;
++	opts.vertex_index_type = CompilerMSL::Options::IndexType::None;
++	opts.disable_rasterization = !_isRasterizing;
++	setEmulatedReversedDepthViewportConfig(shaderConfig, implicit, getPhysicalDevice()->shouldEmulateReversedDepthViewport());
++	shaderConfig.shaderInputs.clear();
++	shaderConfig.shaderOutputs.clear();
++	addGeometryEmulationBinding(shaderConfig, spv::ExecutionModelVertex, mvk_gs::kBindingOutVertices, getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalInputBufferBinding));
++
++	MVKMTLFunction func = getMTLFunction(shaderConfig, pGeometrySS, nullptr, _geometryReplayModule, "Geometry replay");
++	removeGeometryEmulationBindings(shaderConfig);
++	id<MTLFunction> mtlFunc = func.getMTLFunction();
++	if ( !mtlFunc ) { return nil; }
++
++	MTLRenderPipelineDescriptor* plDesc = [MTLRenderPipelineDescriptor new];	// retained
++	plDesc.vertexFunction = mtlFunc;
++	auto& funcRslts = func.shaderConversionResults;
++	plDesc.rasterizationEnabled = !funcRslts.isRasterizationDisabled;
++	auto& res = _stageResources[kMVKShaderStageTessEval];
++	populateResourceUsage(res, shaderConfig, funcRslts, spv::ExecutionModelVertex);
++	res.implicitBuffers.needed.set(MVKImplicitBuffer::EmulatedReversedDepthViewport, opts.emulate_reversed_depth_viewport);
++	if (funcRslts.isRasterizationDisabled) { pFragmentSS = nullptr; }
++	if ( !verifyImplicitBuffers(kMVKShaderStageTessEval) ||
++		 !addFragmentShaderToPipeline(plDesc, pCreateInfo, shaderConfig, replayOutputs, pFragmentSS, pFragmentFB)) {
++		[plDesc release];
++		return nil;
++	}
++	addFragmentOutputToPipeline(plDesc, pCreateInfo);
++	setMetalObjectLabel(plDesc, ((MVKPipelineLayout*)pCreateInfo->layout)->getDebugName());
++	return plDesc;
++}
++
+ bool MVKGraphicsPipeline::verifyImplicitBuffers(MVKShaderStage stage) {
+ 	const char* stageNames[] = {
+ 		"Vertex",
+@@ -2054,7 +2324,7 @@ bool MVKGraphicsPipeline::addVertexInputToPipeline(T* inputDesc,
+ 				vbDesc.stepRate = 0;
+ 			} else {
+ 				vbDesc.stride = isVtxStrideStatic ? pVKVB->stride : MTLBufferLayoutStrideDynamic;
+-				vbDesc.stepFunction = (decltype(vbDesc.stepFunction))mvkMTLStepFunctionFromVkVertexInputRate(pVKVB->inputRate, isTessellationPipeline());
++				vbDesc.stepFunction = (decltype(vbDesc.stepFunction))mvkMTLStepFunctionFromVkVertexInputRate(pVKVB->inputRate, hasComputeVertexStage());
+ 				vbDesc.stepRate = 1;
+ 			}
+         }
+@@ -2747,6 +3017,9 @@ MVKGraphicsPipeline::~MVKGraphicsPipeline() {
+ 		if (_ownsTessCtlModule) delete _tessCtlModule;
+ 		if (_ownsTessEvalModule) delete _tessEvalModule;
+ 		if (_ownsFragmentModule) delete _fragmentModule;
++		if (_ownsUnemulatedVertexModule) delete _unemulatedVertexModule;
++		delete _geometryModule;
++		delete _geometryReplayModule;
+ 	}
+ }
+ 
+diff --git a/MoltenVK/MoltenVK/Vulkan/mvk_datatypes.hpp b/MoltenVK/MoltenVK/Vulkan/mvk_datatypes.hpp
+index 99460be..e02fb8f 100644
+--- a/MoltenVK/MoltenVK/Vulkan/mvk_datatypes.hpp
++++ b/MoltenVK/MoltenVK/Vulkan/mvk_datatypes.hpp
+@@ -77,6 +77,16 @@ MTLMultisampleStencilResolveFilter mvkMTLMultisampleStencilResolveFilterFromVkRe
+ MVKShaderStage mvkShaderStageFromVkShaderStageFlagBitsInObj(VkShaderStageFlagBits vkStage, MVKBaseObject* mvkObj);
+ #define mvkShaderStageFromVkShaderStageFlagBits(vkStage) mvkShaderStageFromVkShaderStageFlagBitsInObj(vkStage, this)
+ 
++/**
++ * Returns the Vulkan shader stages whose resources the specified MoltenVK MVKShaderStage binds.
++ * An emulated geometry shader runs in place of the tessellation control stage.
++ */
++static inline VkShaderStageFlags mvkVkShaderStagesBoundByMVKShaderStage(MVKShaderStage mvkStage) {
++	VkShaderStageFlags stages = mvkVkShaderStageFlagBitsFromMVKShaderStage(mvkStage);
++	if (mvkStage == kMVKShaderStageTessCtl) { stages |= VK_SHADER_STAGE_GEOMETRY_BIT; }
++	return stages;
++}
++
+ MTLWinding mvkMTLWindingFromSpvExecutionModeInObj(uint32_t spvMode, MVKBaseObject* mvkObj);
+ #define mvkMTLWindingFromSpvExecutionMode(spvMode) mvkMTLWindingFromSpvExecutionModeInObj(spvMode, this)
+ 
+-- 
+2.56.0
+
