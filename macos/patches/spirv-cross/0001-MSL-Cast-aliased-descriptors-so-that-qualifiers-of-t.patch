@@ -1,8 +1,8 @@
-From fd464de9ec755b96f752415685a8d095d6d1f6dd Mon Sep 17 00:00:00 2001
+From 701dddbb16948746e5418a680252352a591c66ce Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 15:25:22 +0100
-Subject: [PATCH] MSL: Cast aliased descriptors so that qualifiers of the base
- may be dropped.
+Subject: [PATCH 1/4] MSL: Cast aliased descriptors so that qualifiers of the
+ base may be dropped.
 
 An aliased buffer descriptor was cast with reinterpret_cast to a type
 without the base's qualifiers. If the base is decorated Restrict, the
@@ -18,10 +18,10 @@ A C-style cast may drop them.
  1 file changed, 6 insertions(+), 4 deletions(-)
 
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
-index c5a9d433..9758a3ca 100644
+index 21232ee8..50121d91 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
-@@ -19984,18 +19984,20 @@ void CompilerMSL::emit_argument_buffer_aliased_descriptor(const SPIRVariable &al
+@@ -20326,18 +20326,20 @@ void CompilerMSL::emit_argument_buffer_aliased_descriptor(const SPIRVariable &al
  		bool needs_post_cast_deref = !is_array(data_type);
  		string ref_type = needs_post_cast_deref ? "&" : join("(&)", type_to_array_glsl(var_type, aliased_var.self));
  

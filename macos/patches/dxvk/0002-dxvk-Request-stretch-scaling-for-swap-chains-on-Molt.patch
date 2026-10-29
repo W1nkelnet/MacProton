@@ -1,7 +1,7 @@
-From 033f1e12219afd66481ee06b407b5f58d1419e56 Mon Sep 17 00:00:00 2001
+From 8aa1de251a1f68221d0db0f2cedbe7d7f0dce5de Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Tue, 27 Oct 2026 23:09:29 +0100
-Subject: [PATCH 2/2] dxvk: Request stretch scaling for swap chains on
+Subject: [PATCH 2/4] dxvk: Request stretch scaling for swap chains on
  MoltenVK.
 
 MoltenVK returns VK_SUBOPTIMAL_KHR for every present when the swap
@@ -9,16 +9,15 @@ chain extent differs from the window size, unless scaling was requested
 explicitly. DXVK then recreated the swap chain on every frame, which
 showed as flickering. D3D stretches the back buffer to the window by
 default, so request VK_PRESENT_SCALING_STRETCH_BIT_KHR.
-
 ---
  src/dxvk/dxvk_presenter.cpp | 9 +++++++++
  1 file changed, 9 insertions(+)
 
 diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
-index f0d2651..23e6058 100644
+index 4eee415..ec22240 100644
 --- a/src/dxvk/dxvk_presenter.cpp
 +++ b/src/dxvk/dxvk_presenter.cpp
-@@ -755,6 +755,15 @@ namespace dxvk {
+@@ -865,6 +865,15 @@ namespace dxvk {
      if (m_hasSwapchainMaintenance1)
        modeInfo.pNext = std::exchange(swapInfo.pNext, &modeInfo);
  

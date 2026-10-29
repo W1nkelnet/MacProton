@@ -1,4 +1,4 @@
-From 21cda8474c02bc803e7c869e7bee72834cc1d776 Mon Sep 17 00:00:00 2001
+From 196cfa350e3a78706be939171829068e9164f8ad Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 18:00:34 +0100
 Subject: [PATCH] Clamp group shared array indices with extended robustness.
@@ -12,10 +12,10 @@ through the pointer are covered as well.
  1 file changed, 16 insertions(+), 3 deletions(-)
 
 diff --git a/opcodes/opcodes_llvm_builtins.cpp b/opcodes/opcodes_llvm_builtins.cpp
-index 0a5a264..1bcbd3a 100644
+index 927df5e..d28b63d 100644
 --- a/opcodes/opcodes_llvm_builtins.cpp
 +++ b/opcodes/opcodes_llvm_builtins.cpp
-@@ -1600,10 +1600,23 @@ bool emit_getelementptr_instruction(Converter::Impl &impl, const llvm::GetElemen
+@@ -1768,10 +1768,23 @@ bool emit_getelementptr_instruction(Converter::Impl &impl, const llvm::GetElemen
  
  							impl.handle_to_robustness[instruction] = is_in_bounds->id;
  						}

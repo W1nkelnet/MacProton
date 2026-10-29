@@ -20,7 +20,8 @@
 
 set -euo pipefail
 
-MOLTENVK_TAG=v1.4.2
+# MoltenVK main after 1.4.2, with VK_EXT_depth_clip_enable and draw indirect count
+MOLTENVK_COMMIT=5189f8de86ec365860f63bf1da736815cfaea5cd
 FREETYPE_TAG=VER-2-14-3
 GMP_URL=https://ftpmirror.gnu.org/gmp/gmp-6.3.0.tar.xz
 GMP_SHA256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
@@ -101,7 +102,8 @@ do_submodules() {
 do_moltenvk() {
     local src=$deps_src/MoltenVK
     if [ ! -d "$src" ]; then
-        git clone --depth 1 --branch "$MOLTENVK_TAG" https://github.com/KhronosGroup/MoltenVK.git "$src"
+        git clone https://github.com/KhronosGroup/MoltenVK.git "$src"
+        git -C "$src" checkout -q "$MOLTENVK_COMMIT"
     fi
     local patch
     for patch in "$proton/macos/patches/moltenvk"/*.patch; do

@@ -1,7 +1,7 @@
-From 88e0e140ff6d1ce1adc01a5745815689c4b7df54 Mon Sep 17 00:00:00 2001
+From 17f04b4ce72e65ac1875cd297188e4d3569d483e Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 13:52:23 +0100
-Subject: [PATCH 2/3] vkd3d: Bind a zeroed buffer for null vertex buffers
+Subject: [PATCH 2/7] vkd3d: Bind a zeroed buffer for null vertex buffers
  without nullDescriptor.
 
 MoltenVK has no nullDescriptor and dereferences every buffer passed to
@@ -19,10 +19,10 @@ Metal reads zero, so correct the warning that promised dummy resources.
  3 files changed, 55 insertions(+), 1 deletion(-)
 
 diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
-index e30a09a..7a868fe 100644
+index c6f6ee8..c5ba5f3 100644
 --- a/libs/vkd3d/command.c
 +++ b/libs/vkd3d/command.c
-@@ -8061,6 +8061,14 @@ static void d3d12_command_list_update_dynamic_state(struct d3d12_command_list *l
+@@ -8559,6 +8559,14 @@ static void d3d12_command_list_update_dynamic_state(struct d3d12_command_list *l
  
              for (i = 0; i < range.count; i++)
              {
@@ -38,10 +38,10 @@ index e30a09a..7a868fe 100644
                  {
                      FIXME("Binding VBO at offset %"PRIu64", but required alignment is %u.\n",
 diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
-index 308a50f..de6e663 100644
+index 0e7b4b3..0c17fe0 100644
 --- a/libs/vkd3d/device.c
 +++ b/libs/vkd3d/device.c
-@@ -3285,7 +3285,7 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
+@@ -2665,7 +2665,7 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
              ERR("Null descriptor in VK_EXT_robustness2 is not supported by this implementation. This is required for correct operation.\n");
              return E_INVALIDARG;
          }
@@ -50,7 +50,7 @@ index 308a50f..de6e663 100644
      }
  
      if (vulkan_info->KHR_fragment_shading_rate)
-@@ -4636,6 +4636,45 @@ static void vkd3d_null_rtas_allocation_cleanup(
+@@ -3916,6 +3916,45 @@ static void vkd3d_null_rtas_allocation_cleanup(
      }
  }
  
@@ -70,7 +70,7 @@ index 308a50f..de6e663 100644
 +    }
 +
 +    if (FAILED(vkd3d_allocate_internal_buffer_memory(device, device->null_vbo,
-+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &device->null_vbo_alloc)) ||
++            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0, &device->null_vbo_alloc)) ||
 +            VK_CALL(vkMapMemory(device->vk_device, device->null_vbo_alloc.vk_memory, 0, VK_WHOLE_SIZE, 0, &data)) != VK_SUCCESS)
 +    {
 +        ERR("Failed to allocate null VBO memory.\n");
@@ -96,7 +96,7 @@ index 308a50f..de6e663 100644
  static void d3d12_device_destroy(struct d3d12_device *device)
  {
      const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
-@@ -4681,6 +4720,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
+@@ -3961,6 +4000,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
      d3d12_device_destroy_vkd3d_queues(device);
      VK_CALL(vkDestroySemaphore(device->vk_device, device->sparse_init_timeline, NULL));
      vkd3d_null_rtas_allocation_cleanup(&device->null_rtas_allocation, device);
@@ -104,7 +104,7 @@ index 308a50f..de6e663 100644
      vkd3d_memory_allocator_cleanup(&device->memory_allocator, device);
      vkd3d_memory_transfer_queue_cleanup(&device->memory_transfers);
      vkd3d_global_descriptor_buffer_cleanup(&device->global_descriptor_buffer, device);
-@@ -10552,6 +10592,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
+@@ -10698,6 +10738,7 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
      if (FAILED(hr = vkd3d_address_binding_tracker_init(&device->address_binding_tracker, device)))
          goto out_cleanup_queue_timeline_trace;
  
@@ -112,7 +112,7 @@ index 308a50f..de6e663 100644
      vkd3d_scratch_pool_init(device);
  
  #ifdef VKD3D_ENABLE_BREADCRUMBS
-@@ -10619,6 +10660,7 @@ out_cleanup_breadcrumb_tracer:
+@@ -10765,6 +10806,7 @@ out_cleanup_breadcrumb_tracer:
          vkd3d_breadcrumb_tracer_cleanup(&device->breadcrumb_tracer, device);
  out_cleanup_address_binding_tracker:
  #endif
@@ -121,10 +121,10 @@ index 308a50f..de6e663 100644
  out_cleanup_queue_timeline_trace:
      vkd3d_queue_timeline_trace_cleanup(&device->queue_timeline_trace);
 diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
-index 9616a3a..44815a5 100644
+index 8024485..6585ae1 100644
 --- a/libs/vkd3d/vkd3d_private.h
 +++ b/libs/vkd3d/vkd3d_private.h
-@@ -5490,6 +5490,10 @@ struct d3d12_device
+@@ -5866,6 +5866,10 @@ struct d3d12_device
      struct vkd3d_memory_allocator memory_allocator;
      struct vkd3d_null_rtas_allocation null_rtas_allocation;
  

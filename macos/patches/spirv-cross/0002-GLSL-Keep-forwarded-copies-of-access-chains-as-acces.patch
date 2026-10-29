@@ -1,7 +1,7 @@
-From 713245fcf971248b0a4272b57a3a307222fbf0f6 Mon Sep 17 00:00:00 2001
+From 1ee5a4d9252a5489b2f60955a4af2c46bd82d6b6 Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 18:00:04 +0100
-Subject: [PATCH] GLSL: Keep forwarded copies of access chains as access
+Subject: [PATCH 2/4] GLSL: Keep forwarded copies of access chains as access
  chains.
 
 OpCopyObject of an access chain pointer forwarded the expression but
@@ -13,10 +13,10 @@ not compile. DXIL bitcasts of group shared pointers produce this.
  1 file changed, 5 insertions(+)
 
 diff --git a/spirv_glsl.cpp b/spirv_glsl.cpp
-index cbd135d0..7e29645c 100644
+index c8284a21..d5ca9e68 100644
 --- a/spirv_glsl.cpp
 +++ b/spirv_glsl.cpp
-@@ -13850,6 +13850,11 @@ void CompilerGLSL::emit_instruction(const Instruction &instruction)
+@@ -13988,6 +13988,11 @@ void CompilerGLSL::emit_instruction(const Instruction &instruction)
  			{
  				e.implied_read_expressions = rhs_expr->implied_read_expressions;
  				e.expression_dependencies = rhs_expr->expression_dependencies;

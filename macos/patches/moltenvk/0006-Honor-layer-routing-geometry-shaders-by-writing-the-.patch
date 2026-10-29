@@ -1,8 +1,8 @@
-From d1dbb5d068d7cc6d4db8d584d2a192b8401981c7 Mon Sep 17 00:00:00 2001
+From d7c60b979a290c5e13be8d2e004b5e46f0013297 Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Thu, 29 Oct 2026 00:45:15 +0100
-Subject: [PATCH] Honor layer-routing geometry shaders by writing the layer in
- the vertex shader.
+Subject: [PATCH 6/8] Honor layer-routing geometry shaders by writing the layer
+ in the vertex shader.
 
 Metal has no geometry shaders, and MoltenVK leaves them out of a
 pipeline. Unreal renders into volume textures, such as the color
@@ -17,10 +17,10 @@ Layer output to the vertex shader that writes that input instead.
  1 file changed, 307 insertions(+)
 
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
-index 7512cd3..9469e6d 100644
+index 53bc70c1..1cf3115b 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
-@@ -608,6 +608,287 @@ static void warnIfUnsupportedRobustnessEnabled(MVKPipeline* pipeline, const T* p
+@@ -609,6 +609,287 @@ static void warnIfUnsupportedRobustnessEnabled(MVKPipeline* pipeline, const T* p
  	}
  }
  
@@ -308,7 +308,7 @@ index 7512cd3..9469e6d 100644
  static MVKShaderModule* getOrCreateShaderModule(MVKDevice* device, const VkPipelineShaderStageCreateInfo* pCreateInfo,
                                                     bool& ownsShaderModule) {
  	if (pCreateInfo && pCreateInfo->module == VK_NULL_HANDLE) {
-@@ -758,9 +1039,13 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
+@@ -759,9 +1040,13 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
  	VkPipelineCreationFeedback* pTessCtlFB = nullptr;
  	VkPipelineCreationFeedback* pTessEvalFB = nullptr;
  	VkPipelineCreationFeedback* pFragmentFB = nullptr;
@@ -322,7 +322,7 @@ index 7512cd3..9469e6d 100644
  			case VK_SHADER_STAGE_VERTEX_BIT:
  				pVertexSS = pSS;
  				if (pFeedbackInfo && pFeedbackInfo->pPipelineStageCreationFeedbacks) {
-@@ -795,6 +1080,28 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
+@@ -796,6 +1081,28 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
  	_tessEvalModule = getOrCreateShaderModule(device, pTessEvalSS, _ownsTessEvalModule);
  	_fragmentModule = getOrCreateShaderModule(device, pFragmentSS, _ownsFragmentModule);
  

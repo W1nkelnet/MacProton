@@ -1,8 +1,8 @@
-From 1206eab8e0a137ca00d60e64c8e48c640b7f3302 Mon Sep 17 00:00:00 2001
+From 12fe200596b19bd98cc5785ff8bc07a3d50d2541 Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 22:01:05 +0100
-Subject: [PATCH] wintypes: Answer ApiInformation queries instead of failing
- them.
+Subject: [PATCH 3/4] wintypes: Answer ApiInformation queries instead of
+ failing them.
 
 C++/WinRT turns the E_NOTIMPL of these stubs into an exception, and
 Ratchet & Clank: Rift Apart terminated on its check for a Windows
@@ -14,7 +14,7 @@ version for the major and minor query too.
  1 file changed, 36 insertions(+), 18 deletions(-)
 
 diff --git a/dlls/wintypes/main.c b/dlls/wintypes/main.c
-index 287e599..a0bd25c 100644
+index 287e5992225..a0bd25cca25 100644
 --- a/dlls/wintypes/main.c
 +++ b/dlls/wintypes/main.c
 @@ -18,6 +18,7 @@

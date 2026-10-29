@@ -1,7 +1,7 @@
-From 595d58f03716612af0753864ad630d10674e20af Mon Sep 17 00:00:00 2001
+From e1a8594e6a756ad2e717baf22136efcee8adf974 Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 13:52:23 +0100
-Subject: [PATCH 3/3] vkd3d: Report feature level 12_0 on MoltenVK.
+Subject: [PATCH 3/7] vkd3d: Report feature level 12_0 on MoltenVK.
 
 Without sparse residency and logic ops MoltenVK stayed at 11_0, so games
 requiring 12_0 refused to start although the device meets the rest of it.
@@ -12,10 +12,10 @@ they are, so applications checking those caps avoid what is missing.
  1 file changed, 13 insertions(+)
 
 diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
-index de6e663..52796a6 100644
+index 0c17fe0..453a5e7 100644
 --- a/libs/vkd3d/device.c
 +++ b/libs/vkd3d/device.c
-@@ -9721,6 +9721,19 @@ static void d3d12_device_caps_init_feature_level(struct d3d12_device *device)
+@@ -9768,6 +9768,19 @@ static void d3d12_device_caps_init_feature_level(struct d3d12_device *device)
              caps->options.TypedUAVLoadAdditionalFormats)
          caps->max_feature_level = D3D_FEATURE_LEVEL_12_0;
  

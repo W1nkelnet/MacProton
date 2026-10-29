@@ -1,7 +1,7 @@
-From 73d15384c2937e49a63e4855aec04cb95d5e9dfc Mon Sep 17 00:00:00 2001
+From efc78b965ddac0a6862f78c00019a96c079551df Mon Sep 17 00:00:00 2001
 From: Mark <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 13:13:19 +0100
-Subject: [PATCH] vkd3d: Support portability devices such as MoltenVK.
+Subject: [PATCH 1/7] vkd3d: Support portability devices such as MoltenVK.
 
 MoltenVK lacks robustBufferAccess2, nullDescriptor, transform feedback
 and single texel buffer alignment. On a portability device these only
@@ -17,14 +17,13 @@ members instead of a uvec3, as MSL has no atomics on vector elements.
  libs/vkd3d/device.c                           | 35 ++++++++++++++-----
  ..._emit_nv_memory_decompression_regions.comp |  7 ++--
  ...it_nv_memory_decompression_workgroups.comp |  9 +++--
- libs/vkd3d/vulkan_procs.h                     |  2 +-
- 4 files changed, 40 insertions(+), 13 deletions(-)
+ 3 files changed, 39 insertions(+), 12 deletions(-)
 
 diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
-index 6c713c9..308a50f 100644
+index 14ed4f8..0e7b4b3 100644
 --- a/libs/vkd3d/device.c
 +++ b/libs/vkd3d/device.c
-@@ -3082,6 +3082,8 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
+@@ -2461,6 +2461,8 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
      VkPhysicalDeviceFeatures *features;
      bool single_storage_texel;
      bool single_uniform_texel;
@@ -33,7 +32,7 @@ index 6c713c9..308a50f 100644
  
      vkd3d_trace_physical_device(physical_device, physical_device_info, vk_procs);
      vkd3d_trace_physical_device_features(physical_device_info);
-@@ -3122,8 +3124,12 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
+@@ -2501,8 +2503,12 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
  
      if (!physical_device_info->xfb_properties.transformFeedbackQueries)
      {
@@ -48,7 +47,7 @@ index 6c713c9..308a50f 100644
      }
  
      single_storage_texel =
-@@ -3137,8 +3143,13 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
+@@ -2516,8 +2522,13 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
  
      if (!single_storage_texel || !single_uniform_texel)
      {
@@ -64,7 +63,7 @@ index 6c713c9..308a50f 100644
      }
  
      /* Disable unused Vulkan features. The following features need to remain enabled
-@@ -3259,14 +3270,22 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
+@@ -2639,14 +2650,22 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
      if (!physical_device_info->robustness2_features.robustBufferAccess2 ||
              !physical_device_info->robustness2_features.robustImageAccess2)
      {
@@ -143,19 +142,6 @@ index aea1124..d5ebeb4 100644
    }
  
    if (stream_index >= stream_count)
-diff --git a/libs/vkd3d/vulkan_procs.h b/libs/vkd3d/vulkan_procs.h
-index fe09f4d..04bea21 100644
---- a/libs/vkd3d/vulkan_procs.h
-+++ b/libs/vkd3d/vulkan_procs.h
-@@ -382,7 +382,7 @@ VK_DEVICE_EXT_PFN(vkGetLatencyTimingsNV)
- VK_DEVICE_EXT_PFN(vkQueueNotifyOutOfBandNV)
- 
- /* VK_KHR_cooperative_matrix */
--VK_INSTANCE_PFN(vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR)
-+VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR)
- 
- /* VK_EXT_opacity_micromap */
- VK_DEVICE_EXT_PFN(vkGetMicromapBuildSizesEXT)
 -- 
 2.56.0
 

@@ -1,21 +1,20 @@
-From d014f442321bca01ba7cded69b5b8bb84c6d4355 Mon Sep 17 00:00:00 2001
+From ada1ed8e29133a42a169662d77071c44c23287c2 Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Tue, 27 Oct 2026 23:09:18 +0100
-Subject: [PATCH 2/2] win32u: Disable the fullscreen hack by default on macOS.
+Subject: [PATCH 2/4] win32u: Disable the fullscreen hack by default on macOS.
 
 With the hack active, games that change the display mode render into
 the hack's scaled images and the presented image never reaches the
 window: only the window background is visible. On macOS the D3D layers
 scale to the window size themselves. WINE_DISABLE_FULLSCREEN_HACK=0
 still enables the hack.
-
 ---
  dlls/win32u/opengl.c | 6 ++++++
  dlls/win32u/vulkan.c | 6 ++++++
  2 files changed, 12 insertions(+)
 
 diff --git a/dlls/win32u/opengl.c b/dlls/win32u/opengl.c
-index deae206..fb0a0eb 100644
+index 06e378000ea..09fc23ceadb 100644
 --- a/dlls/win32u/opengl.c
 +++ b/dlls/win32u/opengl.c
 @@ -3336,7 +3336,13 @@ static void display_funcs_init(void)
@@ -33,10 +32,10 @@ index deae206..fb0a0eb 100644
      if (egl_init( &driver_funcs )) TRACE( "Initialized EGL library\n" );
  
 diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
-index 911db79..60a808d 100644
+index 5401c56d393..36a8e4485e3 100644
 --- a/dlls/win32u/vulkan.c
 +++ b/dlls/win32u/vulkan.c
-@@ -4098,7 +4098,13 @@ static void vulkan_init_once(void)
+@@ -4821,7 +4821,13 @@ static void vulkan_init_once(void)
      VkResult res;
  
      const char *env = getenv( "WINE_DISABLE_FULLSCREEN_HACK" );

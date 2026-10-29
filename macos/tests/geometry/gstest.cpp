@@ -192,6 +192,10 @@ int main(int argc, char** argv) {
 	Buffer indb = buffer(sizeof(ind), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
 	memcpy(indb.map, ind, sizeof(ind));
 	static VkBuffer indirectBuf = indb.buf;
+	uint32_t one = 1;
+	Buffer cntb = buffer(sizeof(one), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+	memcpy(cntb.map, &one, sizeof(one));
+	static VkBuffer countBuf = cntb.buf;
 
 	VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
 	cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -241,6 +245,10 @@ int main(int argc, char** argv) {
 			vkCmdDrawIndirect(c, indirectBuf, 16, 2, 16);
 		}, { { px(-0.5f), px(-0.5f), 0, 0, 0 }, { px(0.5f), px(-0.5f), 0, 255, 0 }, { px(-0.5f), px(0.5f), 0, 0, 0 },
 		     { px(0.5f), px(0.5f), 255, 255, 255 } } },
+		{ "indirectcount", [](VkCommandBuffer c, VkPipeline sp, VkPipeline, VkPipelineLayout, VkBuffer) {
+			vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, sp);
+			vkCmdDrawIndirectCount(c, indirectBuf, 16, countBuf, 0, 2, 16);	// Of sprites 1 and 3, only the first
+		}, { { px(0.5f), px(-0.5f), 0, 255, 0 }, { px(0.5f), px(0.5f), 0, 0, 0 }, { px(-0.5f), px(-0.5f), 0, 0, 0 } } },
 		{ "indexedindirect", [](VkCommandBuffer c, VkPipeline sp, VkPipeline, VkPipelineLayout l, VkBuffer ibuf) {
 			vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, sp);
 			float shift = 0.2f;

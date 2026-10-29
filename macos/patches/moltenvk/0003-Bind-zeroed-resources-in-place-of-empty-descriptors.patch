@@ -1,7 +1,7 @@
-From 39eaa7bf5a3b28612e5610ba581346a6e03d7b1d Mon Sep 17 00:00:00 2001
+From e2c1030cc13193a32ec33915a68be9f185ccc29e Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 16:40:17 +0100
-Subject: [PATCH 3/3] Bind zeroed resources in place of empty descriptors.
+Subject: [PATCH 3/8] Bind zeroed resources in place of empty descriptors.
 
 MoltenVK has no nullDescriptor, yet applications such as vkd3d-proton
 still leave descriptors empty that shaders read, as D3D12 allows. Metal
@@ -18,7 +18,7 @@ direct bindings, and for null vertex buffers, which were dereferenced.
  5 files changed, 110 insertions(+), 21 deletions(-)
 
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
-index 664276b..0d28d68 100644
+index d0452973..e17344cb 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
 +++ b/MoltenVK/MoltenVK/Commands/MVKCmdDraw.mm
 @@ -42,9 +42,16 @@ VkResult MVKCmdBindVertexBuffers<N>::setContent(MVKCommandBuffer* cmdBuff,
@@ -42,10 +42,10 @@ index 664276b..0d28d68 100644
          _bindings.push_back(b);
      }
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
-index 7d16b94..3509dbb 100644
+index 199172a0..f5aa01b6 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
 +++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
-@@ -454,6 +454,28 @@ static void executeBindOp(id<MTLCommandEncoder> encoder,
+@@ -456,6 +456,28 @@ static void executeBindOp(id<MTLCommandEncoder> encoder,
  	MVKDevice* dev = mvkEncoder.getDevice();
  	for (uint32_t i = 0; i < count; i++, src += stride) {
  		id resource = *reinterpret_cast<const id*>(src);
@@ -75,7 +75,7 @@ index 7d16b94..3509dbb 100644
  			case MVKDescriptorBindOperationCode::BindBytes:
  				assert(0); // Handled above
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
-index 3cdc623..21a41f1 100644
+index 3cdc6234..21a41f16 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKDescriptorSet.mm
 @@ -904,18 +904,22 @@ template <> struct MVKArgBufEncoder<MVKArgumentBufferMode::Metal3> {
@@ -171,7 +171,7 @@ index 3cdc623..21a41f1 100644
  		} else {
  			static_assert(Layout != Layout, "Other layouts are unsupported");
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
-index 534a414..3aee12f 100644
+index 534a414f..3aee12f1 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
 @@ -1061,6 +1061,7 @@ protected:
@@ -200,10 +200,10 @@ index 534a414..3aee12f 100644
 +};
 +const MVKNullResources& mvkGetNullResources();
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
-index fc3924e..f8e48c4 100644
+index dd1c60f0..631f6e94 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
-@@ -5149,6 +5149,7 @@ MVKDevice::MVKDevice(MVKPhysicalDevice* physicalDevice, const VkDeviceCreateInfo
+@@ -5193,6 +5193,7 @@ MVKDevice::MVKDevice(MVKPhysicalDevice* physicalDevice, const VkDeviceCreateInfo
  	enableExtensions(pCreateInfo);
  	enableFeatures(pCreateInfo);
  	initQueues(pCreateInfo);
@@ -211,7 +211,7 @@ index fc3924e..f8e48c4 100644
  	reservePrivateData(pCreateInfo);
  	initConfiguration();
  
-@@ -5453,6 +5454,43 @@ void MVKDevice::enableExtensions(const VkDeviceCreateInfo* pCreateInfo) {
+@@ -5497,6 +5498,43 @@ void MVKDevice::enableExtensions(const VkDeviceCreateInfo* pCreateInfo) {
  													 &_physicalDevice->_supportedExtensions));
  }
  

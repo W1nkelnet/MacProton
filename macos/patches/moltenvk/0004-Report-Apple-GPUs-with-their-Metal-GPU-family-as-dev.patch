@@ -1,7 +1,8 @@
-From 85b967e4fc07cd7ab47175f86f98d85e7ae843f4 Mon Sep 17 00:00:00 2001
+From 45d0d8f27d26f3d00a34be25ad9a94ed6f1331f1 Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 22:01:05 +0100
-Subject: [PATCH] Report Apple GPUs with their Metal GPU family as device ID.
+Subject: [PATCH 4/8] Report Apple GPUs with their Metal GPU family as device
+ ID.
 
 Wine's Mac driver registers the display adapter with the highest
 MTLGPUFamilyApple value as its PCI device ID, while MoltenVK combined
@@ -13,10 +14,10 @@ Ratchet & Clank: Rift Apart, then found no graphics card.
  1 file changed, 5 insertions(+), 1 deletion(-)
 
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
-index f8e48c4..5a5a49f 100644
+index 631f6e94..f9386f14 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
-@@ -3146,7 +3146,11 @@ void MVKPhysicalDevice::initGPUInfoProperties() {
+@@ -3183,7 +3183,11 @@ void MVKPhysicalDevice::initGPUInfoProperties() {
  	// of from the build, in case we are running Rosetta2.
  	if (_gpuCapabilities.isAppleGPU) {
  		_properties.vendorID = kAppleVendorId;

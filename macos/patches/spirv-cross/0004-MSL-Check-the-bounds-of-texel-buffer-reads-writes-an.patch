@@ -1,7 +1,7 @@
-From 6225f4ea7dbae7091576e08eb4a96594c3f452bd Mon Sep 17 00:00:00 2001
+From 887d48022a933f6b99e2cce2076be632935fa945 Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Thu, 29 Oct 2026 10:01:50 +0100
-Subject: [PATCH] MSL: Check the bounds of texel buffer reads, writes and
+Subject: [PATCH 4/4] MSL: Check the bounds of texel buffer reads, writes and
  atomics.
 
 Vulkan with robust buffer access reads zero from texel buffers out of
@@ -16,10 +16,10 @@ atomics are skipped.
  1 file changed, 56 insertions(+), 9 deletions(-)
 
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
-index 7169974d..a67d2734 100644
+index 0973e9ec..63159b76 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
-@@ -9965,13 +9965,28 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -10263,13 +10263,28 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  		args.coord = coord_id;
  		args.lod = lod;
  
@@ -51,7 +51,7 @@ index 7169974d..a67d2734 100644
  			expr += ")";
  		statement(expr, ";");
  
-@@ -11401,6 +11416,25 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+@@ -11667,6 +11682,25 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
  	bool check_discard = opcode != OpAtomicLoad && needs_frag_discard_checks() &&
  	                     ptr_type.storage != StorageClassWorkgroup;
  
@@ -77,7 +77,7 @@ index 7169974d..a67d2734 100644
  	// Even compare exchange atomics are vec4 on metal for ... reasons :v
  	uint32_t vec4_temporary_id = 0;
  	if (use_native_image_atomic && is_atomic_compare_exchange_strong)
-@@ -11418,7 +11452,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+@@ -11684,7 +11718,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
  		vec4_temporary_id = tmp_id;
  	}
  
@@ -86,7 +86,7 @@ index 7169974d..a67d2734 100644
  	{
  		if (is_atomic_compare_exchange_strong)
  		{
-@@ -11426,11 +11460,11 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+@@ -11692,11 +11726,11 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
  			emit_uninitialized_temporary_expression(result_type, result_id);
  			if (vec4_temporary_id)
  				emit_uninitialized_temporary_expression(vec4_temporary_id + 1, vec4_temporary_id);
@@ -100,7 +100,7 @@ index 7169974d..a67d2734 100644
  	}
  
  	if (use_native_image_atomic)
-@@ -11563,7 +11597,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+@@ -11829,7 +11863,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
  		// the CAS loop, otherwise it will loop infinitely, with the comparison test always failing.
  		// The function updates the comparator value from the memory value, so the additional
  		// comparison test evaluates the memory value against the expected value.
@@ -109,7 +109,7 @@ index 7169974d..a67d2734 100644
  		{
  			emit_uninitialized_temporary_expression(result_type, result_id);
  			if (vec4_temporary_id)
-@@ -11585,7 +11619,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+@@ -11851,7 +11885,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
  			statement(to_expression(result_id), " = ", scalar_expression, ";");
  
  		// Vulkan: (section 9.29: ...  and values returned by atomic instructions in helper invocations are undefined)
@@ -118,7 +118,7 @@ index 7169974d..a67d2734 100644
  		{
  			end_scope();
  			statement("else");
-@@ -11624,7 +11658,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+@@ -11890,7 +11924,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
  			exp += ".x";
  
  		// Vulkan: (section 9.29: ...  and values returned by atomic instructions in helper invocations are undefined)
@@ -127,7 +127,7 @@ index 7169974d..a67d2734 100644
  		{
  			exp += " : ";
  			if (strcmp(op, "atomic_store") != 0)
-@@ -13171,6 +13205,19 @@ string CompilerMSL::to_texture_op(const Instruction &i, bool sparse, bool *forwa
+@@ -13418,6 +13452,19 @@ string CompilerMSL::to_texture_op(const Instruction &i, bool sparse, bool *forwa
  
  	string inner_expr = CompilerGLSL::to_texture_op(i, sparse, forward, inherited_expressions);
  

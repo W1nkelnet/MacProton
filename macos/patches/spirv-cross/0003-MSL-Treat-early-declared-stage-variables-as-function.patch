@@ -1,7 +1,8 @@
-From d9488efb6704cc9294376b44e43f2ab1554776cc Mon Sep 17 00:00:00 2001
+From 07c05cdfd68ddf1f019aee68eb8f20105a97a9dc Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 22:15:15 +0100
-Subject: [PATCH] MSL: Treat early declared stage variables as function locals.
+Subject: [PATCH 3/4] MSL: Treat early declared stage variables as function
+ locals.
 
 With captured output, as for vertex shaders feeding tessellation,
 outputs count as device memory. Outputs that share a location through
@@ -13,10 +14,10 @@ were cast to a device pointer, which Metal rejects.
  1 file changed, 6 insertions(+)
 
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
-index fe5d9a8f..7169974d 100644
+index 50121d91..0973e9ec 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
-@@ -17364,6 +17364,12 @@ bool CompilerMSL::variable_decl_is_remapped_storage(const SPIRVariable &variable
+@@ -17669,6 +17669,12 @@ bool CompilerMSL::variable_decl_is_remapped_storage(const SPIRVariable &variable
  		// This is fine, as there cannot be concurrent writers to that memory anyways,
  		// so we just ignore that case.
  

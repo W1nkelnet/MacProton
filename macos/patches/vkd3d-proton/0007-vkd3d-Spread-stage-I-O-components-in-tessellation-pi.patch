@@ -1,8 +1,8 @@
-From 73db545ae13f01d8813d34e08e325488675fab02 Mon Sep 17 00:00:00 2001
+From f8c39ee86955e3b77199f3e2305f3d13cb3ddd80 Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Thu, 29 Oct 2026 00:16:19 +0100
-Subject: [PATCH] vkd3d: Spread stage I/O components in tessellation pipelines
- on MoltenVK.
+Subject: [PATCH 7/7] vkd3d: Spread stage I/O components in tessellation
+ pipelines on MoltenVK.
 
 SPIRV-Cross cannot pack components into one location in MSL
 tessellation stages and rejects their Component decorations, which
@@ -19,24 +19,24 @@ rows stay consecutive. Bump the shader revision for the changed I/O.
  4 files changed, 29 insertions(+), 1 deletion(-)
 
 diff --git a/include/vkd3d_shader.h b/include/vkd3d_shader.h
-index 2baae9b..7b5c0ef 100644
+index 5cc201a..5ca9a5a 100644
 --- a/include/vkd3d_shader.h
 +++ b/include/vkd3d_shader.h
-@@ -264,6 +264,9 @@ enum vkd3d_shader_interface_flag
+@@ -271,6 +271,9 @@ enum vkd3d_shader_interface_flag
      /* Bounds check local arrays and constant tables (and group shared memory,
       * once dxil-spirv implements it) */
-     VKD3D_SHADER_INTERFACE_EXTENDED_ROBUSTNESS                 = 0x00001000u,
+     VKD3D_SHADER_INTERFACE_EXTENDED_ROBUSTNESS                 = 0x00010000u,
 +    /* Give each component of stage I/O its own location instead of a Component decoration,
 +     * which SPIRV-Cross does not support in MSL tessellation stages */
-+    VKD3D_SHADER_INTERFACE_SPREAD_STAGE_IO                     = 0x00002000u,
++    VKD3D_SHADER_INTERFACE_SPREAD_STAGE_IO                     = 0x00020000u,
  };
  
  struct vkd3d_shader_stage_io_entry
 diff --git a/libs/vkd3d-shader/dxil.c b/libs/vkd3d-shader/dxil.c
-index 43ff727..986e152 100644
+index 0340bfc..d4b7558 100644
 --- a/libs/vkd3d-shader/dxil.c
 +++ b/libs/vkd3d-shader/dxil.c
-@@ -417,6 +417,16 @@ static dxil_spv_bool dxil_shader_stage_input_remap(void *userdata, const dxil_sp
+@@ -499,6 +499,16 @@ static dxil_spv_bool dxil_shader_stage_input_remap(void *userdata, const dxil_sp
      return true;
  }
  
@@ -53,7 +53,7 @@ index 43ff727..986e152 100644
  static dxil_spv_bool dxil_uav_remap(void *userdata, const dxil_spv_uav_d3d_binding *d3d_binding,
                                      dxil_spv_uav_vulkan_binding *vk_binding)
  {
-@@ -1392,6 +1402,14 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
+@@ -1638,6 +1648,14 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
      if (shader_interface_info->stage_output_map)
          dxil_spv_converter_set_stage_output_remapper(converter, dxil_shader_stage_output_capture, (void *)shader_interface_info->stage_output_map);
  
@@ -69,23 +69,23 @@ index 43ff727..986e152 100644
          dxil_spv_converter_set_patch_location_offset(converter, shader_interface_info->patch_location_offset);
  
 diff --git a/libs/vkd3d-shader/vkd3d_shader_main.c b/libs/vkd3d-shader/vkd3d_shader_main.c
-index c10e28e..168f2a5 100644
+index 53487e3..8f33155 100644
 --- a/libs/vkd3d-shader/vkd3d_shader_main.c
 +++ b/libs/vkd3d-shader/vkd3d_shader_main.c
-@@ -531,7 +531,7 @@ uint64_t vkd3d_shader_get_revision(void)
-      * Might get nuked later ...
-      * It's not immediately useful for invalidating pipeline caches, since that would mostly be covered
-      * by vkd3d-proton Git hash. */
+@@ -545,7 +545,7 @@ uint64_t vkd3d_shader_get_revision(vkd3d_shader_quirks_t *aux_quirks)
+     if (aux_quirks)
+         *aux_quirks = quirks;
+ 
 -    return quirk_hash ^ 2;
 +    return quirk_hash ^ 3;
  }
  
  struct vkd3d_shader_stage_io_entry *vkd3d_shader_stage_io_map_append(struct vkd3d_shader_stage_io_map *map,
 diff --git a/libs/vkd3d/state.c b/libs/vkd3d/state.c
-index 6dbd864..1d39c7e 100644
+index 64a2897..544a00b 100644
 --- a/libs/vkd3d/state.c
 +++ b/libs/vkd3d/state.c
-@@ -2669,6 +2669,13 @@ static void d3d12_pipeline_state_init_shader_interface(struct d3d12_pipeline_sta
+@@ -3119,6 +3119,13 @@ static void d3d12_pipeline_state_init_shader_interface(struct d3d12_pipeline_sta
          shader_interface->patch_location_offset = state->graphics.cached_desc.patch_location_offset;
      }
  

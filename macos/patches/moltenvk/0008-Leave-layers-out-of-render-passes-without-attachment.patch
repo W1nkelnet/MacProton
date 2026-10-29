@@ -1,7 +1,7 @@
-From 1b3e095bd50475bc30212f12680bf1a4b27c4b80 Mon Sep 17 00:00:00 2001
+From a5dbca87934fba74e066f1cc78179fc5c7bdc9af Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Thu, 29 Oct 2026 10:08:28 +0100
-Subject: [PATCH] Leave layers out of render passes without attachments.
+Subject: [PATCH 8/8] Leave layers out of render passes without attachments.
 
 Direct3D 12 can draw without render targets, for passes that only write
 UAVs, such as Unreal's distance field shadows that scatter objects into
@@ -17,10 +17,10 @@ multiview.
  1 file changed, 7 insertions(+), 1 deletion(-)
 
 diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
-index 8c24deb..62c8d91 100644
+index de39c961..7f4c47c0 100644
 --- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
 +++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
-@@ -800,7 +800,13 @@ void MVKCommandEncoder::beginMetalRenderPass(MVKCommandUse cmdUse) {
+@@ -804,7 +804,13 @@ void MVKCommandEncoder::beginMetalRenderPass(MVKCommandUse cmdUse) {
  	VkExtent2D raFullExtent = { _renderArea.offset.x + _renderArea.extent.width, _renderArea.offset.y + _renderArea.extent.height };
      mtlRPDesc.renderTargetWidth = max(min(raFullExtent.width, (fbExtent.width ? fbExtent.width : raFullExtent.width)), 1u);
      mtlRPDesc.renderTargetHeight = max(min(raFullExtent.height, (fbExtent.height ? fbExtent.height : raFullExtent.height)), 1u);

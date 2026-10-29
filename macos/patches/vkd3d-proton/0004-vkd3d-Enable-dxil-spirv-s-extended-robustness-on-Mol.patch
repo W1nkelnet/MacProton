@@ -1,7 +1,8 @@
-From 304c8202fb57ba9642500e76d4a5b4fbeeb250f0 Mon Sep 17 00:00:00 2001
+From f270df9a65b2a3ccdba97dc7b8d57afe128917ae Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 16:40:43 +0100
-Subject: [PATCH] vkd3d: Enable dxil-spirv's extended robustness on MoltenVK.
+Subject: [PATCH 4/7] vkd3d: Enable dxil-spirv's extended robustness on
+ MoltenVK.
 
 Out of bounds accesses to local arrays and constant tables, which D3D12
 drivers tolerate, can fault on Apple GPUs. dxil-spirv bounds checks them
@@ -16,24 +17,24 @@ cached SPIR-V without the checks is not reused.
  4 files changed, 19 insertions(+)
 
 diff --git a/include/vkd3d_shader.h b/include/vkd3d_shader.h
-index c40923b..2baae9b 100644
+index 994902a..5cc201a 100644
 --- a/include/vkd3d_shader.h
 +++ b/include/vkd3d_shader.h
-@@ -261,6 +261,9 @@ enum vkd3d_shader_interface_flag
-     VKD3D_SHADER_INTERFACE_INSTRUCTION_QA_BUFFER_EXPECT_ASSUME = 0x00000200u,
-     VKD3D_SHADER_INTERFACE_INSTRUCTION_QA_BUFFER_SYNC          = 0x00000400u,
-     VKD3D_SHADER_INTERFACE_INSTRUCTION_QA_BUFFER_SYNC_COMPUTE  = 0x00000800u,
+@@ -268,6 +268,9 @@ enum vkd3d_shader_interface_flag
+     VKD3D_SHADER_INTERFACE_INLINE_REDZONE_CBV                  = 0x00002000u,
+     VKD3D_SHADER_INTERFACE_RAYTRACING_OPACITY_MICROMAP         = 0x00004000u,
+     VKD3D_SHADER_INTERFACE_RAY_QUERY_OMM_DEVICE_GLOBAL         = 0x00008000u,
 +    /* Bounds check local arrays and constant tables (and group shared memory,
 +     * once dxil-spirv implements it) */
-+    VKD3D_SHADER_INTERFACE_EXTENDED_ROBUSTNESS                 = 0x00001000u,
++    VKD3D_SHADER_INTERFACE_EXTENDED_ROBUSTNESS                 = 0x00010000u,
  };
  
  struct vkd3d_shader_stage_io_entry
 diff --git a/libs/vkd3d-shader/dxil.c b/libs/vkd3d-shader/dxil.c
-index bdad5e8..43ff727 100644
+index b74cea3..0340bfc 100644
 --- a/libs/vkd3d-shader/dxil.c
 +++ b/libs/vkd3d-shader/dxil.c
-@@ -739,6 +739,17 @@ static int vkd3d_dxil_converter_set_options(dxil_spv_converter converter,
+@@ -871,6 +871,17 @@ static int vkd3d_dxil_converter_set_options(dxil_spv_converter converter,
          }
      }
  
@@ -52,26 +53,26 @@ index bdad5e8..43ff727 100644
      {
          const struct dxil_spv_option_bindless_typed_buffer_offsets helper =
 diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
-index 52796a6..d0c6485 100644
+index 453a5e7..d69c583 100644
 --- a/libs/vkd3d/device.c
 +++ b/libs/vkd3d/device.c
-@@ -10327,6 +10327,8 @@ static void vkd3d_compute_shader_interface_key(struct d3d12_device *device)
-     key = hash_fnv1_iterate_u32(key, device->device_info.vulkan_1_3_properties.minSubgroupSize);
-     key = hash_fnv1_iterate_u32(key, device->device_info.vulkan_1_3_properties.maxSubgroupSize);
+@@ -10405,6 +10405,8 @@ static void vkd3d_compute_shader_interface_key(struct d3d12_device *device)
+     key = hash_fnv1_iterate_u32(key, device->d3d12_caps.options1.WaveLaneCountMin);
+     key = hash_fnv1_iterate_u32(key, device->d3d12_caps.options1.WaveLaneCountMax);
      key = hash_fnv1_iterate_u32(key, device->bindless_state.flags);
 +    /* Enables VKD3D_SHADER_INTERFACE_EXTENDED_ROBUSTNESS */
 +    key = hash_fnv1_iterate_u32(key, device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MOLTENVK);
-     key = hash_fnv1_iterate_u32(key, device->bindless_state.cbv_srv_uav_count);
-     key = hash_fnv1_iterate_u32(key, device->bindless_state.set_count);
-     for (i = 0; i < device->bindless_state.set_count; i++)
+ 
+     if (d3d12_device_use_descriptor_heap(device))
+     {
 diff --git a/libs/vkd3d/state.c b/libs/vkd3d/state.c
-index 577d3b0..6dbd864 100644
+index 1945f15..64a2897 100644
 --- a/libs/vkd3d/state.c
 +++ b/libs/vkd3d/state.c
-@@ -1845,6 +1845,9 @@ unsigned int d3d12_root_signature_get_shader_interface_flags(const struct d3d12_
-         flags |= VKD3D_SHADER_INTERFACE_BINDLESS_CBV_AS_STORAGE_BUFFER;
-     if (d3d12_device_use_embedded_mutable_descriptors(root_signature->device))
-         flags |= VKD3D_SHADER_INTERFACE_RAW_VA_ALIAS_DESCRIPTOR_BUFFER;
+@@ -2294,6 +2294,9 @@ unsigned int d3d12_root_signature_get_shader_interface_flags(const struct d3d12_
+     if (vkd3d_atomic_uint32_load_explicit(&root_signature->device->vendor_hacks.force_ray_query_omm,
+             vkd3d_memory_order_relaxed))
+         flags |= VKD3D_SHADER_INTERFACE_RAY_QUERY_OMM_DEVICE_GLOBAL;
 +    /* Out of bounds accesses that D3D12 drivers tolerate fault on Apple GPUs */
 +    if (root_signature->device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MOLTENVK)
 +        flags |= VKD3D_SHADER_INTERFACE_EXTENDED_ROBUSTNESS;

@@ -1,7 +1,7 @@
-From f93239576d450629db39f9a218f866c06fcb08a3 Mon Sep 17 00:00:00 2001
+From 0966966469e8b53a1c1b92c157ae11816fdb9c5b Mon Sep 17 00:00:00 2001
 From: Mark <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 10:05:46 +0100
-Subject: [PATCH] Honor MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES with residency
+Subject: [PATCH 1/8] Honor MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES with residency
  sets.
 
 With Metal argument buffers, MoltenVK makes command buffers use every
@@ -10,17 +10,16 @@ after their last use. Retained command buffers and live resource checks
 prevent that, but were skipped whenever a residency set exists, i.e. on
 macOS 15 and later. Games then lost the device with Metal's "Invalid
 Resource" error.
-
 ---
  MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm | 4 +++-
  MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm  | 2 +-
  2 files changed, 4 insertions(+), 2 deletions(-)
 
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
-index 9772757..6fc4443 100644
+index 359f8a2b..ffb29bd9 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
-@@ -5222,7 +5222,9 @@ void MVKDevice::initPerformanceTracking() {
+@@ -5266,7 +5266,9 @@ void MVKDevice::initPerformanceTracking() {
  
  void MVKDevice::initConfiguration() {
  	bool needsLiveTrackingForCopy = _physicalDevice->_isUsingMetalArgumentBuffers && _physicalDevice->_metalFeatures.needsArgumentBufferEncoders;
@@ -32,7 +31,7 @@ index 9772757..6fc4443 100644
  }
  
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
-index dec4b45..64387c7 100644
+index dec4b452..64387c74 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
 @@ -486,7 +486,7 @@ VkResult MVKQueueCommandBufferSubmission::execute() {

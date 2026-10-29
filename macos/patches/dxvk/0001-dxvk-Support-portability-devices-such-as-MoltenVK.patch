@@ -1,7 +1,7 @@
-From bd7abddfbf3cd87305a4d6a64da75ccc6b6994e5 Mon Sep 17 00:00:00 2001
+From a54a522dbd2112da48a1b5416681508cc2561dca Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Tue, 27 Oct 2026 23:09:29 +0100
-Subject: [PATCH 1/2] dxvk: Support portability devices such as MoltenVK.
+Subject: [PATCH 1/4] dxvk: Support portability devices such as MoltenVK.
 
 MoltenVK lacks geometryShader, shaderCullDistance, depthClipEnable,
 robustBufferAccess2 and nullDescriptor, so the device was rejected.
@@ -16,7 +16,6 @@ applications) these features are now optional:
   initialized through the init command buffer
 
 Other devices keep the strict requirements.
-
 ---
  src/dxvk/dxvk_context.cpp        |  27 +++++++
  src/dxvk/dxvk_context.h          |   5 ++
@@ -32,10 +31,10 @@ Other devices keep the strict requirements.
  create mode 100644 src/dxvk/dxvk_null_resources.h
 
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 187e1ae..9760861 100644
+index 66b2c53..106f7fa 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
-@@ -901,6 +901,17 @@ namespace dxvk {
+@@ -969,6 +969,17 @@ namespace dxvk {
    }
  
  
@@ -53,7 +52,7 @@ index 187e1ae..9760861 100644
    void DxvkContext::initBuffer(
      const Rc<DxvkBuffer>&           buffer) {
      auto dstSlice = buffer->getSliceInfo();
-@@ -6339,6 +6350,8 @@ namespace dxvk {
+@@ -7136,6 +7147,8 @@ namespace dxvk {
                descriptorInfo.buffer.range = bufferInfo.size;
  
                trackUniformBufferBinding<TrackBindings>(binding, slice);
@@ -62,7 +61,7 @@ index 187e1ae..9760861 100644
              } else {
                descriptorInfo.buffer.buffer = VK_NULL_HANDLE;
                descriptorInfo.buffer.offset = 0;
-@@ -6363,11 +6376,15 @@ namespace dxvk {
+@@ -7160,11 +7173,15 @@ namespace dxvk {
                      descriptorInfo = view->getDescriptor(binding.getViewType())->legacy;
  
                      m_cmd->track(view->image(), DxvkAccess::Read);
@@ -78,7 +77,7 @@ index 187e1ae..9760861 100644
                  } else {
                    descriptorInfo.image.sampler = VK_NULL_HANDLE;
                    descriptorInfo.image.imageView = VK_NULL_HANDLE;
-@@ -6386,6 +6403,8 @@ namespace dxvk {
+@@ -7183,6 +7200,8 @@ namespace dxvk {
                    descriptorInfo = descriptor->legacy;
  
                    trackImageViewBinding<TrackBindings, true>(binding, *res.imageView);
@@ -87,7 +86,7 @@ index 187e1ae..9760861 100644
                  } else {
                    descriptorInfo.image.sampler = VK_NULL_HANDLE;
                    descriptorInfo.image.imageView = VK_NULL_HANDLE;
-@@ -6404,6 +6423,8 @@ namespace dxvk {
+@@ -7201,6 +7220,8 @@ namespace dxvk {
                    descriptorInfo = descriptor->legacy;
  
                    trackBufferViewBinding<TrackBindings, false>(binding, *res.bufferView);
@@ -96,7 +95,7 @@ index 187e1ae..9760861 100644
                  } else {
                    descriptorInfo.bufferView = VK_NULL_HANDLE;
                  }
-@@ -6420,6 +6441,8 @@ namespace dxvk {
+@@ -7217,6 +7238,8 @@ namespace dxvk {
                    descriptorInfo = descriptor->legacy;
  
                    trackBufferViewBinding<TrackBindings, true>(binding, *res.bufferView);
@@ -105,7 +104,7 @@ index 187e1ae..9760861 100644
                  } else {
                    descriptorInfo.bufferView = VK_NULL_HANDLE;
                  }
-@@ -6436,6 +6459,8 @@ namespace dxvk {
+@@ -7233,6 +7256,8 @@ namespace dxvk {
                    descriptorInfo = descriptor->legacy;
  
                    trackBufferViewBinding<TrackBindings, false>(binding, *res.bufferView);
@@ -114,7 +113,7 @@ index 187e1ae..9760861 100644
                  } else {
                    descriptorInfo.buffer.buffer = VK_NULL_HANDLE;
                    descriptorInfo.buffer.offset = 0;
-@@ -6454,6 +6479,8 @@ namespace dxvk {
+@@ -7251,6 +7276,8 @@ namespace dxvk {
                    descriptorInfo = descriptor->legacy;
  
                    trackBufferViewBinding<TrackBindings, true>(binding, *res.bufferView);
@@ -124,7 +123,7 @@ index 187e1ae..9760861 100644
                    descriptorInfo.buffer.buffer = VK_NULL_HANDLE;
                    descriptorInfo.buffer.offset = 0;
 diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
-index c613765..68e0bb3 100644
+index 1e9780f..b326afa 100644
 --- a/src/dxvk/dxvk_context.h
 +++ b/src/dxvk/dxvk_context.h
 @@ -10,6 +10,7 @@
@@ -135,7 +134,7 @@ index c613765..68e0bb3 100644
  #include "dxvk_util.h"
  
  namespace dxvk {
-@@ -1378,6 +1379,10 @@ namespace dxvk {
+@@ -1386,6 +1387,10 @@ namespace dxvk {
        std::vector<DxvkLegacyDescriptor> infos;
      } m_legacyDescriptors;
  
@@ -147,10 +146,10 @@ index c613765..68e0bb3 100644
      std::array<DxvkBufferSlice, MaxNumUniformBufferSlots> m_uniformBuffers;
      std::array<DxvkViewPair, MaxNumResourceSlots> m_resources;
 diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
-index c45e62b..87efe24 100644
+index 7e3d16a..4768d7b 100644
 --- a/src/dxvk/dxvk_device_info.cpp
 +++ b/src/dxvk/dxvk_device_info.cpp
-@@ -356,6 +356,14 @@ namespace dxvk {
+@@ -372,6 +372,14 @@ namespace dxvk {
          return !std::strcmp(ext.extensionName, VK_AMD_SHADER_FRAGMENT_MASK_EXTENSION_NAME);
        }) != extensions.end();
  
@@ -165,7 +164,7 @@ index c45e62b..87efe24 100644
      // Use the supported spec version as a way to indicate extension support.
      // We may ignore certain extensions if the spec version is too old.
      for (const auto& f : getFeatureList()) {
-@@ -701,6 +709,11 @@ namespace dxvk {
+@@ -777,6 +785,11 @@ namespace dxvk {
  
      for (const auto& f : getFeatureList()) {
        if (f.featureRequired && !(*f.featureEnabled)) {
@@ -177,7 +176,7 @@ index c45e62b..87efe24 100644
          std::string message = str::format("Device does not support required feature '", f.readableName, "'");
  
          if (f.extensionEnabled)
-@@ -745,6 +758,27 @@ namespace dxvk {
+@@ -821,6 +834,27 @@ namespace dxvk {
    }
  
  
@@ -206,10 +205,10 @@ index c45e62b..87efe24 100644
      #define ENABLE_FEATURE(version, name, require)        \
        FeatureEntry { nullptr, nullptr,                    \
 diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
-index 32cb90f..22246aa 100644
+index a6af2a4..ad19e64 100644
 --- a/src/dxvk/dxvk_device_info.h
 +++ b/src/dxvk/dxvk_device_info.h
-@@ -339,6 +339,7 @@ namespace dxvk {
+@@ -397,6 +397,7 @@ namespace dxvk {
  
      bool                                  m_hasMeshShader = false;
      bool                                  m_hasFmask = false;
@@ -217,7 +216,7 @@ index 32cb90f..22246aa 100644
  
      std::vector<const VkExtensionProperties*> m_extensionList;
  
-@@ -397,6 +398,10 @@ namespace dxvk {
+@@ -455,6 +456,10 @@ namespace dxvk {
  
      std::vector<FeatureEntry> getFeatureList();
  
@@ -225,16 +224,16 @@ index 32cb90f..22246aa 100644
 +
 +    bool isPortabilityOptional(const FeatureEntry& f) const;
 +
-     static Version decodeDriverVersion(VkDriverId driverId, uint32_t version);
- 
      template<typename T>
+     static void copyFeature(
+       const void*                       chain,
 diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
-index a3ee414..ede0b8e 100644
+index f40b6ec..c1949db 100644
 --- a/src/dxvk/dxvk_graphics.cpp
 +++ b/src/dxvk/dxvk_graphics.cpp
-@@ -578,10 +578,15 @@ namespace dxvk {
-       rsInfo.rasterizerDiscardEnable = VK_TRUE;
-     }
+@@ -598,10 +598,15 @@ namespace dxvk {
+     rsInfo.polygonMode              = state.rs.polygonMode();
+     rsInfo.lineWidth                = 1.0f;
  
 -    // Set up depth clip state. Require depth clip support,
 -    // this is *not* equivalent to disabling depth clamp.
@@ -490,10 +489,10 @@ index 0000000..bb9ba4d
 +
 +}
 diff --git a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
-index eb1e364..edd5426 100644
+index a133519..f0accd0 100644
 --- a/src/dxvk/dxvk_shader.cpp
 +++ b/src/dxvk/dxvk_shader.cpp
-@@ -396,8 +396,11 @@ namespace dxvk {
+@@ -400,8 +400,11 @@ namespace dxvk {
      rsInfo.polygonMode        = VK_POLYGON_MODE_FILL;
      rsInfo.lineWidth          = 1.0f;
  
@@ -508,10 +507,10 @@ index eb1e364..edd5426 100644
        rsDepthClipInfo.depthClipEnable = VK_TRUE;
      }
 diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
-index 073a4ad..4b0b8c6 100644
+index 6b12f95..64a1bfa 100644
 --- a/src/dxvk/meson.build
 +++ b/src/dxvk/meson.build
-@@ -124,6 +124,7 @@ dxvk_src = [
+@@ -81,6 +81,7 @@ dxvk_src = [
    'dxvk_staging.cpp',
    'dxvk_stats.cpp',
    'dxvk_swapchain_blitter.cpp',

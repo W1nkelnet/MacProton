@@ -1,7 +1,7 @@
-From 5c2062a1690ad0d6e5d68dc81649db8f62caf598 Mon Sep 17 00:00:00 2001
+From 29b19c54634c1a8909f4d6ec53ad10711805c7ad Mon Sep 17 00:00:00 2001
 From: W1nkelm4nn <mrmarkap61@gmail.com>
 Date: Wed, 28 Oct 2026 20:32:43 +0100
-Subject: [PATCH] vkd3d: Report sliced 3D views that cannot be honored.
+Subject: [PATCH 6/7] vkd3d: Report sliced 3D views that cannot be honored.
 
 Without VK_EXT_image_sliced_view_of_3d, as on MoltenVK, a 3D UAV or RTV
 view starting at a later slice silently starts at slice 0 instead, and
@@ -11,12 +11,12 @@ writes land in the wrong slices. Say so once.
  1 file changed, 5 insertions(+)
 
 diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
-index c36bfe9..faf123a 100644
+index 25754b7..12e87fe 100644
 --- a/libs/vkd3d/resource.c
 +++ b/libs/vkd3d/resource.c
-@@ -5547,6 +5547,11 @@ bool vkd3d_create_texture_view(struct d3d12_device *device, const struct vkd3d_t
-             sliced_desc.sliceCount = desc->w_size;
-             vk_prepend_struct(&view_desc, &sliced_desc);
+@@ -5825,6 +5825,11 @@ bool vkd3d_setup_texture_view(struct d3d12_device *device,
+             info->sliced_desc.sliceCount = desc->w_size;
+             vk_prepend_struct(&info->view_desc, &info->sliced_desc);
          }
 +        else if (desc->view_type == VK_IMAGE_VIEW_TYPE_3D && desc->w_offset != 0)
 +        {
@@ -24,8 +24,8 @@ index c36bfe9..faf123a 100644
 +            FIXME_ONCE("Sliced 3D view at slice %u without VK_EXT_image_sliced_view_of_3d.\n", desc->w_offset);
 +        }
  
-         if ((vr = VK_CALL(vkCreateImageView(device->vk_device, &view_desc, NULL, &vk_view))) < 0)
-         {
+         return true;
+     }
 -- 
 2.56.0
 
