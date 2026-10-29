@@ -1,0 +1,209 @@
+From bbb597f29a336f4c3b2d3ad77b4bc6d8152142ea Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 23:37:09 +0100
+Subject: [PATCH 5/6] kk: Add MESA_KK_LIGHT_BARRIERS
+
+Every encoder ends with a barrier on all stages, which keeps
+consecutive render passes from overlapping. With MESA_KK_LIGHT_BARRIERS
+set, render encoders end without it; the barriers and event waits the
+application records, render pass splits and query availability writes
+make the next encoder wait for all prior work instead. Compute
+encoders, which carry the passes feeding draws, keep the barrier.
+
+Off by default until measured in games.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c      | 40 ++++++++++++++++++---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h      |  2 ++
+ src/kosmickrisp/vulkan/kk_event.c           |  7 +++-
+ src/kosmickrisp/vulkan/kk_physical_device.c |  2 ++
+ src/kosmickrisp/vulkan/kk_physical_device.h |  3 ++
+ 5 files changed, 49 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index 22f4bf7..0476222 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -13,6 +13,7 @@
+ #include "kk_entrypoints.h"
+ #include "kk_format.h"
+ #include "kk_image_view.h"
++#include "kk_physical_device.h"
+ 
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/mtl_command_buffer.h"
+@@ -169,6 +170,7 @@ kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
+    cmd->uploader.offset = 0;
+ 
+    memset(&cmd->state, 0, sizeof(cmd->state));
++   cmd->pending_barrier = false;
+    cmd->uses_heap = false;
+ }
+ 
+@@ -257,6 +259,22 @@ kk_encoder_update_debug(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder)
+       mtl_encoder_push_debug_group(encoder, label->pLabelName);
+ }
+ 
++static bool
++kk_light_barriers(struct kk_cmd_buffer *cmd)
++{
++   return kk_device_physical(kk_cmd_buffer_device(cmd))->settings.light_barriers;
++}
++
++/* A barrier recorded while no encoder covered it */
++static void
++kk_encoder_wait(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder)
++{
++   if (cmd->pending_barrier) {
++      mtl_barrier_after_queue_stages(encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
++      cmd->pending_barrier = false;
++   }
++}
++
+ void
+ cs_start_render(struct kk_cmd_buffer *cmd)
+ {
+@@ -269,6 +287,7 @@ cs_start_render(struct kk_cmd_buffer *cmd)
+ 
+    cmd->metal.render = mtl_new_render_command_encoder_with_descriptor(
+       cmd->metal.cmd_buf, state->render_pass_descriptor);
++   kk_encoder_wait(cmd, cmd->metal.render);
+ 
+    kk_encoder_update_debug(cmd, cmd->metal.render);
+    /* Starting a new render pass means we already flushed and no barrier is
+@@ -319,10 +338,13 @@ cs_get_compute(struct kk_cmd_buffer *cmd)
+       cs_end(cmd);
+       kk_cmd_buffer_dirty_all_gfx(cmd);
+       cmd->state.gfx.need_to_start_render_pass = true;
++      /* The render pass continues after this pass, on what it stored */
++      cmd->pending_barrier = true;
+    }
+ 
+    if (cmd->metal.compute == NULL) {
+       cmd->metal.compute = mtl_new_compute_command_encoder(cmd->metal.cmd_buf);
++      kk_encoder_wait(cmd, cmd->metal.compute);
+       mtl_compute_set_argument_table(cmd->metal.compute, cmd->argument_table);
+       kk_encoder_update_debug(cmd, cmd->metal.compute);
+    }
+@@ -331,10 +353,13 @@ cs_get_compute(struct kk_cmd_buffer *cmd)
+ }
+ 
+ static void
+-end_encoder(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder)
++end_encoder(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder,
++            bool render)
+ {
+    /* TODO_KOSMICKRISP This is probably overkill */
+-   mtl_barrier_after_stages(encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
++   if (!render || !kk_light_barriers(cmd) ||
++       util_dynarray_num_elements(&cmd->ts_resolves, struct kk_ts_resolve))
++      mtl_barrier_after_stages(encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
+    mtl_end_encoding(encoder);
+    mtl_release(encoder);
+ 
+@@ -356,6 +381,8 @@ flush_post_render_writes(struct kk_cmd_buffer *cmd)
+                                    struct libkk_imm_write))
+       return;
+ 
++   /* Query availability follows the results the render pass wrote */
++   cmd->pending_barrier = true;
+    util_dynarray_foreach(&cmd->post_render_writes, struct libkk_imm_write, w) {
+       libkk_write_u32(cmd, kk_grid_1d(1), true, (uint64_t)w->address, w->value);
+    }
+@@ -370,7 +397,7 @@ cs_end(struct kk_cmd_buffer *cmd)
+ 
+    /* Render first as it may open a compute encoder for post render writes. */
+    if (cmd->metal.render) {
+-      end_encoder(cmd, cmd->metal.render);
++      end_encoder(cmd, cmd->metal.render, true);
+       cmd->metal.render = NULL;
+ 
+       /* The stage map is only valid for the current render encoder */
+@@ -379,7 +406,7 @@ cs_end(struct kk_cmd_buffer *cmd)
+    }
+ 
+    if (cmd->metal.compute) {
+-      end_encoder(cmd, cmd->metal.compute);
++      end_encoder(cmd, cmd->metal.compute, false);
+       cmd->metal.compute = NULL;
+    }
+ }
+@@ -461,6 +488,11 @@ kk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+ 
++   /* Render encoders end without a barrier with light barriers, so the next
++    * encoder waits */
++   if (kk_light_barriers(cmd))
++      cmd->pending_barrier = true;
++
+    /* TODO_KOSMICKRISP Lighten barriers according to the actual requested
+     * barrier. To take advantage of this we need to remove the chaining of
+     * encoders. */
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index 7c26b03..ffab589 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -253,6 +253,8 @@ struct kk_cmd_buffer {
+       mtl_render_encoder *render;
+       mtl_compute_encoder *compute;
+    } metal;
++   /* With light barriers, the next encoder waits for all prior work */
++   bool pending_barrier;
+    /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
+    struct util_dynarray ts_resolves;
+    /* Timestamps already sampled by the current render encoder. (struct
+diff --git a/src/kosmickrisp/vulkan/kk_event.c b/src/kosmickrisp/vulkan/kk_event.c
+index 3e6db31..a7635a5 100644
+--- a/src/kosmickrisp/vulkan/kk_event.c
++++ b/src/kosmickrisp/vulkan/kk_event.c
+@@ -11,6 +11,7 @@
+ #include "kk_cmd_buffer.h"
+ #include "kk_device.h"
+ #include "kk_entrypoints.h"
++#include "kk_physical_device.h"
+ 
+ #define KK_EVENT_MEM_SIZE sizeof(VkResult)
+ 
+@@ -112,5 +113,9 @@ kk_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
+                   const VkEvent *pEvents,
+                   const VkDependencyInfo *pDependencyInfos)
+ {
+-   /* We do nothing, event should already be set by the time we are here. */
++   /* Event should already be set by the time we are here, but render
++    * encoders end without a barrier with light barriers */
++   VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
++   if (kk_device_physical(kk_cmd_buffer_device(cmd))->settings.light_barriers)
++      cmd->pending_barrier = true;
+ }
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index f077180..a1ea62d 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -1096,6 +1096,8 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
+ 
+    settings->gpu_capture_enabled =
+       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
++   settings->light_barriers =
++      debug_get_bool_option("MESA_KK_LIGHT_BARRIERS", false);
+ 
+    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
+    const char *all_workarounds = "all";
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.h b/src/kosmickrisp/vulkan/kk_physical_device.h
+index 283dc9f..3d88fb2 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -53,6 +53,9 @@ struct kk_env_settings {
+    bool gpu_capture_enabled;
+    const char *gpu_capture_dir;
+    uint64_t disabled_workarounds;
++   /* MESA_KK_LIGHT_BARRIERS: render encoders end without a barrier, the
++    * application's barriers wait at the start of the next encoder */
++   bool light_barriers;
+ };
+ 
+ struct kk_physical_device {
+-- 
+2.56.0
+

@@ -52,6 +52,10 @@ export DYLD_FALLBACK_LIBRARY_PATH="$dist/lib"
 if { [ "${MACPROTON_VULKAN_DRIVER-}" = kosmickrisp ] || [ "${MACPROTON_OPENGL-}" = zink ]; } &&
     [ -f "$dist/lib/kosmickrisp/libMoltenVK.dylib" ]; then
     export DYLD_LIBRARY_PATH="$dist/lib/kosmickrisp${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+    # The pixel-exact scaling the app sets for MoltenVK
+    if [ "${MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST-}" = 1 ]; then
+        export MESA_WSI_METAL_FILTER=${MESA_WSI_METAL_FILTER-nearest}
+    fi
 fi
 export WINEDLLOVERRIDES="steam.exe=b;mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b;${WINEDLLOVERRIDES-}"
 export SteamAppId=$appid SteamGameId=$appid SteamOverlayGameId=$appid

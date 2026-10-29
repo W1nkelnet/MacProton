@@ -1,0 +1,45 @@
+From be56e7f86cff347f2133501372607b6cffaaf655 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 23:37:09 +0100
+Subject: [PATCH 6/6] wsi/metal: Add MESA_WSI_METAL_FILTER=nearest
+
+Scale the image to the window without smoothing, as MoltenVK does with
+MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST.
+
+Generated-by: LLM
+---
+ src/vulkan/wsi/wsi_common_metal_layer.m | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_metal_layer.m
+index 6308d70..dd2221a 100644
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m
+@@ -8,6 +8,9 @@
+ 
+ #include "vk_format.h"
+ 
++#include <stdlib.h>
++#include <string.h>
++
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <Metal/Metal.h>
+ 
+@@ -173,6 +176,14 @@ wsi_metal_layer_configure(const CAMetalLayer *metal_layer,
+       metal_layer.displaySyncEnabled = !enable_immediate;
+       metal_layer.pixelFormat = metal_format;
+ 
++      /* MESA_WSI_METAL_FILTER=nearest scales the image to the window without
++       * smoothing, which keeps pixel art sharp */
++      const char *filter = getenv("MESA_WSI_METAL_FILTER");
++      if (filter && !strcmp(filter, "nearest")) {
++         metal_layer.magnificationFilter = kCAFilterNearest;
++         metal_layer.minificationFilter = kCAFilterNearest;
++      }
++
+       metal_layer.colorspace = cg_color_space;
+       metal_layer.wantsExtendedDynamicRangeContent = wants_edr && vk_format_is_float(format);
+       /* Needs release: https://github.com/KhronosGroup/MoltenVK/issues/940 */
+-- 
+2.56.0
+
