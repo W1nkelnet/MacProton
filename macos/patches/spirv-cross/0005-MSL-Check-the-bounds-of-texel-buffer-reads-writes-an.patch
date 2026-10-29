@@ -1,0 +1,152 @@
+From 6225f4ea7dbae7091576e08eb4a96594c3f452bd Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 10:01:50 +0100
+Subject: [PATCH] MSL: Check the bounds of texel buffer reads, writes and
+ atomics.
+
+Vulkan with robust buffer access reads zero from texel buffers out of
+bounds and drops writes there, and vkd3d-proton relies on that: it
+turns indices outside a typed buffer view into 0xffffffff. Metal has no
+such robustness, and an atomic or write at that index lands far outside
+the buffer. With native texture buffers, compare the index against the
+width of the texture buffer: reads out of bounds return zero, writes and
+atomics are skipped.
+---
+ spirv_msl.cpp | 65 ++++++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 56 insertions(+), 9 deletions(-)
+
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index 7169974d..a67d2734 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -9965,13 +9965,28 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 		args.coord = coord_id;
+ 		args.lod = lod;
+ 
++		// Vulkan drops texel buffer writes out of bounds, Metal faults on them.
++		string bounds;
++		if (img_type.image.dim == DimBuffer && msl_options.texture_buffer_native)
++		{
++			auto coord = to_enclosed_expression(coord_id);
++			if (expression_type(coord_id).vecsize > 1)
++				coord += ".x";
++			bounds = join("uint(", coord, ") >= ", to_expression(img_id), ".get_width()");
++		}
++
+ 		string expr;
+-		if (needs_frag_discard_checks())
+-			expr = join("(", builtin_to_glsl(BuiltInHelperInvocation, StorageClassInput), " ? ((void)0) : ");
++		if (needs_frag_discard_checks() || !bounds.empty())
++		{
++			string skip = needs_frag_discard_checks() ? builtin_to_glsl(BuiltInHelperInvocation, StorageClassInput) : "";
++			if (!bounds.empty())
++				skip = skip.empty() ? bounds : join(skip, " || ", bounds);
++			expr = join("(", skip, " ? ((void)0) : ");
++		}
+ 		expr += join(to_expression(img_id), ".write(",
+ 		             remap_swizzle(store_type, texel_type.vecsize, to_expression(texel_id)), ", ",
+ 		             CompilerMSL::to_function_args(args, &forward), ")");
+-		if (needs_frag_discard_checks())
++		if (needs_frag_discard_checks() || !bounds.empty())
+ 			expr += ")";
+ 		statement(expr, ";");
+ 
+@@ -11401,6 +11416,25 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 	bool check_discard = opcode != OpAtomicLoad && needs_frag_discard_checks() &&
+ 	                     ptr_type.storage != StorageClassWorkgroup;
+ 
++	// Vulkan drops texel buffer accesses out of bounds, and vkd3d-proton relies on that by turning
++	// indices outside a view into 0xffffffff. Metal faults on them, so check the bounds instead.
++	string guard;
++	if (check_discard)
++		guard = join("!", builtin_to_glsl(BuiltInHelperInvocation, StorageClassInput));
++	if (use_native_image_atomic && ptr_type.storage == StorageClassImage && res_type &&
++	    res_type->image.dim == DimBuffer && msl_options.texture_buffer_native)
++	{
++		auto obj_expression = to_expression(obj);
++		auto split_index = obj_expression.find_first_of('@');
++		if (split_index != string::npos)
++		{
++			auto bounds = join("uint(", obj_expression.substr(split_index + 1), ") < ",
++			                   obj_expression.substr(0, split_index), ".get_width()");
++			guard = guard.empty() ? bounds : join(guard, " && ", bounds);
++		}
++	}
++	bool guarded = !guard.empty();
++
+ 	// Even compare exchange atomics are vec4 on metal for ... reasons :v
+ 	uint32_t vec4_temporary_id = 0;
+ 	if (use_native_image_atomic && is_atomic_compare_exchange_strong)
+@@ -11418,7 +11452,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 		vec4_temporary_id = tmp_id;
+ 	}
+ 
+-	if (check_discard)
++	if (guarded)
+ 	{
+ 		if (is_atomic_compare_exchange_strong)
+ 		{
+@@ -11426,11 +11460,11 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 			emit_uninitialized_temporary_expression(result_type, result_id);
+ 			if (vec4_temporary_id)
+ 				emit_uninitialized_temporary_expression(vec4_temporary_id + 1, vec4_temporary_id);
+-			statement("if (!", builtin_to_glsl(BuiltInHelperInvocation, StorageClassInput), ")");
++			statement("if (", guard, ")");
+ 			begin_scope();
+ 		}
+ 		else
+-			exp = join("(!", builtin_to_glsl(BuiltInHelperInvocation, StorageClassInput), " ? ");
++			exp = join("(", guard, " ? ");
+ 	}
+ 
+ 	if (use_native_image_atomic)
+@@ -11563,7 +11597,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 		// the CAS loop, otherwise it will loop infinitely, with the comparison test always failing.
+ 		// The function updates the comparator value from the memory value, so the additional
+ 		// comparison test evaluates the memory value against the expected value.
+-		if (!check_discard)
++		if (!guarded)
+ 		{
+ 			emit_uninitialized_temporary_expression(result_type, result_id);
+ 			if (vec4_temporary_id)
+@@ -11585,7 +11619,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 			statement(to_expression(result_id), " = ", scalar_expression, ";");
+ 
+ 		// Vulkan: (section 9.29: ...  and values returned by atomic instructions in helper invocations are undefined)
+-		if (check_discard)
++		if (guarded)
+ 		{
+ 			end_scope();
+ 			statement("else");
+@@ -11624,7 +11658,7 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 			exp += ".x";
+ 
+ 		// Vulkan: (section 9.29: ...  and values returned by atomic instructions in helper invocations are undefined)
+-		if (check_discard)
++		if (guarded)
+ 		{
+ 			exp += " : ";
+ 			if (strcmp(op, "atomic_store") != 0)
+@@ -13171,6 +13205,19 @@ string CompilerMSL::to_texture_op(const Instruction &i, bool sparse, bool *forwa
+ 
+ 	string inner_expr = CompilerGLSL::to_texture_op(i, sparse, forward, inherited_expressions);
+ 
++	// Vulkan reads zero from texel buffers out of bounds, Metal faults on them.
++	if ((op == OpImageFetch || op == OpImageRead) && !sparse && imgtype.image.dim == DimBuffer &&
++	    msl_options.texture_buffer_native)
++	{
++		auto coord = to_enclosed_expression(ops[3]);
++		if (expression_type(ops[3]).vecsize > 1)
++			coord += ".x";
++		auto zero_type = get<SPIRType>(imgtype.image.type);
++		zero_type.vecsize = 4;
++		inner_expr = join("(uint(", coord, ") < ", to_expression(img), ".get_width() ? ", inner_expr, " : ",
++		                  type_to_glsl(zero_type), "(0))");
++	}
++
+ 	if (constexpr_sampler && constexpr_sampler->ycbcr_conversion_enable && !is_dynamic_img_sampler)
+ 	{
+ 		if (!constexpr_sampler->swizzle_is_identity())
+-- 
+2.56.0
+

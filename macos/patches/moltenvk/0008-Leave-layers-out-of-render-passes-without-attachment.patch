@@ -1,0 +1,40 @@
+From 1b3e095bd50475bc30212f12680bf1a4b27c4b80 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Thu, 29 Oct 2026 10:08:28 +0100
+Subject: [PATCH] Leave layers out of render passes without attachments.
+
+Direct3D 12 can draw without render targets, for passes that only write
+UAVs, such as Unreal's distance field shadows that scatter objects into
+light tiles. vkd3d-proton then begins rendering with the largest render
+area and layer count the device allows, and MoltenVK set that layer
+count, 2048, as the render target array length of the Metal pass. The
+GPU fails such a pass with an internal error, and the device is lost, as
+in Medieval Dynasty a minute or two into its world. Without attachments
+nothing uses layers, so only set them for passes with attachments or
+multiview.
+---
+ MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+index 8c24deb..62c8d91 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+@@ -800,7 +800,13 @@ void MVKCommandEncoder::beginMetalRenderPass(MVKCommandUse cmdUse) {
+ 	VkExtent2D raFullExtent = { _renderArea.offset.x + _renderArea.extent.width, _renderArea.offset.y + _renderArea.extent.height };
+     mtlRPDesc.renderTargetWidth = max(min(raFullExtent.width, (fbExtent.width ? fbExtent.width : raFullExtent.width)), 1u);
+     mtlRPDesc.renderTargetHeight = max(min(raFullExtent.height, (fbExtent.height ? fbExtent.height : raFullExtent.height)), 1u);
+-    if (_canUseLayeredRendering) {
++    // Without attachments, nothing needs layers, and layer counts as large as
++    // maxFramebufferLayers, which vkd3d-proton uses then, make the GPU fail the pass.
++    bool hasAttachments = mtlRPDesc.depthAttachment.texture || mtlRPDesc.stencilAttachment.texture;
++    for (uint32_t i = 0; i < 8 && !hasAttachments; i++) {
++        hasAttachments = mtlRPDesc.colorAttachments[i].texture != nil;
++    }
++    if (_canUseLayeredRendering && (hasAttachments || getSubpass()->isMultiview())) {
+         uint32_t renderTargetArrayLength;
+         bool found3D = false, found2D = false;
+         for (uint32_t i = 0; i < 8; i++) {
+-- 
+2.56.0
+
