@@ -8,6 +8,7 @@ struct LaunchOptionsView: View {
     @State private var graphics: Graphics
     @State private var extra: String
     @State private var driver: VulkanDriver?
+    @State private var zink: Bool
 
     enum Graphics: String, CaseIterable {
         case game = "", dx11 = "-dx11", dx12 = "-dx12"
@@ -36,6 +37,7 @@ struct LaunchOptionsView: View {
         _graphics = State(initialValue: options.compactMap(Graphics.of).last ?? .game)
         _extra = State(initialValue: options.filter { Graphics.of($0) == nil }.joined(separator: " "))
         _driver = State(initialValue: game.vulkanDriver)
+        _zink = State(initialValue: game.openGLZink ?? false)
     }
 
     var body: some View {
@@ -57,6 +59,12 @@ struct LaunchOptionsView: View {
                 ForEach(VulkanDriver.allCases, id: \.self) { Text($0.title).tag(VulkanDriver?.some($0)) }
             }
             .disabled(!VulkanDriver.kosmicKrispAvailable)
+
+            Toggle("OpenGL über Vulkan (Zink)", isOn: $zink)
+                .disabled(!VulkanDriver.kosmicKrispAvailable)
+            Text("Für OpenGL-Spiele: Mesas Zink bietet OpenGL 4.6 auf KosmicKrisp, macOS selbst nur 4.1.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             TextField("Weitere Startoptionen", text: $extra, prompt: Text("z. B. -windowed"))
             if !game.arguments.isEmpty {
@@ -85,6 +93,7 @@ struct LaunchOptionsView: View {
         let options = ([graphics.rawValue] + InstallScripts.split(extra)).filter { !$0.isEmpty }
         updated.launchOptions = options.isEmpty ? nil : options.joined(separator: " ")
         updated.vulkanDriver = driver
+        updated.openGLZink = zink ? true : nil
         library.upsert(updated)
     }
 }

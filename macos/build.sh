@@ -183,6 +183,47 @@ EOF2
         -o "$dist/lib/kosmickrisp/libMoltenVK.dylib" "$proton/macos/kosmickrisp/shim.c"
 }
 
+# Zink: Mesa's OpenGL on Vulkan as a Windows opengl32.dll, from the same
+# Mesa tree. It reaches KosmicKrisp through Wine's vulkan-1 and gives OpenGL
+# 4.6 where macOS stops at 4.1; run.sh uses it with MACPROTON_OPENGL=zink.
+# Needs: brew install bison flex
+do_zink() {
+    local src=$deps_src/mesa venv=$build/venv-mesa
+    cat > "$build/mesa-mingw64-cross.txt" <<EOF2
+[binaries]
+c = 'x86_64-w64-mingw32-gcc'
+cpp = 'x86_64-w64-mingw32-g++'
+ar = 'x86_64-w64-mingw32-ar'
+strip = 'x86_64-w64-mingw32-strip'
+windres = 'x86_64-w64-mingw32-windres'
+pkg-config = 'false'
+
+[host_machine]
+system = 'windows'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOF2
+    # Static, so the DLLs need no MinGW runtime next to them
+    local options=(--cross-file "$build/mesa-mingw64-cross.txt" --buildtype=release -Db_ndebug=true
+                   -Dc_link_args=-static -Dcpp_link_args=-static
+                   -Dplatforms=windows -Dgallium-drivers=zink -Dvulkan-drivers= -Dllvm=disabled
+                   -Dgles1=disabled -Dgles2=disabled -Degl=disabled -Dglx=disabled -Dzlib=disabled -Dzstd=disabled
+                   -Dexpat=disabled -Dxmlconfig=disabled -Dshader-cache=disabled -Dvalgrind=disabled
+                   -Dlibunwind=disabled -Dlmsensors=disabled -Dbuild-tests=false -Dmicrosoft-clc=disabled
+                   -Dgallium-d3d12-video=disabled -Dprefix="$build/mesa-zink-x64-install")
+    local tools="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$venv/bin:$PATH"
+    PATH="$tools" meson setup --reconfigure "$build/mesa-zink-x64" "$src" "${options[@]}" 2>/dev/null \
+        || PATH="$tools" meson setup "$build/mesa-zink-x64" "$src" "${options[@]}"
+    PATH="$tools" ninja -C "$build/mesa-zink-x64" install
+
+    mkdir -p "$dist/lib/wine/zink/x86_64-windows"
+    local f
+    for f in opengl32.dll libgallium_wgl.dll; do
+        x86_64-w64-mingw32-strip -o "$dist/lib/wine/zink/x86_64-windows/$f" "$build/mesa-zink-x64-install/bin/$f"
+    done
+}
+
 do_freetype() {
     local src=$deps_src/freetype
     if [ ! -d "$src" ]; then
@@ -418,6 +459,7 @@ step check_tools
 step submodules
 step moltenvk
 step kosmickrisp
+step zink
 step freetype
 step gmp
 step nettle

@@ -24,6 +24,8 @@ struct Game: Codable, Identifiable, Hashable {
     var launchOptions: String?
     /// Vulkan driver for this game, nil for the default from the settings
     var vulkanDriver: VulkanDriver?
+    /// OpenGL through Mesa's Zink on KosmicKrisp instead of macOS' OpenGL
+    var openGLZink: Bool?
 
     var id: Int { appID }
 

@@ -47,8 +47,10 @@ fi
 export WINEPREFIX="${WINEPREFIX:-$HOME/Library/Application Support/MacProton/prefixes/$appid}"
 export DYLD_FALLBACK_LIBRARY_PATH="$dist/lib"
 # MACPROTON_VULKAN_DRIVER=kosmickrisp runs Vulkan, and so DXVK and vkd3d, on
-# Mesa's KosmicKrisp instead of MoltenVK
-if [ "${MACPROTON_VULKAN_DRIVER-}" = kosmickrisp ] && [ -f "$dist/lib/kosmickrisp/libMoltenVK.dylib" ]; then
+# Mesa's KosmicKrisp instead of MoltenVK. Zink needs it too: MoltenVK lacks
+# null descriptors.
+if { [ "${MACPROTON_VULKAN_DRIVER-}" = kosmickrisp ] || [ "${MACPROTON_OPENGL-}" = zink ]; } &&
+    [ -f "$dist/lib/kosmickrisp/libMoltenVK.dylib" ]; then
     export DYLD_LIBRARY_PATH="$dist/lib/kosmickrisp${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 fi
 export WINEDLLOVERRIDES="steam.exe=b;mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b;${WINEDLLOVERRIDES-}"
@@ -115,6 +117,18 @@ if [ -d "$dist/lib/wine/vkd3d-proton/x86_64-windows" ]; then
     install_dlls "$dist/lib/wine/vkd3d-proton/x86_64-windows/"*.dll "$windows/system32/"
 fi
 export VKD3D_SHADER_CACHE_PATH="${VKD3D_SHADER_CACHE_PATH-$WINEPREFIX}"
+# MACPROTON_OPENGL=zink runs OpenGL on Vulkan through Mesa's Zink instead of
+# macOS' OpenGL, which stops at 4.1; otherwise Wine's own opengl32 stays
+zink="$dist/lib/wine/zink/x86_64-windows"
+if [ "${MACPROTON_OPENGL-}" = zink ] && [ -d "$zink" ]; then
+    install_dlls "$zink/"*.dll "$windows/system32/"
+    export WINEDLLOVERRIDES="opengl32=n;$WINEDLLOVERRIDES"
+    # Metal has no RGB32 texel buffers, which alone hold Zink at OpenGL 3.3;
+    # games hardly use them
+    export MESA_EXTENSION_OVERRIDE="${MESA_EXTENSION_OVERRIDE-GL_ARB_texture_buffer_object_rgb32}"
+elif ! cmp -s "$dist/lib/wine/x86_64-windows/opengl32.dll" "$windows/system32/opengl32.dll"; then
+    install_dlls "$dist/lib/wine/x86_64-windows/opengl32.dll" "$windows/system32/"
+fi
 
 # The game's steam_api loads steamclient(64).dll from SteamPath; Wine's
 # loader redirects their exports to lsteamclient. macOS Steam ships no
