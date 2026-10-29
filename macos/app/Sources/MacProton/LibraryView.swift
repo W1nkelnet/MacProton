@@ -15,13 +15,36 @@ struct LibraryView: View {
     @State private var steamRunning = Paths.steamRunning
     @State private var steamOnline = SteamClient.isOnline
     @AppStorage("libraryFilter") private var filter = Filter.all
+    @AppStorage("platformFilter") private var platform = Platform.all
 
     enum Filter: String, CaseIterable {
         case all = "Alle", installed = "Installiert", downloads = "Downloads"
     }
 
+    /// Games that run only through Proton, or that also have a macOS version
+    enum Platform: String, CaseIterable {
+        case all = "Alle Plattformen", windows = "Nur Windows", mac = "Mit Mac-Version"
+
+        var symbol: String {
+            switch self {
+            case .all: return "square.grid.2x2"
+            case .windows: return "pc"
+            case .mac: return "apple.logo"
+            }
+        }
+
+        func includes(_ game: Game) -> Bool {
+            switch self {
+            case .all: return true
+            case .windows: return !game.runsNatively
+            case .mac: return game.runsNatively
+            }
+        }
+    }
+
     private var shownGames: [Game] {
-        let games = filter == .installed ? library.games.filter { $0.isInstalled || $0.isInstalledNatively } : library.games
+        var games = filter == .installed ? library.games.filter { $0.isInstalled || $0.isInstalledNatively } : library.games
+        games = games.filter(platform.includes)
         let query = search.trimmingCharacters(in: .whitespaces)
         return query.isEmpty ? games : games.filter { $0.name.localizedCaseInsensitiveContains(query) }
     }
@@ -50,6 +73,14 @@ struct LibraryView: View {
             } else {
                 if shownGames.isEmpty && !search.isEmpty {
                     ContentUnavailableView.search(text: search)
+                } else if shownGames.isEmpty && platform != .all {
+                    ContentUnavailableView {
+                        Label("Keine Spiele", systemImage: platform.symbol)
+                    } description: {
+                        Text(platform == .windows ? "Alle Spiele hier haben auch eine Mac-Version." : "Keines der Spiele hier hat eine Mac-Version.")
+                    } actions: {
+                        Button("Alle Plattformen zeigen") { platform = .all }
+                    }
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 16) {
@@ -69,6 +100,18 @@ struct LibraryView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+            }
+            ToolbarItem {
+                Menu {
+                    Picker("Plattform", selection: $platform) {
+                        ForEach(Platform.allCases, id: \.self) { Label($0.rawValue, systemImage: $0.symbol).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Label("Plattform", systemImage: platform == .all ? "line.3.horizontal.decrease.circle"
+                                                                     : "line.3.horizontal.decrease.circle.fill")
+                }
+                .help(platform == .all ? "Nach Plattform filtern" : "Gefiltert: \(platform.rawValue)")
             }
             ToolbarItem {
                 Button { sync.sync(library: library, account: installer.account) } label: {
