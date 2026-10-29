@@ -75,24 +75,44 @@ fi
 # the next start, with mscoree and mshtml disabled so that wineboot does
 # not wait on the Mono/Gecko install dialog. Games need mscoree, though:
 # Wine loads .NET Core assemblies through it.
+windows="$WINEPREFIX/drive_c/windows"
+
+# wineboot copies every builtin DLL into the prefix, some 600 MB; share the
+# ones equal to the runtime's with it as APFS clones (cp -c), which keep
+# their own content once either side is written
+share_with_runtime() {
+    local src dst
+    for src in "$dist/lib/wine/x86_64-windows"/* "$dist/lib/wine/i386-windows"/*; do
+        case $src in */x86_64-windows/*) dst="$windows/system32/${src##*/}" ;; *) dst="$windows/syswow64/${src##*/}" ;; esac
+        [ -f "$dst" ] && [ ! -L "$dst" ] && cmp -s "$src" "$dst" &&
+            cp -c -p "$src" "$dst.clone" 2>/dev/null && mv -f "$dst.clone" "$dst"
+    done
+    rm -f "$windows"/system32/*.clone "$windows"/syswow64/*.clone
+}
+
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
     mkdir -p "$WINEPREFIX"
     echo "Creating prefix in $WINEPREFIX" >&2
     WINEDLLOVERRIDES="mscoree,mshtml=;$WINEDLLOVERRIDES" "$wine" wineboot -i
     "$wineserver" -w
+    share_with_runtime
 elif [ "$dist/share/wine/wine.inf" -nt "$WINEPREFIX/.update-timestamp" ]; then
     echo "Updating prefix in $WINEPREFIX" >&2
     WINEDLLOVERRIDES="mscoree,mshtml=;$WINEDLLOVERRIDES" "$wine" wineboot -u
     "$wineserver" -w
+    share_with_runtime
 fi
 
-windows="$WINEPREFIX/drive_c/windows"
-cp -f "$dist/lib/wine/dxvk/x86_64-windows/"*.dll "$windows/system32/"
-cp -f "$dist/lib/wine/dxvk/i386-windows/"*.dll "$windows/syswow64/"
+# Clones where the file system allows, copies otherwise
+install_dlls() {
+    cp -c -f "$@" 2>/dev/null || cp -f "$@"
+}
+install_dlls "$dist/lib/wine/dxvk/x86_64-windows/"*.dll "$windows/system32/"
+install_dlls "$dist/lib/wine/dxvk/i386-windows/"*.dll "$windows/syswow64/"
 # Direct3D 12 through vkd3d-proton, 64-bit only; its shader cache stays in
 # the prefix instead of the game's working directory
 if [ -d "$dist/lib/wine/vkd3d-proton/x86_64-windows" ]; then
-    cp -f "$dist/lib/wine/vkd3d-proton/x86_64-windows/"*.dll "$windows/system32/"
+    install_dlls "$dist/lib/wine/vkd3d-proton/x86_64-windows/"*.dll "$windows/system32/"
 fi
 export VKD3D_SHADER_CACHE_PATH="${VKD3D_SHADER_CACHE_PATH-$WINEPREFIX}"
 
