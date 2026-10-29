@@ -239,7 +239,8 @@ def test_game(game, runtime, seconds, out, tool):
             alive = any(exe_name in p.lower() for p in processes())
             window, pid, area = game_window(tool)
             if window:
-                result["window_area"] = area
+                # The game window may be off screen for a moment, as when it changes mode
+                result["window_area"] = max(result.get("window_area", 0), area)
                 bring_to_front(pid)
                 result["window"] = True
                 if subprocess.run(["/usr/sbin/screencapture", "-x", "-l", window, shots]).returncode == 0:
