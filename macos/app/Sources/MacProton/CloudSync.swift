@@ -309,13 +309,42 @@ enum CloudSync {
             }
         }
 
-        for (file, local) in plan.downloads {
-            let data = try await SteamCloudService.download(plan.connection, appID: appID, path: file.path)
-            try fm.createDirectory(at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: local, options: .atomic)
-            try? fm.setAttributes([.modificationDate: file.timestamp], ofItemAtPath: local.path)
-            plan.state.files[file.path.lowercased()] = SyncedFile(path: file.path, sha: file.sha)
-            summary.downloaded += 1
+        // The addresses come one by one over the connection, the files in
+        // parallel; what arrived counts as synced even if the rest does not
+        do {
+            var index = 0
+            while index < plan.downloads.count {
+                try Task.checkCancellation()
+                let chunk = Array(plan.downloads[index..<min(index + 32, plan.downloads.count)])
+                index += chunk.count
+                var tickets: [SteamCloudService.DownloadTicket] = []
+                for (file, _) in chunk {
+                    tickets.append(try await SteamCloudService.ticket(plan.connection, appID: appID, path: file.path))
+                }
+                try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+                    var next = 0
+                    func addNext() {
+                        let i = next
+                        next += 1
+                        let ticket = tickets[i]
+                        group.addTask { (i, try await SteamCloudService.fetch(ticket)) }
+                    }
+                    for _ in 0..<min(8, tickets.count) { addNext() }
+                    while let (i, data) = try await group.next() {
+                        let (file, local) = chunk[i]
+                        try fm.createDirectory(at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try data.write(to: local, options: .atomic)
+                        try? fm.setAttributes([.modificationDate: file.timestamp], ofItemAtPath: local.path)
+                        plan.state.files[file.path.lowercased()] = SyncedFile(path: file.path, sha: file.sha)
+                        summary.downloaded += 1
+                        if next < tickets.count { addNext() }
+                    }
+                }
+                try saveState(plan.state, appID: appID)
+            }
+        } catch {
+            try? saveState(plan.state, appID: appID)
+            throw error
         }
         for (path, local) in plan.localDeletes {
             try? fm.removeItem(at: local)

@@ -34,6 +34,8 @@ final class Runner: ObservableObject {
     @Published var cloudFailure: CloudFailurePrompt?
     /// Games whose cloud saves all came into the prefix before this start
     private var cloudPulled: Set<Int> = []
+    /// The start of a game or the upload after it, which stop() cancels
+    private var syncTasks: [Int: Task<Void, Never>] = [:]
 
     static var syncSaves: Bool { UserDefaults.standard.object(forKey: "syncSaves") as? Bool ?? true }
 
@@ -89,7 +91,8 @@ final class Runner: ObservableObject {
         }
 
         running.insert(game.appID)
-        Task {
+        syncTasks[game.appID] = Task {
+            defer { syncTasks[game.appID] = nil }
             let prefix = prefix(of: game)
             if !FileManager.default.fileExists(atPath: prefix.appendingPathComponent("system.reg").path) {
                 preparing[game.appID] = "Richte Wine ein …"
@@ -106,6 +109,10 @@ final class Runner: ObservableObject {
                     running.remove(game.appID)
                     return
                 }
+            }
+            guard !Task.isCancelled else {
+                running.remove(game.appID)
+                return
             }
             launch(game)
         }
@@ -141,6 +148,8 @@ final class Runner: ObservableObject {
             }
             return true
         } catch {
+            // Stopped from the game card: the files that came are kept
+            if Task.isCancelled { return false }
             return await withCheckedContinuation { continuation in
                 cloudFailure = CloudFailurePrompt(game: game, message: error.localizedDescription) { continuation.resume(returning: $0) }
             }
@@ -160,7 +169,11 @@ final class Runner: ObservableObject {
             }
             _ = try await CloudSync.apply(plan, resolving: resolution)
         } catch {
-            lastError = "Die Spielstände von \(game.name) konnten nicht in die Steam Cloud geladen werden: \(error.localizedDescription) Sie bleiben auf diesem Mac und gehen nach dem nächsten Spielen mit hoch."
+            if Task.isCancelled {
+                notice = "Hochladen der Spielstände von \(game.name) abgebrochen. Sie bleiben auf diesem Mac und gehen nach dem nächsten Spielen mit hoch."
+            } else {
+                lastError = "Die Spielstände von \(game.name) konnten nicht in die Steam Cloud geladen werden: \(error.localizedDescription) Sie bleiben auf diesem Mac und gehen nach dem nächsten Spielen mit hoch."
+            }
         }
     }
 
@@ -277,8 +290,13 @@ final class Runner: ObservableObject {
                 }
                 if CloudSync.applies(to: game) {
                     self.preparing[appID] = "Lade Spielstände in die Steam Cloud …"
-                    await self.waitForPrefix(game)
-                    await self.syncCloudAfterExit(game)
+                    let upload = Task {
+                        await self.waitForPrefix(game)
+                        await self.syncCloudAfterExit(game)
+                    }
+                    self.syncTasks[appID] = upload
+                    await upload.value
+                    self.syncTasks[appID] = nil
                     self.preparing[appID] = nil
                 }
                 self.running.remove(appID)
@@ -333,6 +351,8 @@ final class Runner: ObservableObject {
 
     /// Ends the game and all Wine processes of its prefix.
     func stop(_ game: Game) {
+        // Also ends a cloud sync before the start or after the game
+        if preparing[game.appID] != nil { syncTasks[game.appID]?.cancel() }
         let server = Process()
         server.executableURL = Paths.runtime.appendingPathComponent("files/bin/wineserver")
         server.arguments = ["-k"]

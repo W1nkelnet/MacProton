@@ -266,8 +266,16 @@ enum SteamCloudService {
 
     static func sha1(_ data: Data) -> String { hex(Data(Insecure.SHA1.hash(data: data))) }
 
-    /// Downloads a file and checks it against the SHA-1 the cloud has for it.
-    static func download(_ connection: SteamConnection, appID: Int, path: String) async throws -> Data {
+    /// Where to fetch a file from, as the cloud tells it
+    struct DownloadTicket {
+        var path: String
+        var request: URLRequest
+        var fileSize: Int
+        var rawSize: Int
+        var sha: String
+    }
+
+    static func ticket(_ connection: SteamConnection, appID: Int, path: String) async throws -> DownloadTicket {
         var request = ProtoWriter()
         request.uint(1, UInt64(appID))
         request.string(2, path)
@@ -283,15 +291,26 @@ enum SteamCloudService {
             let header = try ProtoMessage(h)
             if let name = header.string(1), let value = header.string(2) { http.setValue(value, forHTTPHeaderField: name) }
         }
-        let (data, response) = try await URLSession.shared.data(for: http)
+        return DownloadTicket(path: path, request: http, fileSize: Int(r.uint(2) ?? 0), rawSize: Int(r.uint(3) ?? 0),
+                              sha: hex(r.bytes(4) ?? Data()))
+    }
+
+    /// Fetches a file over HTTP, which needs no connection to Steam's
+    /// servers and so can run in parallel, and checks its SHA-1.
+    static func fetch(_ ticket: DownloadTicket) async throws -> Data {
+        let (data, response) = try await URLSession.shared.data(for: ticket.request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else { throw SteamConnection.Failure(description: "Download von \(path): HTTP \(status)") }
-        let fileSize = Int(r.uint(2) ?? 0), rawSize = Int(r.uint(3) ?? 0)
-        let raw = (fileSize != rawSize && rawSize > 0) ? try unzipSingle(data, rawSize: rawSize) : data
-        guard sha1(raw) == hex(r.bytes(4) ?? Data()) else {
-            throw SteamConnection.Failure(description: "\(path) kam beschädigt an (SHA-1 weicht ab).")
+        guard status == 200 else { throw SteamConnection.Failure(description: "Download von \(ticket.path): HTTP \(status)") }
+        let raw = (ticket.fileSize != ticket.rawSize && ticket.rawSize > 0) ? try unzipSingle(data, rawSize: ticket.rawSize) : data
+        guard sha1(raw) == ticket.sha else {
+            throw SteamConnection.Failure(description: "\(ticket.path) kam beschädigt an (SHA-1 weicht ab).")
         }
         return raw
+    }
+
+    /// Downloads a file and checks it against the SHA-1 the cloud has for it.
+    static func download(_ connection: SteamConnection, appID: Int, path: String) async throws -> Data {
+        try await fetch(ticket(connection, appID: appID, path: path))
     }
 
     struct Upload {
