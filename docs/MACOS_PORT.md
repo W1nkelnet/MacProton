@@ -14,8 +14,9 @@ Stand der Komponenten:
 Khronos hat MoltenVK im Oktober 2026 abgekündigt und empfiehlt auf Apple
 Silicon KosmicKrisp, einen Vulkan-Treiber aus Mesa auf Metal 4 (macOS 26+).
 MacProton baut beide (`build.sh`-Schritt `kosmickrisp`, Mesa daa925c3 mit
-`macos/patches/mesa`) und wählt pro Spiel: Einstellungen und Startoptionen,
-`MACPROTON_VULKAN_DRIVER=kosmickrisp` in `run.sh`.
+`macos/patches/mesa`) und nimmt ab macOS 26 KosmicKrisp als Standard;
+MoltenVK bleibt wählbar in den Einstellungen und pro Spiel in den
+Startoptionen (`MACPROTON_VULKAN_DRIVER` in `run.sh`).
 
 KosmicKrisp für MacProton:
 - Gebaut werden die Werkzeuge `mesa_clc` und `kk_clc` nativ (Homebrew-LLVM, libclc, SPIRV-LLVM-Translator), der Treiber dann für x86_64 ohne LLVM, weil Wine unter Rosetta läuft
