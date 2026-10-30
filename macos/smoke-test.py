@@ -249,7 +249,7 @@ def test_game(game, runtime, seconds, out, tool):
                 break
         result["running"] = any(exe_name in p.lower() for p in processes())
         # Engines show their own crash reporter, the game process may live on
-        result["crash_reporter"] = any(re.search(r"crashreportclient|crashreporter", p, re.I)
+        result["crash_reporter"] = any(re.search(r"crashreport(client|er)\.exe", p, re.I)
                                        for p in processes())
         result["seconds"] = round(time.time() - started)
 
