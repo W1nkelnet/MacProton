@@ -131,10 +131,12 @@ enum VulkanDriver: String, Codable, CaseIterable {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
     }
 
-    /// The choice in the settings
+    /// The choice in the settings, KosmicKrisp where it runs: it matches
+    /// MoltenVK in the games tested and can do more, and Khronos deprecated
+    /// MoltenVK
     static var standard: VulkanDriver {
         let stored = UserDefaults.standard.string(forKey: "vulkanDriver").flatMap(VulkanDriver.init)
-        return stored ?? .moltenVK
+        return stored ?? (kosmicKrispAvailable ? .kosmicKrisp : .moltenVK)
     }
 
     /// Games that run on MoltenVK but not yet on KosmicKrisp, unless the

@@ -112,7 +112,7 @@ struct SettingsView: View {
                 }
                 .disabled(!VulkanDriver.kosmicKrispAvailable)
                 Text(VulkanDriver.kosmicKrispAvailable
-                     ? "Der Vulkan-Treiber unter Direct3D: MoltenVK oder KosmicKrisp aus Mesa, beide auf Metal. KosmicKrisp kann mehr (Feature Level 11_1, Geometry- und Tessellation-Shader nativ). Pro Spiel lässt sich das in den Startoptionen ändern."
+                     ? "Der Vulkan-Treiber unter Direct3D: KosmicKrisp aus Mesa oder MoltenVK, beide auf Metal. KosmicKrisp ist der Nachfolger und kann mehr (Stream Output, Feature Level 11_1, OpenGL 4.6 über Zink). Läuft ein Spiel damit nicht, wähle in seinen Startoptionen MoltenVK."
                      : "KosmicKrisp braucht macOS 26 oder neuer, MacProton nutzt MoltenVK.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Steam-Overlay in Windows-Spielen", isOn: $steamOverlay)
