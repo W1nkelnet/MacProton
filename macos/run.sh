@@ -59,9 +59,10 @@ if { [ "${MACPROTON_VULKAN_DRIVER-}" = kosmickrisp ] || [ "${MACPROTON_OPENGL-}"
     if [ "${MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST-}" = 1 ]; then
         export MESA_WSI_METAL_FILTER=${MESA_WSI_METAL_FILTER-nearest}
     fi
-    # KosmicKrisp keeps the MSL of its pipelines there (Mesa patch 0013);
-    # Horizon Zero Dawn alone fills about 1 GB, Mesa's default limit
-    export MESA_SHADER_CACHE_DIR="${MESA_SHADER_CACHE_DIR-$HOME/Library/Caches/MacProton/mesa-shader-cache}"
+    # KosmicKrisp keeps the MSL of its pipelines in mesa_shader_cache there
+    # (Mesa patch 0013); Horizon Zero Dawn alone fills about 1 GB, Mesa's
+    # default limit
+    export MESA_SHADER_CACHE_DIR="${MESA_SHADER_CACHE_DIR-$HOME/Library/Caches/MacProton}"
     export MESA_SHADER_CACHE_MAX_SIZE=${MESA_SHADER_CACHE_MAX_SIZE-4G}
 fi
 export WINEDLLOVERRIDES="steam.exe=b;mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b;${WINEDLLOVERRIDES-}"

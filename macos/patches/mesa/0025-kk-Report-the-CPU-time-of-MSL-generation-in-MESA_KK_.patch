@@ -1,0 +1,103 @@
+From bf654eed6ad88fb3db4c77dd54d289c14bbe7247 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 22:39:21 +0100
+Subject: [PATCH] kk: Report the CPU time of MSL generation in
+ MESA_KK_COMPILE_STATS
+
+The time summed over threads includes waiting for a core, which while
+Metal's compiler processes run is most of it: Rise of the Tomb Raider's
+benchmark summed 2700 s for 13600 pipelines. The CPU time of the
+compiling threads comes from thread_info, as CLOCK_THREAD_CPUTIME_ID
+reports almost nothing under Rosetta; up to the game's main menu it is
+about 6 ms per pipeline.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_shader.c | 35 ++++++++++++++++++++++++++----
+ 1 file changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 308a548..896abb9 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -35,6 +35,8 @@
+ #include "vk_util.h"
+ 
+ #include "util/os_time.h"
++
++#include <mach/mach.h>
+ #include "util/u_atomic.h"
+ #include "util/u_debug.h"
+ 
+@@ -44,7 +46,7 @@
+ static struct {
+    uint64_t start_ns, last_ns;
+    uint64_t compiled, cached;
+-   uint64_t msl_ns, library_ns, pipeline_ns;
++   uint64_t msl_ns, msl_cpu_ns, library_ns, pipeline_ns;
+ } kk_stats;
+ 
+ static bool
+@@ -62,6 +64,27 @@ kk_stats_now(void)
+    return kk_stats_enabled() ? os_time_get_nano() : 0;
+ }
+ 
++/* CPU time of the calling thread, which threads waiting for a core, as when
++ * Metal's compiler processes take them all, do not add to */
++static uint64_t
++kk_stats_cpu_now(void)
++{
++   if (!kk_stats_enabled())
++      return 0;
++
++   /* CLOCK_THREAD_CPUTIME_ID reports almost nothing under Rosetta */
++   thread_basic_info_data_t info;
++   mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
++   mach_port_t thread = mach_thread_self();
++   kern_return_t ret = thread_info(thread, THREAD_BASIC_INFO,
++                                   (thread_info_t)&info, &count);
++   mach_port_deallocate(mach_task_self(), thread);
++   if (ret != KERN_SUCCESS)
++      return 0;
++   return (info.user_time.seconds + info.system_time.seconds) * 1000000000ull +
++          (info.user_time.microseconds + info.system_time.microseconds) * 1000ull;
++}
++
+ static void
+ kk_stats_add(uint64_t *counter, uint64_t start)
+ {
+@@ -98,10 +121,11 @@ kk_stats_report(void)
+ 
+    fprintf(stderr,
+            "kk: %.0f s: %" PRIu64 " pipelines compiled, %" PRIu64
+-           " from cache; MSL %.1f s, libraries %.1f s, pipelines %.1f s\n",
++           " from cache; MSL %.1f s (CPU %.1f s), libraries %.1f s, pipelines"
++           " %.1f s\n",
+            (now - kk_stats.start_ns) / 1e9, kk_stats.compiled, kk_stats.cached,
+-           kk_stats.msl_ns / 1e9, kk_stats.library_ns / 1e9,
+-           kk_stats.pipeline_ns / 1e9);
++           kk_stats.msl_ns / 1e9, kk_stats.msl_cpu_ns / 1e9,
++           kk_stats.library_ns / 1e9, kk_stats.pipeline_ns / 1e9);
+ }
+ 
+ static const nir_shader_compiler_options *
+@@ -1928,6 +1952,7 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+ 
+    enum kk_feature_key features = kk_make_feature_key(enabled_features);
+    uint64_t msl_start = kk_stats_now();
++   uint64_t msl_cpu_start = kk_stats_cpu_now();
+ 
+    /* Vulkan doesn't enforce a fragment shader to build pipelines. We may need
+     * to create one, and a GS for transform feedback. */
+@@ -2052,6 +2077,8 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+    }
+ 
+    kk_stats_add(&kk_stats.msl_ns, msl_start);
++   if (kk_stats_enabled())
++      p_atomic_add(&kk_stats.msl_cpu_ns, kk_stats_cpu_now() - msl_cpu_start);
+    p_atomic_inc(&kk_stats.compiled);
+ 
+    /* Compile pipeline:
+-- 
+2.56.0
+

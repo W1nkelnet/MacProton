@@ -1,0 +1,619 @@
+From d014ae83fce42d24ab0a7100b14ee894ad74cdfe Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 21:15:42 +0100
+Subject: [PATCH] kk: Read zeroed textures through null descriptors
+
+Every image and texture access through a descriptor that may be null was
+wrapped in a branch that skips it and yields zero. In shaders reading
+thousands of textures the branches dominate the MSL: Horizon Zero Dawn's
+largest compute shader has 5423 of them on one descriptor, and Metal's
+compiler took 14.4 s for it, 2.3 s without any null handling.
+
+The device now has zeroed 1x1 textures of every texture type, for float,
+int and uint, and the root descriptor table the address of their resource
+IDs. Texel reads (samples without depth comparison, fetches, gathers and
+image loads) select that address for a null descriptor and need no
+branch. Size queries, writes, atomics, depth comparisons, sparse and
+multisampled accesses keep the branch. A zeroed texture differs from a
+null descriptor only where the sampler returns its border color.
+
+This replaces MESA_KK_NULL_IMAGE_SELECT, which read through the null
+resource ID and selected zero: it compiled faster, but slowed Medieval
+Dynasty from 22 to 15-20 fps. MESA_KK_NULL_TEXTURES=0 branches as before.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c        |   5 +
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h        |   3 +
+ src/kosmickrisp/vulkan/kk_device.c            |   7 +
+ src/kosmickrisp/vulkan/kk_device.h            |   2 +
+ .../vulkan/kk_nir_lower_null_images.c         | 119 +++++++++++------
+ src/kosmickrisp/vulkan/kk_null_textures.c     | 123 ++++++++++++++++++
+ src/kosmickrisp/vulkan/kk_null_textures.h     |  89 +++++++++++++
+ src/kosmickrisp/vulkan/kk_physical_device.c   |   6 +-
+ src/kosmickrisp/vulkan/kk_physical_device.h   |   8 +-
+ src/kosmickrisp/vulkan/kk_shader.c            |   2 +-
+ src/kosmickrisp/vulkan/kk_shader.h            |   2 +-
+ src/kosmickrisp/vulkan/meson.build            |   2 +
+ 12 files changed, 322 insertions(+), 46 deletions(-)
+ create mode 100644 src/kosmickrisp/vulkan/kk_null_textures.c
+ create mode 100644 src/kosmickrisp/vulkan/kk_null_textures.h
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index 0476222..cdb5bd9 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -7,6 +7,7 @@
+ 
+ #include "kk_cmd_buffer.h"
+ 
++#include "kk_bo.h"
+ #include "kk_buffer.h"
+ #include "kk_cmd_pool.h"
+ #include "kk_descriptor_set_layout.h"
+@@ -217,6 +218,10 @@ kk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
+    cmd->one_time_submit =
+       pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+ 
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   cmd->state.gfx.descriptors.root.null_textures = dev->null_textures.bo->gpu;
++   cmd->state.cs.descriptors.root.null_textures = dev->null_textures.bo->gpu;
++
+    /* vk_command_buffer_begin will reset the command buffer meaning the
+     * allocator may be returned to the pool. Request a new one. */
+    if (cmd->metal.allocator == NULL) {
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index ffab589..bde130b 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -60,6 +60,9 @@ struct kk_root_descriptor_table {
+ 
+    /* Start index in dynamic_buffers where each set starts */
+    uint8_t set_dynamic_buffer_start[KK_MAX_SETS];
++
++   /* Resource IDs of the device's null textures, see kk_null_textures.h */
++   uint64_t null_textures;
+ };
+ 
+ struct kk_descriptor_state {
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index b527a28..83773d0 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -326,6 +326,10 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+       goto fail_mem_cache;
+    }
+ 
++   result = kk_null_textures_init(dev, &dev->null_textures);
++   if (result != VK_SUCCESS)
++      goto fail_null_textures;
++
+    result = kk_device_init_meta(dev);
+    if (result != VK_SUCCESS)
+       goto fail_meta_init;
+@@ -360,6 +364,8 @@ fail_query_table:
+ fail_meta:
+    kk_device_finish_meta(dev);
+ fail_meta_init:
++   kk_null_textures_finish(dev, &dev->null_textures);
++fail_null_textures:
+    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+ fail_mem_cache:
+    if (dev->has_queue) {
+@@ -398,6 +404,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+    kk_device_finish_lib(dev);
+    kk_query_table_finish(dev, &dev->occlusion_queries);
+    kk_destroy_sampler_heap(dev, &dev->samplers);
++   kk_null_textures_finish(dev, &dev->null_textures);
+    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+ 
+    /* Geometry heap */
+diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
+index 9a908d1..c5dbc57 100644
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -10,6 +10,7 @@
+ 
+ #include "kk_private.h"
+ 
++#include "kk_null_textures.h"
+ #include "kk_query_table.h"
+ #include "kk_queue.h"
+ 
+@@ -87,6 +88,7 @@ struct kk_device {
+    struct vk_device_dispatch_table exposed_dispatch_table;
+ 
+    struct kk_sampler_heap samplers;
++   struct kk_null_textures null_textures;
+    struct kk_query_table occlusion_queries;
+ 
+    /* Track all heaps the user allocated so we can set them all as resident when
+diff --git a/src/kosmickrisp/vulkan/kk_nir_lower_null_images.c b/src/kosmickrisp/vulkan/kk_nir_lower_null_images.c
+index dc31dea..2d6b035 100644
+--- a/src/kosmickrisp/vulkan/kk_nir_lower_null_images.c
++++ b/src/kosmickrisp/vulkan/kk_nir_lower_null_images.c
+@@ -6,6 +6,8 @@
+  * Copyright 2026 Google LLC
+  * SPDX-License-Identifier: MIT
+  */
++#include "kk_cmd_buffer.h"
++#include "kk_null_textures.h"
+ #include "kk_shader.h"
+ 
+ #include "compiler/nir/nir.h"
+@@ -21,77 +23,120 @@ tex_handle_to_resource_id(nir_builder *b, nir_def *handle)
+    return nir_load_global_constant(b, 1, 64, intr->src[0].ssa);
+ }
+ 
+-static nir_def *
+-get_is_null(nir_builder *b, nir_instr *instr, nir_def **def, bool *reads_only)
++/* The source holding the texture handle of an access through a descriptor
++ * that may be null. Sets reads_texels when the access only reads texels, so
++ * that reading a zeroed texture instead gives the null descriptor's result. */
++static nir_src *
++get_handle_src(nir_instr *instr, nir_def **def, bool *reads_texels)
+ {
+    *def = NULL;
+-   *reads_only = false;
+-   nir_def *handle = NULL;
++   *reads_texels = false;
+ 
+    if (instr->type == nir_instr_type_intrinsic) {
+       nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+       switch (intr->intrinsic) {
+       case nir_intrinsic_bindless_image_load:
++         *reads_texels = true;
++         FALLTHROUGH;
+       case nir_intrinsic_bindless_image_sparse_load:
+       case nir_intrinsic_bindless_image_size:
+       case nir_intrinsic_bindless_image_samples:
+       case nir_intrinsic_bindless_image_levels:
+-         *reads_only = true;
+-         FALLTHROUGH;
+       case nir_intrinsic_bindless_image_store:
+       case nir_intrinsic_bindless_image_atomic:
+       case nir_intrinsic_bindless_image_atomic_swap:
+          if (nir_intrinsic_infos[intr->intrinsic].has_dest)
+             *def = &intr->def;
+-
+-         handle = intr->src[0].ssa;
+-         break;
++         return &intr->src[0];
+ 
+       default:
+-         break;
++         return NULL;
+       }
+    } else if (instr->type == nir_instr_type_tex) {
+       nir_tex_instr *tex = nir_instr_as_tex(instr);
+-      *def = &tex->def;
+-      *reads_only = true;
++      int idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
++      if (idx < 0)
++         return NULL;
+ 
+-      handle = nir_get_tex_src(tex, nir_tex_src_texture_handle);
++      *def = &tex->def;
++      switch (tex->op) {
++      case nir_texop_tex:
++      case nir_texop_txb:
++      case nir_texop_txl:
++      case nir_texop_txd:
++      case nir_texop_txf:
++      case nir_texop_tg4:
++         /* Depth comparisons against a zeroed texture need not give zero */
++         *reads_texels = !tex->is_shadow && !tex->is_sparse;
++         break;
++      default:
++         break;
++      }
++      return &tex->src[idx].src;
+    }
+ 
+-   if (!handle)
+-      return NULL;
++   return NULL;
++}
++
++/* Reads through a null descriptor read the device's zeroed texture of the
++ * same type instead, with no branch around them: branches make the MSL of
++ * shaders reading thousands of textures large and slow to compile, Horizon
++ * Zero Dawn's largest took 14.4 s in Metal's compiler with them and 2.3 s
++ * without any null handling. Selecting zero after reading through the null
++ * resource ID itself took 8.6 s, but Medieval Dynasty ran at 15-20 instead
++ * of 22 fps. A zeroed texture differs from a null descriptor only where the
++ * sampler returns its border color. */
++static bool
++redirect_to_null_texture(nir_builder *b, nir_src *handle_src,
++                         nir_def *is_null)
++{
++   nir_intrinsic_instr *load =
++      nir_instr_as_intrinsic(nir_def_instr(handle_src->ssa));
++   if (load->intrinsic != nir_intrinsic_load_texture_handle_kk)
++      return false;
+ 
+-   nir_def *resource_id = tex_handle_to_resource_id(b, handle);
+-   return nir_ieq_imm(b, resource_id, 0);
++   int index = kk_null_texture_index(nir_intrinsic_image_dim(load),
++                                     nir_intrinsic_image_array(load),
++                                     nir_intrinsic_dest_type(load));
++   if (index < 0)
++      return false;
++
++   nir_def *root = nir_load_buffer_ptr_kk(b, 1, 64, .binding = 0);
++   nir_def *null_textures = nir_load_global_constant(
++      b, 1, 64,
++      nir_iadd_imm(b, root,
++                   offsetof(struct kk_root_descriptor_table, null_textures)),
++      .align_mul = 8, .access = ACCESS_CAN_SPECULATE);
++   nir_def *addr = nir_bcsel(
++      b, is_null, nir_iadd_imm(b, null_textures, index * sizeof(uint64_t)),
++      load->src[0].ssa);
++
++   nir_intrinsic_instr *clone =
++      nir_instr_as_intrinsic(nir_instr_clone(b->shader, &load->instr));
++   nir_builder_instr_insert(b, &clone->instr);
++   nir_src_rewrite(&clone->src[0], addr);
++   nir_src_rewrite(handle_src, &clone->def);
++   return true;
+ }
+ 
+ static bool
+ lower(nir_builder *b, nir_instr *instr, void *data)
+ {
+-   const bool *select_reads = data;
++   const bool *null_textures = data;
+    b->cursor = nir_before_instr(instr);
+ 
+    nir_def *def;
+-   bool reads_only;
+-   nir_def *is_null = get_is_null(b, instr, &def, &reads_only);
+-
+-   if (!is_null)
++   bool reads_texels;
++   nir_src *handle_src = get_handle_src(instr, &def, &reads_texels);
++   if (!handle_src)
+       return false;
+ 
+-   /* With MESA_KK_NULL_IMAGE_SELECT a read of a null descriptor still
+-    * happens, and its result is replaced. A branch around every access makes
+-    * the MSL of shaders reading thousands of textures slower to compile,
+-    * Horizon Zero Dawn's largest by 40 %, but skips the reads: vkd3d-proton
+-    * binds many null descriptors, and Medieval Dynasty ran at 15-20 instead
+-    * of 22 fps with selects. Apple GPUs read through a null resource ID
+-    * without faulting on the M3. */
+-   if (*select_reads && reads_only && def) {
+-      b->cursor = nir_after_instr(instr);
+-      nir_def *zero = nir_imm_zero(b, def->num_components, def->bit_size);
+-      nir_def *result = nir_bcsel(b, is_null, zero, def);
+-      nir_def_rewrite_uses_after(def, result);
++   nir_def *is_null =
++      nir_ieq_imm(b, tex_handle_to_resource_id(b, handle_src->ssa), 0);
++
++   if (*null_textures && reads_texels &&
++       redirect_to_null_texture(b, handle_src, is_null))
+       return true;
+-   }
+ 
+    nir_def *zero = NULL;
+    nir_if *nif = nir_push_if(b, nir_inot(b, is_null));
+@@ -122,8 +167,8 @@ lower(nir_builder *b, nir_instr *instr, void *data)
+ }
+ 
+ bool
+-kk_nir_lower_null_images(nir_shader *shader, bool select_reads)
++kk_nir_lower_null_images(nir_shader *shader, bool null_textures)
+ {
+    return nir_shader_instructions_pass(shader, lower, nir_metadata_none,
+-                                       &select_reads);
++                                       &null_textures);
+ }
+diff --git a/src/kosmickrisp/vulkan/kk_null_textures.c b/src/kosmickrisp/vulkan/kk_null_textures.c
+new file mode 100644
+index 0000000..a3b826b
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_null_textures.c
+@@ -0,0 +1,123 @@
++/*
++ * Copyright 2026 MacProton contributors
++ * SPDX-License-Identifier: MIT
++ */
++#include "kk_null_textures.h"
++
++#include "kk_bo.h"
++#include "kk_device.h"
++#include "kk_image_layout.h"
++
++#include "kosmickrisp/bridge/mtl_bridge.h"
++#include "kosmickrisp/bridge/mtl_format.h"
++
++#include "util/u_math.h"
++
++static const enum mtl_texture_type null_texture_types[] = {
++   [KK_NULL_TEXTURE_1D] = MTL_TEXTURE_TYPE_1D,
++   [KK_NULL_TEXTURE_1D_ARRAY] = MTL_TEXTURE_TYPE_1D_ARRAY,
++   [KK_NULL_TEXTURE_2D] = MTL_TEXTURE_TYPE_2D,
++   [KK_NULL_TEXTURE_2D_ARRAY] = MTL_TEXTURE_TYPE_2D_ARRAY,
++   [KK_NULL_TEXTURE_3D] = MTL_TEXTURE_TYPE_3D,
++   [KK_NULL_TEXTURE_CUBE] = MTL_TEXTURE_TYPE_CUBE,
++   [KK_NULL_TEXTURE_CUBE_ARRAY] = MTL_TEXTURE_TYPE_CUBE_ARRAY,
++   [KK_NULL_TEXTURE_BUFFER] = MTL_TEXTURE_TYPE_TEXTURE_BUFFER,
++};
++
++/* In the order of kk_null_texture_index: float, int, uint */
++static const struct {
++   enum pipe_format pipe;
++   enum mtl_pixel_format mtl;
++} null_texture_formats[] = {
++   {PIPE_FORMAT_R8G8B8A8_UNORM, MTL_PIXEL_FORMAT_R8G8B8A8_UNORM},
++   {PIPE_FORMAT_R32G32B32A32_SINT, MTL_PIXEL_FORMAT_R32G32B32A32_SINT},
++   {PIPE_FORMAT_R32G32B32A32_UINT, MTL_PIXEL_FORMAT_R32G32B32A32_UINT},
++};
++
++static struct kk_image_layout
++null_texture_layout(unsigned index)
++{
++   const unsigned dim = index / 3, format = index % 3;
++   /* Read and write, since storage images are declared read_write when a
++    * shader also writes them; writes through null descriptors still branch */
++   return (struct kk_image_layout){
++      .width_px = 1u,
++      .height_px = 1u,
++      .depth_px = 1u,
++      .layers = 1u,
++      .type = null_texture_types[dim],
++      .sample_count_sa = 1u,
++      .levels = 1u,
++      .linear = dim == KK_NULL_TEXTURE_BUFFER,
++      .optimized_layout = false,
++      .usage = MTL_TEXTURE_USAGE_SHADER_READ | MTL_TEXTURE_USAGE_SHADER_WRITE,
++      .format = {.pipe = null_texture_formats[format].pipe,
++                 .mtl = null_texture_formats[format].mtl},
++      .linear_stride_B = 16u,
++   };
++}
++
++VkResult
++kk_null_textures_init(struct kk_device *dev,
++                      struct kk_null_textures *null_textures)
++{
++   /* The resource IDs, then the textures, all in zeroed memory: Metal
++    * textures placed in a heap without GPU-optimized contents read their
++    * texels from it as they are */
++   uint64_t offsets[KK_NULL_TEXTURE_COUNT];
++   uint64_t size_B = KK_NULL_TEXTURE_COUNT * sizeof(uint64_t);
++   for (unsigned i = 0; i < KK_NULL_TEXTURE_COUNT; i++) {
++      struct kk_image_layout layout = null_texture_layout(i);
++      uint64_t tex_size_B, align_B;
++      if (layout.type == MTL_TEXTURE_TYPE_TEXTURE_BUFFER) {
++         tex_size_B = 16u;
++         align_B = mtl_minimum_linear_texture_alignment_for_pixel_format(
++            dev->mtl_handle, layout.format.mtl);
++      } else {
++         mtl_heap_texture_size_and_align_with_descriptor(
++            dev->mtl_handle, &layout, &tex_size_B, &align_B);
++      }
++      offsets[i] = align64(size_B, align_B);
++      size_B = offsets[i] + tex_size_B;
++   }
++
++   VkResult result = kk_alloc_bo(dev, &dev->vk.base, size_B, 0u,
++                                 &null_textures->bo);
++   if (result != VK_SUCCESS)
++      return result;
++
++   struct kk_bo *bo = null_textures->bo;
++   memset(bo->cpu, 0, bo->size_B);
++   uint64_t *ids = bo->cpu;
++   for (unsigned i = 0; i < KK_NULL_TEXTURE_COUNT; i++) {
++      struct kk_image_layout layout = null_texture_layout(i);
++      mtl_texture *texture =
++         layout.type == MTL_TEXTURE_TYPE_TEXTURE_BUFFER
++            ? mtl_new_texture_with_descriptor_linear(bo->map, &layout,
++                                                     offsets[i])
++            : mtl_new_texture_with_descriptor(bo->mtl_handle, &layout,
++                                              offsets[i]);
++      if (!texture) {
++         kk_null_textures_finish(dev, null_textures);
++         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++      }
++      null_textures->textures[i] = texture;
++      ids[i] = mtl_texture_get_gpu_resource_id(texture);
++   }
++
++   return VK_SUCCESS;
++}
++
++void
++kk_null_textures_finish(struct kk_device *dev,
++                        struct kk_null_textures *null_textures)
++{
++   for (unsigned i = 0; i < KK_NULL_TEXTURE_COUNT; i++) {
++      if (null_textures->textures[i])
++         mtl_release(null_textures->textures[i]);
++      null_textures->textures[i] = NULL;
++   }
++   if (null_textures->bo)
++      kk_destroy_bo(dev, null_textures->bo);
++   null_textures->bo = NULL;
++}
+diff --git a/src/kosmickrisp/vulkan/kk_null_textures.h b/src/kosmickrisp/vulkan/kk_null_textures.h
+new file mode 100644
+index 0000000..85aa825
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_null_textures.h
+@@ -0,0 +1,89 @@
++/*
++ * Copyright 2026 MacProton contributors
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef KK_NULL_TEXTURES_H
++#define KK_NULL_TEXTURES_H 1
++
++#include "kosmickrisp/bridge/mtl_types.h"
++
++#include "compiler/nir/nir.h"
++
++#include "vulkan/vulkan_core.h"
++
++struct kk_bo;
++struct kk_device;
++
++/* Zeroed 1x1 textures, one per texture type and sample type. Reads through a
++ * null descriptor read one of these instead, see kk_nir_lower_null_images.
++ * Their resource IDs come first in the buffer object, in the order of
++ * kk_null_texture_index; the root descriptor table holds its address. */
++enum kk_null_texture_dim {
++   KK_NULL_TEXTURE_1D,
++   KK_NULL_TEXTURE_1D_ARRAY,
++   KK_NULL_TEXTURE_2D,
++   KK_NULL_TEXTURE_2D_ARRAY,
++   KK_NULL_TEXTURE_3D,
++   KK_NULL_TEXTURE_CUBE,
++   KK_NULL_TEXTURE_CUBE_ARRAY,
++   KK_NULL_TEXTURE_BUFFER,
++   KK_NULL_TEXTURE_DIM_COUNT,
++};
++
++#define KK_NULL_TEXTURE_COUNT (KK_NULL_TEXTURE_DIM_COUNT * 3)
++
++struct kk_null_textures {
++   struct kk_bo *bo;
++   mtl_texture *textures[KK_NULL_TEXTURE_COUNT];
++};
++
++/* Returns -1 for textures without a null texture: multisampled ones and
++ * sample types other than 32-bit float, int and uint, and 16-bit float */
++static inline int
++kk_null_texture_index(enum glsl_sampler_dim dim, bool array,
++                      nir_alu_type type)
++{
++   int d;
++   switch (dim) {
++   case GLSL_SAMPLER_DIM_1D:
++      d = array ? KK_NULL_TEXTURE_1D_ARRAY : KK_NULL_TEXTURE_1D;
++      break;
++   case GLSL_SAMPLER_DIM_2D:
++      d = array ? KK_NULL_TEXTURE_2D_ARRAY : KK_NULL_TEXTURE_2D;
++      break;
++   case GLSL_SAMPLER_DIM_3D:
++      if (array)
++         return -1;
++      d = KK_NULL_TEXTURE_3D;
++      break;
++   case GLSL_SAMPLER_DIM_CUBE:
++      d = array ? KK_NULL_TEXTURE_CUBE_ARRAY : KK_NULL_TEXTURE_CUBE;
++      break;
++   case GLSL_SAMPLER_DIM_BUF:
++      if (array)
++         return -1;
++      d = KK_NULL_TEXTURE_BUFFER;
++      break;
++   default:
++      return -1;
++   }
++
++   switch (type) {
++   case nir_type_float32:
++   case nir_type_float16:
++      return d * 3;
++   case nir_type_int32:
++      return d * 3 + 1;
++   case nir_type_uint32:
++      return d * 3 + 2;
++   default:
++      return -1;
++   }
++}
++
++VkResult kk_null_textures_init(struct kk_device *dev,
++                               struct kk_null_textures *null_textures);
++void kk_null_textures_finish(struct kk_device *dev,
++                             struct kk_null_textures *null_textures);
++
++#endif /* KK_NULL_TEXTURES_H */
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index e5627b1..4894637 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -986,7 +986,7 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+     * mix. Workarounds use bits up to 18. */
+    const uint64_t compiler_flags =
+       pdev->settings.disabled_workarounds |
+-      (pdev->settings.null_image_select ? BITFIELD64_BIT(63) : 0);
++      (pdev->settings.null_textures ? 0 : BITFIELD64_BIT(63));
+    _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
+ 
+    unsigned char blake3[BLAKE3_KEY_LEN];
+@@ -1115,8 +1115,8 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
+       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
+    settings->light_barriers =
+       debug_get_bool_option("MESA_KK_LIGHT_BARRIERS", false);
+-   settings->null_image_select =
+-      debug_get_bool_option("MESA_KK_NULL_IMAGE_SELECT", false);
++   settings->null_textures =
++      debug_get_bool_option("MESA_KK_NULL_TEXTURES", true);
+ 
+    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
+    const char *all_workarounds = "all";
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.h b/src/kosmickrisp/vulkan/kk_physical_device.h
+index 3ee7d25..52ee5a5 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -56,10 +56,10 @@ struct kk_env_settings {
+    /* MESA_KK_LIGHT_BARRIERS: render encoders end without a barrier, the
+     * application's barriers wait at the start of the next encoder */
+    bool light_barriers;
+-   /* MESA_KK_NULL_IMAGE_SELECT: reads of images and textures through null
+-    * descriptors happen, and select zero, instead of branching around every
+-    * access, see kk_nir_lower_null_images */
+-   bool null_image_select;
++   /* Reads of images and textures through null descriptors read zeroed
++    * textures instead of branching around every access, see
++    * kk_nir_lower_null_images. MESA_KK_NULL_TEXTURES=0 branches. */
++   bool null_textures;
+ };
+ 
+ struct kk_physical_device {
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 2de383b..3148820 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -882,7 +882,7 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
+ 
+    if (features & KK_FEAT_NULL_DESCRIPTOR)
+       NIR_PASS(_, nir, kk_nir_lower_null_images,
+-               pdev->settings.null_image_select);
++               pdev->settings.null_textures);
+ 
+    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+ }
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index 7cdba5e..5ee4d70 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -202,7 +202,7 @@ kk_nir_lower_descriptors(nir_shader *nir,
+ bool kk_nir_add_device_barrier_workaround(nir_shader *nir);
+ 
+ bool kk_nir_lower_poly(struct nir_shader *nir);
+-bool kk_nir_lower_null_images(nir_shader *nir, bool select_reads);
++bool kk_nir_lower_null_images(nir_shader *nir, bool null_textures);
+ 
+ bool kk_nir_lower_textures(nir_shader *nir);
+ 
+diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+index f82e80f..686504b 100644
+--- a/src/kosmickrisp/vulkan/meson.build
++++ b/src/kosmickrisp/vulkan/meson.build
+@@ -96,6 +96,8 @@ kk_files = files(
+   'kk_nir_lower_textures.c',
+   'kk_nir_lower_vbo.h',
+   'kk_nir_lower_vbo.c',
++  'kk_null_textures.h',
++  'kk_null_textures.c',
+   'kk_physical_device.h',
+   'kk_physical_device.c',
+   'kk_query_pool.h',
+-- 
+2.56.0
+

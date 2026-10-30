@@ -1,0 +1,132 @@
+From 9edaef1d5e4f851a7297a9077313735470324418 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 22:39:21 +0100
+Subject: [PATCH] kk: Print MSL without vsnprintf for its common conversions
+
+nir_to_msl prints every SSA name, comma and parenthesis through
+_mesa_string_buffer_printf, and a profile of Rise of the Tomb Raider's
+shader compiles under Rosetta found vsnprintf in half of nir_to_msl's
+samples. msl_printf appends text and %d, %i, %u, %s and %c itself and
+leaves other formats to vsnprintf. The MSL stays the same byte for byte
+(Kebab Chefs, 48 sources). Up to Rise of the Tomb Raider's main menu,
+2007 pipelines without the disk cache, MSL generation took 12.3 instead
+of 13.6 s of CPU time and 25.5 instead of 29.7 s summed over threads.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/compiler/msl_private.h |  7 ++-
+ src/kosmickrisp/compiler/nir_to_msl.c  | 74 ++++++++++++++++++++++++++
+ 2 files changed, 79 insertions(+), 2 deletions(-)
+
+diff --git a/src/kosmickrisp/compiler/msl_private.h b/src/kosmickrisp/compiler/msl_private.h
+index 75da653..9579c6a 100644
+--- a/src/kosmickrisp/compiler/msl_private.h
++++ b/src/kosmickrisp/compiler/msl_private.h
+@@ -30,14 +30,17 @@ struct nir_to_msl_ctx {
+    struct io_slot_info outputs_info[NUM_TOTAL_VARYING_SLOTS];
+ };
+ 
++void msl_printf(struct _mesa_string_buffer *text, const char *fmt, ...)
++   PRINTFLIKE(2, 3);
++
+ #define P_IND(ctx, ...)                                                        \
+    do {                                                                        \
+       for (unsigned i = 0; i < (ctx)->indentlevel; i++)                        \
+          _mesa_string_buffer_append((ctx)->text, "    ");                      \
+-      _mesa_string_buffer_printf((ctx)->text, __VA_ARGS__);                    \
++      msl_printf((ctx)->text, __VA_ARGS__);                                    \
+    } while (0);
+ 
+-#define P(ctx, ...) _mesa_string_buffer_printf((ctx)->text, __VA_ARGS__);
++#define P(ctx, ...) msl_printf((ctx)->text, __VA_ARGS__);
+ 
+ #define P_INDENT(ctx)                                                          \
+    do {                                                                        \
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index ff986dd..aa071bf 100644
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -9,6 +9,80 @@
+ #include "nir.h"
+ #include "nir_builder.h"
+ 
++#include <stdarg.h>
++
++static void
++append_uint(struct _mesa_string_buffer *text, unsigned value)
++{
++   char digits[10];
++   unsigned n = 0;
++   do {
++      digits[sizeof(digits) - ++n] = '0' + value % 10u;
++      value /= 10u;
++   } while (value);
++   _mesa_string_buffer_append_len(text, digits + sizeof(digits) - n, n);
++}
++
++/* _mesa_string_buffer_printf for the conversions the MSL is made of, %d, %i,
++ * %u, %s, %c and %%, without vsnprintf, which took half of nir_to_msl's time
++ * under Rosetta. Other formats still go to vsnprintf. */
++void
++msl_printf(struct _mesa_string_buffer *text, const char *fmt, ...)
++{
++   va_list args;
++   for (const char *p = fmt; *p; p++) {
++      if (*p != '%')
++         continue;
++      p++;
++      if (*p != 'd' && *p != 'i' && *p != 'u' && *p != 's' && *p != 'c' &&
++          *p != '%') {
++         va_start(args, fmt);
++         _mesa_string_buffer_vprintf(text, fmt, args);
++         va_end(args);
++         return;
++      }
++   }
++
++   va_start(args, fmt);
++   const char *start = fmt;
++   for (const char *p = fmt;; p++) {
++      if (*p && *p != '%')
++         continue;
++      if (p > start)
++         _mesa_string_buffer_append_len(text, start, p - start);
++      if (!*p)
++         break;
++
++      p++;
++      switch (*p) {
++      case 'd':
++      case 'i': {
++         int value = va_arg(args, int);
++         if (value < 0)
++            _mesa_string_buffer_append_char(text, '-');
++         append_uint(text, value < 0 ? 0u - (unsigned)value : (unsigned)value);
++         break;
++      }
++      case 'u':
++         append_uint(text, va_arg(args, unsigned));
++         break;
++      case 's': {
++         const char *s = va_arg(args, const char *);
++         _mesa_string_buffer_append(text, s ? s : "(null)");
++         break;
++      }
++      case 'c':
++         _mesa_string_buffer_append_char(text, (char)va_arg(args, int));
++         break;
++      default:
++         _mesa_string_buffer_append_char(text, '%');
++         break;
++      }
++      start = p + 1;
++   }
++   va_end(args);
++}
++
+ static const char *
+ get_stage_string(mesa_shader_stage stage)
+ {
+-- 
+2.56.0
+

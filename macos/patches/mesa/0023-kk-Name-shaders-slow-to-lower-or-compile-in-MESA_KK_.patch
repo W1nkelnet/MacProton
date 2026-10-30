@@ -1,0 +1,70 @@
+From d7db6082d60c254d432fd5df5cb613c559c7eedf Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 21:15:55 +0100
+Subject: [PATCH] kk: Name shaders slow to lower or compile in
+ MESA_KK_COMPILE_STATS
+
+Steps taking longer than a second print the stage and time, which found
+Rise of the Tomb Raider's tessellation control shaders taking 12 s each,
+mostly waiting for the CPU while Metal's compiler processes ran.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_shader.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 68765bb..308a548 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -69,6 +69,20 @@ kk_stats_add(uint64_t *counter, uint64_t start)
+       p_atomic_add(counter, os_time_get_nano() - start);
+ }
+ 
++/* Names a shader whose step took more than a second */
++static void
++kk_stats_slow(const char *step, mesa_shader_stage stage, uint64_t start,
++              uint32_t msl_size)
++{
++   if (!kk_stats_enabled())
++      return;
++
++   uint64_t ns = os_time_get_nano() - start;
++   if (ns > 1000000000ull)
++      fprintf(stderr, "kk: %s of a %s shader took %.1f s, %u bytes of MSL\n",
++              step, _mesa_shader_stage_to_abbrev(stage), ns / 1e9, msl_size);
++}
++
+ static void
+ kk_stats_report(void)
+ {
+@@ -1950,9 +1964,11 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+                                    VK_SHADER_STAGE_GEOMETRY_BIT)) ||
+          (int32_t)i == xfb_last;
+ 
++      uint64_t lower_start = kk_stats_now();
+       msl_preprocess_nir_workarounds(nir, pdev->settings.disabled_workarounds);
+       kk_lower_nir(dev, nir, emulated_stage, info->robustness,
+                    info->set_layout_count, info->set_layouts, state, features);
++      kk_stats_slow("lowering", nir->info.stage, lower_start, 0);
+ 
+       if (nir->info.stage == MESA_SHADER_VERTEX)
+          vertex_robustness = info->robustness;
+@@ -2010,9 +2026,14 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+ 
+    for (uint32_t i = 0; i < total_shaders; i++) {
+       struct kk_shader *prev_stage = i > 0 ? shaders[i - 1] : NULL;
++      const mesa_shader_stage stage = nir_shaders[i]->info.stage;
++      uint64_t compile_start = kk_stats_now();
+       result =
+          kk_compile_shader(dev, nir_shaders[i], prev_stage, vertex_robustness,
+                            state, pAllocator, &shaders[i]);
++      if (result == VK_SUCCESS)
++         kk_stats_slow("compile", stage, compile_start,
++                       shaders[i]->msl_data[stage].code_size);
+ 
+       if (result != VK_SUCCESS) {
+          /* Clean up all the shaders before this point */
+-- 
+2.56.0
+

@@ -1,0 +1,84 @@
+From eb33bd960f5497b963ecce52c3d0d2d20e8c9c9f Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 21:15:55 +0100
+Subject: [PATCH] kk: Keep one disk cache for the process
+
+Rise of the Tomb Raider's launcher hung in vkDestroyInstance: the disk
+cache's destroy waited for its write threads, three of which never picked
+up the barrier jobs util_queue_finish queued for them. Launchers create
+and destroy several instances while starting. The disk cache now serves
+every physical device of the process and lives until it exits; its
+settings come from the environment and are the same for each.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_physical_device.c | 32 +++++++++++++++------
+ 1 file changed, 23 insertions(+), 9 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 4894637..7ee3274 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -22,6 +22,7 @@
+ #include "util/disk_cache.h"
+ #include "util/hex.h"
+ #include "util/mesa-blake3.h"
++#include "util/simple_mtx.h"
+ #include "git_sha1.h"
+ 
+ #include "vulkan/wsi/wsi_common.h"
+@@ -971,6 +972,11 @@ kk_get_device_properties(
+             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
+ }
+ 
++#ifdef ENABLE_SHADER_CACHE
++static struct disk_cache *kk_disk_cache;
++static simple_mtx_t kk_disk_cache_lock = SIMPLE_MTX_INITIALIZER;
++#endif
++
+ static void
+ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+ {
+@@ -998,11 +1004,21 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+ 
+ #ifdef ENABLE_SHADER_CACHE
+    /* Keeps the MSL of each pipeline across runs, so later starts skip the
+-    * translation from SPIR-V. Metal caches the libraries compiled from it. */
+-   char timestamp[2 * VK_UUID_SIZE + 1];
+-   mesa_bytes_to_hex(timestamp, instance->driver_build_sha, VK_UUID_SIZE);
+-   pdev->vk.disk_cache =
+-      disk_cache_create("kosmickrisp", timestamp, compiler_flags);
++    * translation from SPIR-V. Metal caches the libraries compiled from it.
++    * One cache serves the whole process and lives until it exits: launchers
++    * create and destroy instances as they start, and disk_cache_destroy
++    * once waited forever for the cache's write threads when Rise of the Tomb
++    * Raider's launcher destroyed its instance. The settings in the flags come
++    * from the environment and are the same for every instance. */
++   simple_mtx_lock(&kk_disk_cache_lock);
++   if (!kk_disk_cache) {
++      char timestamp[2 * VK_UUID_SIZE + 1];
++      mesa_bytes_to_hex(timestamp, instance->driver_build_sha, VK_UUID_SIZE);
++      kk_disk_cache =
++         disk_cache_create("kosmickrisp", timestamp, compiler_flags);
++   }
++   pdev->vk.disk_cache = kk_disk_cache;
++   simple_mtx_unlock(&kk_disk_cache_lock);
+ #endif
+ }
+ 
+@@ -1010,10 +1026,8 @@ static void
+ kk_physical_device_free_disk_cache(struct kk_physical_device *pdev)
+ {
+ #ifdef ENABLE_SHADER_CACHE
+-   if (pdev->vk.disk_cache) {
+-      disk_cache_destroy(pdev->vk.disk_cache);
+-      pdev->vk.disk_cache = NULL;
+-   }
++   /* Kept for the process, see kk_physical_device_init_pipeline_cache */
++   pdev->vk.disk_cache = NULL;
+ #else
+    assert(pdev->vk.disk_cache == NULL);
+ #endif
+-- 
+2.56.0
+
