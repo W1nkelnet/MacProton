@@ -25,7 +25,19 @@ KosmicKrisp für MacProton:
 - Mesa-Patches 0002 und 0003: Transform Feedback (`VK_EXT_transform_feedback`), also Stream Output für D3D11 und D3D12 und die Grundlage für OpenGL über Zink. Mesas `poly`-Bibliothek, mit der KosmicKrisp Geometry Shader nachbildet, schreibt die Vertices schon aus dem Raster-Shader des GS; der Treiber behält jetzt ihre Zähl- und Pre-GS-Programme, führt sie bei aktivem Transform Feedback vor dem GS aus und hat Puffer-Bindungen, Zähler und `vkCmdDrawIndirectByteCountEXT`. Fängt der Vertex- oder Tessellation-Shader ab (vkd3d, Zink), hängt der Treiber `poly`s Durchreich-GS an. Mehrere Streams und Puffer gehen, ebenso Transform-Feedback-Queries (Mesa-Patch 0004, dazu Pipeline-Statistik-Pools, die DXVK ungeprüft anlegt; sie melden Nullen). Behoben in `poly`: Ein GS-Aufruf ohne Ausgabe erzeugt bei Seiteneffekten ein Ersatz-Primitiv, dessen Vertices sonst die des nächsten Aufrufs überschrieben. Test: `macos/tests/kosmickrisp-xfb/run.sh` (statische und dynamische Vertexzahl, indirekt, Instanzen, zwei Streams, Überlauf, Fortsetzen über den Zähler, VS und TES, Pipeline-Cache)
 - Mesa-Patch 0007: MetalFX-Hochskalierung auch auf KosmicKrisp. Mit `MESA_WSI_METAL_UPSCALING=metalfx` (run.sh setzt es aus `MVK_CONFIG_UPSCALING`) bekommen die Drawables die Pixelgröße des Fensters auf dem Bildschirm, beim Präsentieren skaliert `MTL4FXSpatialScaler` in eine private Textur, die ins Drawable kopiert wird, Alpha auf 1. Patch 0006: `MESA_WSI_METAL_FILTER=nearest` für „Pixelgenau“. Test: `macos/tests/kosmickrisp-present/run.sh`; Forager 1280×720 → 2560×1440
 - Mesa-Patch 0005: `MESA_KK_LIGHT_BARRIERS` (Experiment, aus): Render-Encoder enden ohne Barriere, Barrieren der Anwendung warten am nächsten Encoder
-- Getestet: Forager (D3D11, Feature Level 11_1, unter MoltenVK nur 11_0) und Medieval Dynasty mit D3D12 bis ins Hauptmenü; das Titelbild braucht dort noch rund doppelt so viel GPU-Zeit wie unter MoltenVK
+- Mesa-Patch 0008: `vkWaitForPresent` kehrt zurück, sobald das Bild auf der GPU im Drawable ist, wie bei MoltenVK. Das Warten auf den `presentedHandler` kostete einen Vsync: vkd3d begrenzt seine Frame-Latenz mit Present-Waits, Medieval Dynasty lief mit 30 statt 60 fps bei halb leerer GPU. `MESA_WSI_METAL_PRESENT_WAIT=displayed` stellt das alte Verhalten her
+- Mesa-Patch 0009 und `MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION=1` in run.sh: Metal übersetzt sonst nur wenige Shader gleichzeitig. Devolverland Expo blieb auf KosmicKrisp hängen, weil `dxvk-cs` beim Pipeline-Bau hinter DXVKs Hintergrund-Übersetzungen wartete, bis Unreal nach 120 s aufgab
+- Getestet: alle zehn Spiele, die unter MoltenVK laufen, laufen auch auf KosmicKrisp bis ins Menü (Starttests `start-12`, `start-13`). GPU-Zeit im Hauptmenü nach 100 s, gemessen mit `macos/gpu-trace.py`:
+
+  | Spiel | MoltenVK | KosmicKrisp | mit `MESA_KK_LIGHT_BARRIERS` |
+  |---|---|---|---|
+  | Medieval Dynasty (D3D12) | 13,0 ms/Bild, 59 fps | 12,4 ms/Bild, 59 fps (mit Patch 0008) | 17,3 ms/Bild vor Patch 0008 statt 21,1 |
+  | Horizon Zero Dawn (D3D12) | 6,45 ms/Bild | 6,83 ms/Bild | 6,35 ms/Bild |
+  | Green Hell (D3D11) | 53 ms/Bild, 18 fps | 9,4 ms/Bild, 34 fps | 10,9 ms/Bild |
+  | Raft (D3D11), GPU-Last | 761 ms/s | 390 ms/s | – |
+  | Kebab Chefs (D3D11), GPU-Last | 795 ms/s | 474 ms/s | 554 ms/s |
+
+  Bei Raft und Kebab Chefs fehlen im Trace unter KosmicKrisp die Bildnummern, dort zählt nur die GPU-Last pro Sekunde
 
 UE5 mit `-dx12`: Für Shader Model 6.6 verlangt vkd3d 64-Bit-Puffer-Atomics mit allen Operationen und Compute-Shader-Ableitungen. Metal kennt bei 64 Bit nur `atomic_min`/`atomic_max` (Puffer und Texturen, auf dem M3 getestet), kein `add` oder Compare-and-Swap, und keine Ableitungen in Compute-Shadern; SM 6.2 scheitert schon an der Denormal-Steuerung. Vorgaukeln würde nur die Shader scheitern lassen, die es nutzen.
 
@@ -149,7 +161,8 @@ Gewählt ist vkd3d-proton auf MoltenVK (Patches in `macos/patches/vkd3d-proton`,
 - [ ] Ratchet & Clank: Nach „Play“ entstehen alle Pipelines, dann hängen alle Threads an Wines `vectored_handlers_section` („blocked by 0000“, der Lock hat keinen Besitzer mehr). `crs-client.dll` (Crash-Reporter) ist Pflicht-Import und lässt sich nicht abschalten
 
 ### Weitere Spiele aus dem Starttest
-- [ ] Foundation verlangt OpenGL 4.3, macOS hat höchstens 4.1. Bräuchte OpenGL über Vulkan (Zink auf MoltenVK)
+- [x] Foundation verlangt OpenGL 4.3, macOS hat höchstens 4.1: läuft jetzt mit OpenGL 4.6 über Zink auf KosmicKrisp (Mesa als Windows-`opengl32.dll`, 64 und 32 Bit; Zink auf MoltenVK geht nicht, es fehlt `nullDescriptor`). Die App schaltet Zink für Foundation von selbst ein. Für 4.x fehlte Zink nur `GL_ARB_texture_buffer_object_rgb32` (keine RGB32-Texelpuffer in Metal), run.sh meldet die Erweiterung per `MESA_EXTENSION_OVERRIDE`
+- [x] Spiele auf exFAT-Platten: macOS legt neben jede von steamcmd geschriebene Datei eine `._`-Datei für Dateiattribute, tausende pro Spiel. Foundation las sie als Lokalisierung und stürzte ab. Der Runner löscht sie vor jedem Start (Millisekunden)
 - [ ] Rogue Tower (Unity) stürzt beim Start in Wines Ausnahmebehandlung ab („Exception frame is not in stack limits“)
 - Startet man Spiele aus einer anderen App heraus als MacProton (etwa aus einem Terminal oder Claude Code), fragt macOS beim ersten Zugriff auf ein Aufnahmegerät nach dem Mikrofon für diese App. Spiele, die beim Start Aufnahmegeräte abfragen (FMOD wie in Dead Island, Unreal wie in Devolverland Expo), hängen, bis jemand antwortet. MacProton selbst deklariert kein Mikrofon, macOS lehnt dort ohne Nachfrage ab, und die Spiele laufen weiter
 - [x] `macos/check-shaders.sh`: übersetzt alle Shader, die MoltenVK während eines Spiels gedumpt hat (`MVK_CONFIG_SHADER_DUMP_DIR`), mit dem Metal-Compiler und listet, was Metal ablehnt. So fallen Übersetzungsfehler für alle Shader eines Spiels auf, ohne jeden Effekt im Spiel zu erreichen
