@@ -252,9 +252,23 @@ final class Runner: ObservableObject {
         }
     }
 
+    /// On disks without extended attributes, such as exFAT, macOS keeps them in
+    /// "._" files next to every file a download wrote. Games that read whole
+    /// folders choke on those: Foundation took them for localization files
+    /// and crashed. They only hold macOS metadata.
+    static func removeAppleDoubleFiles(in dir: String) {
+        guard let files = FileManager.default.enumerator(atPath: dir) else { return }
+        for case let path as String in files where (path as NSString).lastPathComponent.hasPrefix("._") {
+            try? FileManager.default.removeItem(atPath: (dir as NSString).appendingPathComponent(path))
+        }
+    }
+
     private func launch(_ game: Game) {
         let exe = game.executable as NSString
         let dir = (game.installDir as NSString).appendingPathComponent(exe.deletingLastPathComponent)
+        if game.externalVolume != nil {
+            Self.removeAppleDoubleFiles(in: game.installDir)
+        }
 
         try? FileManager.default.createDirectory(at: Paths.logsDir, withIntermediateDirectories: true)
         let logURL = Paths.logsDir.appendingPathComponent("\(game.appID).log")
@@ -273,7 +287,7 @@ final class Runner: ObservableObject {
         }
         environment.merge(Upscaling.current.environment) { $1 }
         environment["MACPROTON_VULKAN_DRIVER"] = VulkanDriver.effective(for: game).rawValue
-        if game.openGLZink == true && VulkanDriver.kosmicKrispAvailable {
+        if game.usesZink {
             environment["MACPROTON_OPENGL"] = "zink"
         }
         if UserDefaults.standard.object(forKey: "steamOverlay") as? Bool == false {

@@ -37,7 +37,7 @@ struct LaunchOptionsView: View {
         _graphics = State(initialValue: options.compactMap(Graphics.of).last ?? .game)
         _extra = State(initialValue: options.filter { Graphics.of($0) == nil }.joined(separator: " "))
         _driver = State(initialValue: game.vulkanDriver)
-        _zink = State(initialValue: game.openGLZink ?? false)
+        _zink = State(initialValue: game.usesZink)
     }
 
     var body: some View {
@@ -101,7 +101,7 @@ struct LaunchOptionsView: View {
         let options = ([graphics.rawValue] + InstallScripts.split(extra)).filter { !$0.isEmpty }
         updated.launchOptions = options.isEmpty ? nil : options.joined(separator: " ")
         updated.vulkanDriver = driver
-        updated.openGLZink = zink ? true : nil
+        updated.openGLZink = zink == Game.zinkByDefault.contains(game.appID) ? nil : zink
         library.upsert(updated)
     }
 }
