@@ -1,0 +1,43 @@
+From 621c8921ce210955d6d72ccf891fd556b541a0ef Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 14:58:58 +0100
+Subject: [PATCH 16/16] kk: Name the disk cache after the 16-byte build id only
+
+_mesa_blake3_format() formats 32 bytes, but the driver's build id has 16,
+so the disk cache's name took in 16 bytes of whatever followed it in the
+instance, which differed from process to process. Every start then used a
+cache of its own: Horizon Zero Dawn found none of the 9500 objects the
+previous start had written. Format the 16 bytes as hex instead; the second
+start now finds 3949 of its first 5923 pipelines in the cache.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_physical_device.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 9afe21d..8985a16 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -20,6 +20,7 @@
+ #include "kosmickrisp/compiler/nir_to_msl.h"
+ 
+ #include "util/disk_cache.h"
++#include "util/hex.h"
+ #include "util/mesa-blake3.h"
+ #include "git_sha1.h"
+ 
+@@ -991,8 +992,8 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+ #ifdef ENABLE_SHADER_CACHE
+    /* Keeps the MSL of each pipeline across runs, so later starts skip the
+     * translation from SPIR-V. Metal caches the libraries compiled from it. */
+-   char timestamp[BLAKE3_HEX_LEN];
+-   _mesa_blake3_format(timestamp, instance->driver_build_sha);
++   char timestamp[2 * VK_UUID_SIZE + 1];
++   mesa_bytes_to_hex(timestamp, instance->driver_build_sha, VK_UUID_SIZE);
+    pdev->vk.disk_cache = disk_cache_create("kosmickrisp", timestamp, 0);
+ #endif
+ }
+-- 
+2.56.0
+

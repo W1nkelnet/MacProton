@@ -1,0 +1,293 @@
+From ddf9f58df71da49fe99d7adf02c7d330f26d0cc3 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 14:00:34 +0100
+Subject: [PATCH 15/16] kk: Keep the MSL of compiled pipelines compressed
+
+Every pipeline keeps the MSL of its stages to serialize itself, the vertex
+shader object a second copy of the fragment shader's. Horizon Zero Dawn
+creates about 23000 pipelines while loading, which held some 9 GB of MSL
+and pushed a 16 GB Mac into swap. Once the Metal pipelines exist, compress
+the MSL with LZFSE from Apple's libcompression, about 6.5 times smaller
+for 1 ms per 225 KB under Rosetta, and inflate it only to serialize.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/bridge/lz_compression.c       | 34 ++++++++++++
+ src/kosmickrisp/bridge/lz_compression.h       | 21 ++++++++
+ src/kosmickrisp/bridge/meson.build            |  5 ++
+ src/kosmickrisp/bridge/mtl_bridge.h           |  2 +
+ src/kosmickrisp/bridge/stubs/lz_compression.c | 18 +++++++
+ src/kosmickrisp/vulkan/kk_shader.c            | 53 ++++++++++++++++++-
+ src/kosmickrisp/vulkan/kk_shader.h            |  6 +++
+ 7 files changed, 137 insertions(+), 2 deletions(-)
+ create mode 100644 src/kosmickrisp/bridge/lz_compression.c
+ create mode 100644 src/kosmickrisp/bridge/lz_compression.h
+ create mode 100644 src/kosmickrisp/bridge/stubs/lz_compression.c
+
+diff --git a/src/kosmickrisp/bridge/lz_compression.c b/src/kosmickrisp/bridge/lz_compression.c
+new file mode 100644
+index 0000000..d5cd89f
+--- /dev/null
++++ b/src/kosmickrisp/bridge/lz_compression.c
+@@ -0,0 +1,34 @@
++/*
++ * Copyright 2026 MacProton contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "lz_compression.h"
++
++#include <compression.h>
++#include <stdlib.h>
++
++void *
++lz_compress(const void *data, size_t size, size_t *out_size)
++{
++   void *out = malloc(size);
++   if (out == NULL)
++      return NULL;
++
++   /* Fails if the result would not be smaller */
++   *out_size = compression_encode_buffer(out, size, data, size, NULL,
++                                         COMPRESSION_LZFSE);
++   if (*out_size == 0) {
++      free(out);
++      return NULL;
++   }
++
++   return realloc(out, *out_size) ?: out;
++}
++
++bool
++lz_decompress(const void *data, size_t size, void *out, size_t out_size)
++{
++   return compression_decode_buffer(out, out_size, data, size, NULL,
++                                    COMPRESSION_LZFSE) == out_size;
++}
+diff --git a/src/kosmickrisp/bridge/lz_compression.h b/src/kosmickrisp/bridge/lz_compression.h
+new file mode 100644
+index 0000000..ea50bd2
+--- /dev/null
++++ b/src/kosmickrisp/bridge/lz_compression.h
+@@ -0,0 +1,21 @@
++/*
++ * Copyright 2026 MacProton contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef LZ_COMPRESSION_H
++#define LZ_COMPRESSION_H 1
++
++#include <stdbool.h>
++#include <stddef.h>
++
++/* LZFSE from Apple's libcompression: fast enough to pack shader source
++ * after each pipeline compile, and about as dense as zlib's best level */
++
++/* Returns a malloc'ed buffer with the compressed data and its size in
++ * out_size, or NULL if the data does not compress. */
++void *lz_compress(const void *data, size_t size, size_t *out_size);
++
++bool lz_decompress(const void *data, size_t size, void *out, size_t out_size);
++
++#endif /* LZ_COMPRESSION_H */
+diff --git a/src/kosmickrisp/bridge/meson.build b/src/kosmickrisp/bridge/meson.build
+index 249cfd1..6d54597 100644
+--- a/src/kosmickrisp/bridge/meson.build
++++ b/src/kosmickrisp/bridge/meson.build
+@@ -6,6 +6,7 @@ mtl_bridge_files = files(
+   'vk_to_mtl_map.h',
+   'vk_to_mtl_map.c',
+   'mtl_format.h',
++  'lz_compression.h',
+ )
+ 
+ if host_machine.system() == 'darwin'
+@@ -26,6 +27,7 @@ if host_machine.system() == 'darwin'
+     'mtl_texture.m',
+     'mtl_upscale.m',
+     'ns_process_info.m',
++    'lz_compression.c',
+   )
+ else
+   mtl_bridge_files += files(
+@@ -45,6 +47,7 @@ else
+     'stubs/mtl_texture.c',
+     'stubs/mtl_upscale.c',
+     'stubs/ns_process_info.c',
++    'stubs/lz_compression.c',
+   )
+ endif
+ 
+@@ -72,4 +75,6 @@ libmtl_bridge = static_library(
+ 
+ idep_mtl_bridge = declare_dependency(
+   link_with : libmtl_bridge,
++  # LZFSE for lz_compression.c
++  link_args : host_machine.system() == 'darwin' ? ['-lcompression'] : [],
+ )
+diff --git a/src/kosmickrisp/bridge/mtl_bridge.h b/src/kosmickrisp/bridge/mtl_bridge.h
+index a05e60b..b13d1bc 100644
+--- a/src/kosmickrisp/bridge/mtl_bridge.h
++++ b/src/kosmickrisp/bridge/mtl_bridge.h
+@@ -37,6 +37,8 @@
+ #include "mtl_texture.h"
+ #include "mtl_upscale.h"
+ 
++#include "lz_compression.h"
++
+ mtl_texture *mtl_drawable_get_texture(void *drawable_ptr);
+ 
+ void *mtl_retain(void *handle);
+diff --git a/src/kosmickrisp/bridge/stubs/lz_compression.c b/src/kosmickrisp/bridge/stubs/lz_compression.c
+new file mode 100644
+index 0000000..74d2555
+--- /dev/null
++++ b/src/kosmickrisp/bridge/stubs/lz_compression.c
+@@ -0,0 +1,18 @@
++/*
++ * Copyright 2026 MacProton contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "lz_compression.h"
++
++void *
++lz_compress(const void *data, size_t size, size_t *out_size)
++{
++   return NULL;
++}
++
++bool
++lz_decompress(const void *data, size_t size, void *out, size_t out_size)
++{
++   return false;
++}
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 0786175..cd7db48 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -887,6 +887,7 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
+ }
+ 
+ static const struct vk_shader_ops kk_shader_ops;
++static void kk_shader_pack(struct kk_shader *shader);
+ 
+ static void
+ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+@@ -932,19 +933,24 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+          struct msl_compile_data *data = &shader->msl_data[i];
+          ralloc_free((void *)data->entrypoint_name);
+          ralloc_free((void *)data->code);
++         free(data->packed);
+       }
+    }
+ 
+    struct msl_compile_data *data = &shader->msl_data[shader->info.stage];
+    ralloc_free((void *)data->entrypoint_name);
+    ralloc_free((void *)data->code);
++   free(data->packed);
+ 
+    ralloc_free((void *)shader->gs_main.entrypoint_name);
+    ralloc_free((void *)shader->gs_main.code);
++   free(shader->gs_main.packed);
+    ralloc_free((void *)shader->gs_count.entrypoint_name);
+    ralloc_free((void *)shader->gs_count.code);
++   free(shader->gs_count.packed);
+    ralloc_free((void *)shader->gs_pre.entrypoint_name);
+    ralloc_free((void *)shader->gs_pre.code);
++   free(shader->gs_pre.packed);
+ 
+    vk_shader_free(&dev->vk, pAllocator, &shader->vk);
+ }
+@@ -2063,6 +2069,8 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+       /* Memset the output array */
+       memset(shaders_out, 0, shader_count * sizeof(*shaders_out));
+    } else {
++      for (uint32_t i = 0; i < shader_count; i++)
++         kk_shader_pack(shaders[i]);
+       memcpy(shaders_out, shaders, shader_count * sizeof(*shaders_out));
+    }
+ 
+@@ -2084,11 +2092,51 @@ static void
+ kk_msl_serialize(const struct msl_compile_data *data, struct blob *blob)
+ {
+    uint32_t entrypoint_length = strlen(data->entrypoint_name) + 1;
+-   uint32_t code_length = strlen(data->code) + 1;
++   uint32_t code_length = data->code ? strlen(data->code) + 1 : data->code_size;
+    blob_write_uint32(blob, entrypoint_length);
+    blob_write_uint32(blob, code_length);
+    blob_write_bytes(blob, data->entrypoint_name, entrypoint_length);
+-   blob_write_bytes(blob, data->code, code_length);
++
++   if (data->code) {
++      blob_write_bytes(blob, data->code, code_length);
++      return;
++   }
++
++   intptr_t offset = blob_reserve_bytes(blob, code_length);
++   if (offset < 0)
++      return;
++   if (blob->data && !lz_decompress(data->packed, data->packed_size,
++                                    blob->data + offset, code_length))
++      blob->out_of_memory = true;
++}
++
++static void
++kk_msl_pack(struct msl_compile_data *data)
++{
++   if (data->code == NULL)
++      return;
++
++   size_t size = strlen(data->code) + 1, packed_size;
++   void *packed = lz_compress(data->code, size, &packed_size);
++   if (packed == NULL)
++      return;
++
++   data->packed = packed;
++   data->packed_size = packed_size;
++   data->code_size = size;
++   ralloc_free(data->code);
++   data->code = NULL;
++}
++
++/* Compresses the MSL of a shader whose Metal pipelines exist */
++static void
++kk_shader_pack(struct kk_shader *shader)
++{
++   for (uint32_t i = 0; i < ARRAY_SIZE(shader->msl_data); i++)
++      kk_msl_pack(&shader->msl_data[i]);
++   kk_msl_pack(&shader->gs_main);
++   kk_msl_pack(&shader->gs_count);
++   kk_msl_pack(&shader->gs_pre);
+ }
+ 
+ static bool
+@@ -2223,6 +2271,7 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
++   kk_shader_pack(shader);
+    if (info.stage == MESA_SHADER_COMPUTE || info.stage == MESA_SHADER_VERTEX)
+       p_atomic_inc(&kk_stats.cached);
+    kk_stats_report();
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index a5b69c6..8aa85ca 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -147,6 +147,12 @@ struct kk_pipeline_handles {
+ struct msl_compile_data {
+    char *code;
+    char *entrypoint_name;
++   /* Once the Metal pipeline exists the MSL is only needed to serialize the
++    * shader, and is kept compressed there: code is NULL then. Big games keep
++    * tens of thousands of pipelines, and their MSL took gigabytes. */
++   void *packed;
++   uint32_t packed_size;
++   uint32_t code_size;
+ };
+ 
+ struct kk_shader {
+-- 
+2.56.0
+

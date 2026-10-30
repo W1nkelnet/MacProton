@@ -1,0 +1,197 @@
+From 90a2796921d98ecfb8c3a69097d950de74dc46f3 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 16:18:20 +0100
+Subject: [PATCH] kk: Add MESA_KK_NULL_IMAGE_SELECT
+
+Every image and texture access through a descriptor that may be null is
+wrapped in a branch. Shaders reading thousands of textures, as some of
+Horizon Zero Dawn's compute shaders do, become large and slow to compile:
+the largest took 14.4 s in Metal's front end, 8.6 s with reads selecting
+zero for null descriptors instead, and 2.3 s without any null handling.
+Apple GPUs read through a null resource ID without faulting on the M3
+(Horizon Zero Dawn, Green Hell, Kebab Chefs, Medieval Dynasty). But the
+branch skips the reads, and vkd3d-proton binds many null descriptors:
+Medieval Dynasty ran at 15-20 instead of 22 fps with selects, Green Hell
+and Kebab Chefs a little faster. So it stays an option, and it is part of
+the pipeline cache key, as are the disabled workarounds.
+
+Generated-by: LLM
+---
+ .../vulkan/kk_nir_lower_null_images.c         | 38 +++++++++++++++----
+ src/kosmickrisp/vulkan/kk_physical_device.c   | 12 +++++-
+ src/kosmickrisp/vulkan/kk_physical_device.h   |  4 ++
+ src/kosmickrisp/vulkan/kk_shader.c            |  3 +-
+ src/kosmickrisp/vulkan/kk_shader.h            |  2 +-
+ 5 files changed, 48 insertions(+), 11 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_nir_lower_null_images.c b/src/kosmickrisp/vulkan/kk_nir_lower_null_images.c
+index 81071ec..dc31dea 100644
+--- a/src/kosmickrisp/vulkan/kk_nir_lower_null_images.c
++++ b/src/kosmickrisp/vulkan/kk_nir_lower_null_images.c
+@@ -22,9 +22,10 @@ tex_handle_to_resource_id(nir_builder *b, nir_def *handle)
+ }
+ 
+ static nir_def *
+-get_is_null(nir_builder *b, nir_instr *instr, nir_def **def)
++get_is_null(nir_builder *b, nir_instr *instr, nir_def **def, bool *reads_only)
+ {
+    *def = NULL;
++   *reads_only = false;
+    nir_def *handle = NULL;
+ 
+    if (instr->type == nir_instr_type_intrinsic) {
+@@ -32,12 +33,14 @@ get_is_null(nir_builder *b, nir_instr *instr, nir_def **def)
+       switch (intr->intrinsic) {
+       case nir_intrinsic_bindless_image_load:
+       case nir_intrinsic_bindless_image_sparse_load:
+-      case nir_intrinsic_bindless_image_store:
+-      case nir_intrinsic_bindless_image_atomic:
+-      case nir_intrinsic_bindless_image_atomic_swap:
+       case nir_intrinsic_bindless_image_size:
+       case nir_intrinsic_bindless_image_samples:
+       case nir_intrinsic_bindless_image_levels:
++         *reads_only = true;
++         FALLTHROUGH;
++      case nir_intrinsic_bindless_image_store:
++      case nir_intrinsic_bindless_image_atomic:
++      case nir_intrinsic_bindless_image_atomic_swap:
+          if (nir_intrinsic_infos[intr->intrinsic].has_dest)
+             *def = &intr->def;
+ 
+@@ -50,6 +53,7 @@ get_is_null(nir_builder *b, nir_instr *instr, nir_def **def)
+    } else if (instr->type == nir_instr_type_tex) {
+       nir_tex_instr *tex = nir_instr_as_tex(instr);
+       *def = &tex->def;
++      *reads_only = true;
+ 
+       handle = nir_get_tex_src(tex, nir_tex_src_texture_handle);
+    }
+@@ -62,16 +66,33 @@ get_is_null(nir_builder *b, nir_instr *instr, nir_def **def)
+ }
+ 
+ static bool
+-lower(nir_builder *b, nir_instr *instr, UNUSED void *data)
++lower(nir_builder *b, nir_instr *instr, void *data)
+ {
++   const bool *select_reads = data;
+    b->cursor = nir_before_instr(instr);
+ 
+    nir_def *def;
+-   nir_def *is_null = get_is_null(b, instr, &def);
++   bool reads_only;
++   nir_def *is_null = get_is_null(b, instr, &def, &reads_only);
+ 
+    if (!is_null)
+       return false;
+ 
++   /* With MESA_KK_NULL_IMAGE_SELECT a read of a null descriptor still
++    * happens, and its result is replaced. A branch around every access makes
++    * the MSL of shaders reading thousands of textures slower to compile,
++    * Horizon Zero Dawn's largest by 40 %, but skips the reads: vkd3d-proton
++    * binds many null descriptors, and Medieval Dynasty ran at 15-20 instead
++    * of 22 fps with selects. Apple GPUs read through a null resource ID
++    * without faulting on the M3. */
++   if (*select_reads && reads_only && def) {
++      b->cursor = nir_after_instr(instr);
++      nir_def *zero = nir_imm_zero(b, def->num_components, def->bit_size);
++      nir_def *result = nir_bcsel(b, is_null, zero, def);
++      nir_def_rewrite_uses_after(def, result);
++      return true;
++   }
++
+    nir_def *zero = NULL;
+    nir_if *nif = nir_push_if(b, nir_inot(b, is_null));
+    nir_instr_remove(instr);
+@@ -101,7 +122,8 @@ lower(nir_builder *b, nir_instr *instr, UNUSED void *data)
+ }
+ 
+ bool
+-kk_nir_lower_null_images(nir_shader *shader)
++kk_nir_lower_null_images(nir_shader *shader, bool select_reads)
+ {
+-   return nir_shader_instructions_pass(shader, lower, nir_metadata_none, NULL);
++   return nir_shader_instructions_pass(shader, lower, nir_metadata_none,
++                                       &select_reads);
+ }
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 8985a16..e5627b1 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -982,6 +982,13 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+    _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
+                        sizeof(instance->driver_build_sha));
+ 
++   /* Settings that change the MSL, so cached shaders of either kind don't
++    * mix. Workarounds use bits up to 18. */
++   const uint64_t compiler_flags =
++      pdev->settings.disabled_workarounds |
++      (pdev->settings.null_image_select ? BITFIELD64_BIT(63) : 0);
++   _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
++
+    unsigned char blake3[BLAKE3_KEY_LEN];
+    _mesa_blake3_final(&blake3_ctx, blake3);
+ 
+@@ -994,7 +1001,8 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+     * translation from SPIR-V. Metal caches the libraries compiled from it. */
+    char timestamp[2 * VK_UUID_SIZE + 1];
+    mesa_bytes_to_hex(timestamp, instance->driver_build_sha, VK_UUID_SIZE);
+-   pdev->vk.disk_cache = disk_cache_create("kosmickrisp", timestamp, 0);
++   pdev->vk.disk_cache =
++      disk_cache_create("kosmickrisp", timestamp, compiler_flags);
+ #endif
+ }
+ 
+@@ -1107,6 +1115,8 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
+       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
+    settings->light_barriers =
+       debug_get_bool_option("MESA_KK_LIGHT_BARRIERS", false);
++   settings->null_image_select =
++      debug_get_bool_option("MESA_KK_NULL_IMAGE_SELECT", false);
+ 
+    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
+    const char *all_workarounds = "all";
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.h b/src/kosmickrisp/vulkan/kk_physical_device.h
+index 3d88fb2..3ee7d25 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -56,6 +56,10 @@ struct kk_env_settings {
+    /* MESA_KK_LIGHT_BARRIERS: render encoders end without a barrier, the
+     * application's barriers wait at the start of the next encoder */
+    bool light_barriers;
++   /* MESA_KK_NULL_IMAGE_SELECT: reads of images and textures through null
++    * descriptors happen, and select zero, instead of branching around every
++    * access, see kk_nir_lower_null_images */
++   bool null_image_select;
+ };
+ 
+ struct kk_physical_device {
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index cd7db48..2de383b 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -881,7 +881,8 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
+    NIR_PASS(_, nir, kk_nir_lower_textures);
+ 
+    if (features & KK_FEAT_NULL_DESCRIPTOR)
+-      NIR_PASS(_, nir, kk_nir_lower_null_images);
++      NIR_PASS(_, nir, kk_nir_lower_null_images,
++               pdev->settings.null_image_select);
+ 
+    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+ }
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index 8aa85ca..7cdba5e 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -202,7 +202,7 @@ kk_nir_lower_descriptors(nir_shader *nir,
+ bool kk_nir_add_device_barrier_workaround(nir_shader *nir);
+ 
+ bool kk_nir_lower_poly(struct nir_shader *nir);
+-bool kk_nir_lower_null_images(nir_shader *nir);
++bool kk_nir_lower_null_images(nir_shader *nir, bool select_reads);
+ 
+ bool kk_nir_lower_textures(nir_shader *nir);
+ 
+-- 
+2.56.0
+

@@ -1,0 +1,84 @@
+From 6488f237ccf9607e66d6821ed0ffa07ad0f76e2d Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 13:56:46 +0100
+Subject: [PATCH 13/16] kk: Keep pipelines in Mesa's disk cache
+
+KosmicKrisp created no disk cache and the device had no memory cache, so
+pipelines created without a pipeline cache were never cached, and every
+start translated all shaders to MSL again: about 15 ms of CPU per pipeline
+under Rosetta, where Metal compiles the MSL in under 2 ms from its own
+cache. Create the disk cache, as nvk does, and a device memory cache, as
+hk does. Horizon Zero Dawn's second start to its menu finds all 2310
+objects in the disk cache and compiles none.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_device.c          | 16 +++++++++++++++-
+ src/kosmickrisp/vulkan/kk_physical_device.c |  8 ++++++++
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index 85e431c..b527a28 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -315,9 +315,20 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+       dev->has_queue = true;
+    }
+ 
++   /* Pipelines created without a pipeline cache use this one, which is what
++    * puts their shaders in the disk cache */
++   struct vk_pipeline_cache_create_info cache_info = {
++      .weak_ref = true,
++   };
++   dev->vk.mem_cache = vk_pipeline_cache_create(&dev->vk, &cache_info, NULL);
++   if (dev->vk.mem_cache == NULL) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      goto fail_mem_cache;
++   }
++
+    result = kk_device_init_meta(dev);
+    if (result != VK_SUCCESS)
+-      goto fail_mem_cache;
++      goto fail_meta_init;
+ 
+    result = kk_query_table_init(dev, &dev->occlusion_queries,
+                                 KK_MAX_OCCLUSION_QUERIES);
+@@ -348,6 +359,8 @@ fail_query_table:
+    kk_query_table_finish(dev, &dev->occlusion_queries);
+ fail_meta:
+    kk_device_finish_meta(dev);
++fail_meta_init:
++   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+ fail_mem_cache:
+    if (dev->has_queue) {
+       kk_queue_finish(dev, &dev->queue);
+@@ -385,6 +398,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+    kk_device_finish_lib(dev);
+    kk_query_table_finish(dev, &dev->occlusion_queries);
+    kk_destroy_sampler_heap(dev, &dev->samplers);
++   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+ 
+    /* Geometry heap */
+    if (dev->heap)
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index a1ea62d..9afe21d 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -987,6 +987,14 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+    STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
++
++#ifdef ENABLE_SHADER_CACHE
++   /* Keeps the MSL of each pipeline across runs, so later starts skip the
++    * translation from SPIR-V. Metal caches the libraries compiled from it. */
++   char timestamp[BLAKE3_HEX_LEN];
++   _mesa_blake3_format(timestamp, instance->driver_build_sha);
++   pdev->vk.disk_cache = disk_cache_create("kosmickrisp", timestamp, 0);
++#endif
+ }
+ 
+ static void
+-- 
+2.56.0
+

@@ -1,0 +1,169 @@
+From a511dc5787caf1d5758e5ebf59e3a646c19a837f Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 13:56:46 +0100
+Subject: [PATCH 14/16] kk: Add MESA_KK_COMPILE_STATS
+
+Logs every two seconds how many pipelines were compiled and how many came
+from a cache, and the time spent translating to MSL, compiling Metal
+libraries and making Metal pipelines, summed over all threads.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_shader.c | 73 ++++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 1b1d090..0786175 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -34,6 +34,62 @@
+ #include "vk_pipeline.h"
+ #include "vk_util.h"
+ 
++#include "util/os_time.h"
++#include "util/u_atomic.h"
++#include "util/u_debug.h"
++
++/* MESA_KK_COMPILE_STATS=1 logs where pipeline creation spends its time every
++ * two seconds: translating to MSL, compiling MSL to Metal libraries, and
++ * making Metal pipelines from them, summed over all threads. */
++static struct {
++   uint64_t start_ns, last_ns;
++   uint64_t compiled, cached;
++   uint64_t msl_ns, library_ns, pipeline_ns;
++} kk_stats;
++
++static bool
++kk_stats_enabled(void)
++{
++   static int enabled = -1;
++   if (enabled < 0)
++      enabled = debug_get_bool_option("MESA_KK_COMPILE_STATS", false);
++   return enabled;
++}
++
++static uint64_t
++kk_stats_now(void)
++{
++   return kk_stats_enabled() ? os_time_get_nano() : 0;
++}
++
++static void
++kk_stats_add(uint64_t *counter, uint64_t start)
++{
++   if (kk_stats_enabled())
++      p_atomic_add(counter, os_time_get_nano() - start);
++}
++
++static void
++kk_stats_report(void)
++{
++   if (!kk_stats_enabled())
++      return;
++
++   uint64_t now = os_time_get_nano();
++   if (!kk_stats.start_ns)
++      kk_stats.start_ns = kk_stats.last_ns = now;
++   uint64_t last = kk_stats.last_ns;
++   if (now - last < 2000000000ull || !p_atomic_cmpxchg(&kk_stats.last_ns, last, now))
++      return;
++
++   fprintf(stderr,
++           "kk: %.0f s: %" PRIu64 " pipelines compiled, %" PRIu64
++           " from cache; MSL %.1f s, libraries %.1f s, pipelines %.1f s\n",
++           (now - kk_stats.start_ns) / 1e9, kk_stats.compiled, kk_stats.cached,
++           kk_stats.msl_ns / 1e9, kk_stats.library_ns / 1e9,
++           kk_stats.pipeline_ns / 1e9);
++}
++
+ static const nir_shader_compiler_options *
+ kk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
+                    UNUSED const struct vk_pipeline_robustness_state *rs)
+@@ -1310,16 +1366,20 @@ kk_compile_compute_pipeline(struct kk_device *device,
+ {
+    struct kk_physical_device *pdev = kk_device_physical(device);
+ 
++   uint64_t start = kk_stats_now();
+    mtl_library *library = mtl_new_library(
+       device->mtl_compiler_handle, data->code, pdev->info.msl_version,
+       MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++   kk_stats_add(&kk_stats.library_ns, start);
+    if (library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+    mtl_function_descriptor *function =
+       mtl_new_library_function_descriptor(library, data->entrypoint_name);
++   start = kk_stats_now();
+    mtl_compute_pipeline_state *pipeline = mtl_new_compute_pipeline_state(
+       device->mtl_compiler_handle, function, local_size_threads);
++   kk_stats_add(&kk_stats.pipeline_ns, start);
+    mtl_release(function);
+    mtl_release(library);
+ 
+@@ -1604,6 +1664,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+    }
+ 
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
++   uint64_t start = kk_stats_now();
+    mtl_library *vertex_library = mtl_new_library(
+       device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
+       MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+@@ -1625,6 +1686,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+    mtl_function_descriptor *fragment_function =
+       mtl_new_library_function_descriptor(fragment_library,
+                                           fs_data->entrypoint_name);
++   kk_stats_add(&kk_stats.library_ns, start);
+ 
+    mtl_render_pipeline_descriptor *pipeline_descriptor =
+       mtl_new_render_pipeline_descriptor();
+@@ -1662,8 +1724,10 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+          pipeline_descriptor, vs->info.vs.sample_count);
+    }
+ 
++   start = kk_stats_now();
+    pipe->gfx.render =
+       mtl_new_render_pipeline(device->mtl_compiler_handle, pipeline_descriptor);
++   kk_stats_add(&kk_stats.pipeline_ns, start);
+    if (pipe->gfx.render == NULL)
+       result = VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1841,6 +1905,7 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+    struct kk_physical_device *pdev = kk_device_physical(dev);
+ 
+    enum kk_feature_key features = kk_make_feature_key(enabled_features);
++   uint64_t msl_start = kk_stats_now();
+ 
+    /* Vulkan doesn't enforce a fragment shader to build pipelines. We may need
+     * to create one, and a GS for transform feedback. */
+@@ -1957,6 +2022,9 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+       }
+    }
+ 
++   kk_stats_add(&kk_stats.msl_ns, msl_start);
++   p_atomic_inc(&kk_stats.compiled);
++
+    /* Compile pipeline:
+     * 1. Compute pipeline
+     * 2. Graphics with all stages (since we don't support GPL nor shader
+@@ -1998,6 +2066,7 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+       memcpy(shaders_out, shaders, shader_count * sizeof(*shaders_out));
+    }
+ 
++   kk_stats_report();
+    return result;
+ }
+ 
+@@ -2154,6 +2223,10 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
++   if (info.stage == MESA_SHADER_COMPUTE || info.stage == MESA_SHADER_VERTEX)
++      p_atomic_inc(&kk_stats.cached);
++   kk_stats_report();
++
+    *shader_out = &shader->vk;
+ 
+    return VK_SUCCESS;
+-- 
+2.56.0
+
