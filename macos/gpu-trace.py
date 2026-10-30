@@ -8,6 +8,9 @@ with the game's PID:
         --time-limit 5s --output game.trace
     macos/gpu-trace.py game.trace PID
 
+xctrace leaves a raw kernel trace of close to 1 GB per recording in $TMPDIR
+(instruments*.ktrace); delete those afterwards.
+
 Prints the time the GPU was busy for the process per second and per frame,
 overall and per channel (vertex, fragment, compute), and how many GPU
 intervals, roughly encoders, ran per second.
