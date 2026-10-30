@@ -11,9 +11,12 @@ with the game's PID:
 xctrace leaves a raw kernel trace of close to 1 GB per recording in $TMPDIR
 (instruments*.ktrace); delete those afterwards.
 
-Prints the time the GPU was busy for the process per second and per frame,
-overall and per channel (vertex, fragment, compute), and how many GPU
-intervals, roughly encoders, ran per second.
+Prints the frame rate from the process's present requests, the time the GPU
+was busy for the process per second and per frame, overall and per channel
+(vertex, fragment, compute), and how many GPU intervals, roughly encoders,
+ran per second. The present requests count frames without the Metal HUD,
+which costs time per encoder on the thread encoding them; GPU intervals only
+carry frame numbers with the HUD or under MoltenVK.
 """
 
 import subprocess
@@ -21,14 +24,15 @@ import sys
 import xml.etree.ElementTree as ET
 
 
-def export(trace):
-    xpath = '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-intervals"]'
+def export(trace, schema="metal-gpu-intervals"):
+    xpath = f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]'
     out = subprocess.run(["xcrun", "xctrace", "export", "--input", trace, "--xpath", xpath],
                          capture_output=True, check=True).stdout
     return ET.fromstring(out)
 
 
-def intervals_of(root, pid):
+def rows_of(root, pid):
+    """Yield the rows of the process as {column: element}."""
     # xctrace writes each value once with an id and refers to it later
     ids = {el.attrib["id"]: el for el in root.iter() if "id" in el.attrib}
 
@@ -42,8 +46,16 @@ def intervals_of(root, pid):
         process = cells.get("process")
         if process is None or process.tag != "process":
             continue
-        if int(resolve(process.find("pid")).text) != pid:
-            continue
+        if int(resolve(process.find("pid")).text) == pid:
+            yield cells
+
+
+def presents_of(root, pid):
+    return [int(cells["timestamp"].text) for cells in rows_of(root, pid)]
+
+
+def intervals_of(root, pid):
+    for cells in rows_of(root, pid):
         channel = cells.get("channel-name")
         frame = cells.get("frame-number")
         yield (int(cells["start"].text), int(cells["duration"].text),
@@ -53,6 +65,9 @@ def intervals_of(root, pid):
 
 def main():
     trace, pid = sys.argv[1], int(sys.argv[2])
+    presents = presents_of(export(trace, "ca-client-present-request"), pid)
+    if len(presents) > 1:
+        print(f"{(len(presents) - 1) / ((max(presents) - min(presents)) / 1e9):.1f} presents per second")
     report(list(intervals_of(export(trace), pid)))
 
 
