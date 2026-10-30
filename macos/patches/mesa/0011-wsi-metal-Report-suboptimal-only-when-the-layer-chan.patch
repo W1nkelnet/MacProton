@@ -1,0 +1,59 @@
+From 58ab8fce573c8485fee129447cc1244d0d28b2f5 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 12:38:02 +0100
+Subject: [PATCH 11/12] wsi/metal: Report suboptimal only when the layer
+ changes size
+
+The swapchain counted as suboptimal whenever its images differed from the
+layer in size. Games rendering below the window's resolution on purpose,
+Medieval Dynasty at 1680x1050 in a 1710x1107 window, got
+VK_SUBOPTIMAL_KHR on every present, and vkd3d-proton recreated the
+swapchain about 10000 times in a two-minute session. Compare with the
+layer's size at creation instead, as MoltenVK does.
+
+Generated-by: LLM
+---
+ src/vulkan/wsi/wsi_common_metal.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index ffbd8c4..61ef21e 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -359,6 +359,8 @@ struct wsi_metal_swapchain {
+    /* Size of the drawables, larger than extent when the driver scales the
+     * images up to the window (MESA_WSI_METAL_UPSCALING) */
+    VkExtent2D drawable_extent;
++   /* Size of the layer when the swapchain was made */
++   VkExtent2D layer_extent;
+    VkFormat vk_format;
+ 
+    VkIcdSurfaceMetal *surface;
+@@ -729,9 +731,14 @@ wsi_metal_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
+       wsi_metal_layer_present(&image->drawable);
+    }
+ 
++   /* Suboptimal only once the layer changed size, as with MoltenVK. A
++    * swapchain smaller than the window on purpose, a game rendering below the
++    * display's resolution, stays optimal; vkd3d-proton recreated it on every
++    * present otherwise. */
+    uint32_t width = 0u, height = 0u;
+    wsi_metal_layer_size(chain->surface->pLayer, &width, &height);
+-   bool is_optimal = (width == chain->extent.width && height == chain->extent.height);
++   bool is_optimal = width == chain->layer_extent.width &&
++                     height == chain->layer_extent.height;
+    return is_optimal ? VK_SUCCESS : VK_SUBOPTIMAL_KHR;
+ }
+ 
+@@ -982,6 +989,8 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+    chain->base.image_count = num_images;
+    chain->extent = pCreateInfo->imageExtent;
+    chain->drawable_extent = drawable_extent;
++   wsi_metal_layer_size(metal_surface->pLayer, &chain->layer_extent.width,
++                        &chain->layer_extent.height);
+    chain->vk_format = pCreateInfo->imageFormat;
+    chain->surface = metal_surface;
+    chain->current_image_index = 0;
+-- 
+2.56.0
+

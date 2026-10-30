@@ -1,0 +1,79 @@
+From 544f283ab9d6a3acb394449922346fbcb92195b4 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 12:38:02 +0100
+Subject: [PATCH 12/12] wsi/metal: Add MESA_WSI_METAL_FPS
+
+MESA_WSI_METAL_FPS=SECONDS logs the presents per second to stderr that
+often. The Metal HUD counts frames as well, but costs time for every
+encoder on the thread encoding them, which skews comparisons between
+drivers that encode on different threads.
+
+Generated-by: LLM
+---
+ src/vulkan/wsi/wsi_common_metal.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index 61ef21e..c479341 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -11,6 +11,7 @@
+ #include "util/cnd_monotonic.h"
+ #include <stdlib.h>
+ #include <string.h>
++#include "util/os_time.h"
+ #include "util/timespec.h"
+ #include "util/u_vector.h"
+ 
+@@ -21,6 +22,7 @@
+ #include "vulkan/vulkan_core.h"
+ 
+ #include <assert.h>
++#include <stdio.h>
+ 
+ struct wsi_metal {
+    struct wsi_interface base;
+@@ -361,6 +363,10 @@ struct wsi_metal_swapchain {
+    VkExtent2D drawable_extent;
+    /* Size of the layer when the swapchain was made */
+    VkExtent2D layer_extent;
++   /* MESA_WSI_METAL_FPS=SECONDS logs the presents per second that often */
++   uint64_t fps_interval_ns;
++   uint64_t fps_start_ns;
++   uint32_t fps_frames;
+    VkFormat vk_format;
+ 
+    VkIcdSurfaceMetal *surface;
+@@ -731,6 +737,17 @@ wsi_metal_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
+       wsi_metal_layer_present(&image->drawable);
+    }
+ 
++   if (chain->fps_interval_ns) {
++      uint64_t now = os_time_get_nano();
++      chain->fps_frames++;
++      if (now - chain->fps_start_ns >= chain->fps_interval_ns) {
++         fprintf(stderr, "wsi/metal: %.1f fps\n",
++                 chain->fps_frames * 1e9 / (now - chain->fps_start_ns));
++         chain->fps_start_ns = now;
++         chain->fps_frames = 0;
++      }
++   }
++
+    /* Suboptimal only once the layer changed size, as with MoltenVK. A
+     * swapchain smaller than the window on purpose, a game rendering below the
+     * display's resolution, stays optimal; vkd3d-proton recreated it on every
+@@ -991,6 +1008,11 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+    chain->drawable_extent = drawable_extent;
+    wsi_metal_layer_size(metal_surface->pLayer, &chain->layer_extent.width,
+                         &chain->layer_extent.height);
++   const char *fps = getenv("MESA_WSI_METAL_FPS");
++   if (fps && atof(fps) > 0) {
++      chain->fps_interval_ns = atof(fps) * 1e9;
++      chain->fps_start_ns = os_time_get_nano();
++   }
+    chain->vk_format = pCreateInfo->imageFormat;
+    chain->surface = metal_surface;
+    chain->current_image_index = 0;
+-- 
+2.56.0
+
