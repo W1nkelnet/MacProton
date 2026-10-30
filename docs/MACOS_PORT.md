@@ -39,6 +39,17 @@ KosmicKrisp für MacProton:
   | Kebab Chefs (D3D11), GPU-Last | 795 ms/s | 474 ms/s | 554 ms/s |
 
   Bei Raft und Kebab Chefs fehlen im Trace unter KosmicKrisp die Bildnummern, dort zählt nur die GPU-Last pro Sekunde
+- Mesa-Patch 0010: Presents laufen über eine eigene Metal-Queue. Metal-4-Queues warten auf der GPU, bis das Display ein Drawable freigibt; auf der Haupt-Queue hielt das alle Arbeit dahinter auf, auch das nächste Bild, und die GPU lag halb still. `MESA_KK_PRESENT_QUEUE=0` stellt das alte Verhalten her
+- Im Spiel, gleicher Spielstand und Blickwinkel, M3 mit 16 GB, Fenster 1710×1107 Punkte. Bilder pro Sekunde aus dem Log der Metal-Anzeige (`MTL_HUD_ENABLED=1 MTL_HUD_LOG_ENABLED=1`, ausgewertet mit `macos/fps.py`), GPU-Zeit aus dem Metal System Trace:
+
+  | Spiel | MoltenVK | KosmicKrisp vor Patch 0010 | KosmicKrisp |
+  |---|---|---|---|
+  | Medieval Dynasty (D3D12), Dorf | 20,7 fps, 31,2 ms/Bild | 18,2 fps, 1 %-Tief 1,3 fps | 27,3 fps, 1 %-Tief 18,5 fps, 25,7 ms/Bild |
+  | Green Hell (D3D11), Dschungel | 14,7 fps, 65 ms/Bild | 19–22 fps, 31,6 ms/Bild | 22–23 fps, 25,9 ms/Bild |
+  | Green Hell, Hauptmenü | 12 fps | 21 fps | 29 fps |
+  | Raft (D3D11), offenes Meer | 23,0 fps, 27,9 ms/Bild | 21,7–26,8 fps | – |
+
+  Raft wechselt zwischen Tag und Nacht, die Werte schwanken deshalb von Lauf zu Lauf. Der Benchmark von Horizon Zero Dawn lädt auf 16 GB mit keinem der beiden Treiber: Das Spiel legt beim Laden rund 23.000 Pipelines an, KosmicKrisp hält dafür etwa 9 GB Shader-Quelltext im Speicher und der Mac lagert aus
 
 UE5 mit `-dx12`: Für Shader Model 6.6 verlangt vkd3d 64-Bit-Puffer-Atomics mit allen Operationen und Compute-Shader-Ableitungen. Metal kennt bei 64 Bit nur `atomic_min`/`atomic_max` (Puffer und Texturen, auf dem M3 getestet), kein `add` oder Compare-and-Swap, und keine Ableitungen in Compute-Shadern; SM 6.2 scheitert schon an der Denormal-Steuerung. Vorgaukeln würde nur die Shader scheitern lassen, die es nutzen.
 
