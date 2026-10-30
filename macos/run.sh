@@ -52,7 +52,10 @@ export DYLD_FALLBACK_LIBRARY_PATH="$dist/lib"
 if { [ "${MACPROTON_VULKAN_DRIVER-}" = kosmickrisp ] || [ "${MACPROTON_OPENGL-}" = zink ]; } &&
     [ -f "$dist/lib/kosmickrisp/libMoltenVK.dylib" ]; then
     export DYLD_LIBRARY_PATH="$dist/lib/kosmickrisp${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-    # The pixel-exact scaling the app sets for MoltenVK
+    # The scaling the app sets for MoltenVK: MetalFX or pixel-exact
+    if [ "${MVK_CONFIG_UPSCALING-}" = metalfx ]; then
+        export MESA_WSI_METAL_UPSCALING=${MESA_WSI_METAL_UPSCALING-metalfx}
+    fi
     if [ "${MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST-}" = 1 ]; then
         export MESA_WSI_METAL_FILTER=${MESA_WSI_METAL_FILTER-nearest}
     fi
