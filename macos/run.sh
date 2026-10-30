@@ -67,6 +67,9 @@ export SteamAppId=$appid SteamGameId=$appid SteamOverlayGameId=$appid
 export MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES=${MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES-1}
 # MoltenVK keeps its SPIR-V to MSL conversions in the prefix, so later starts
 # skip them (MoltenVK patch 0010)
+# Metal otherwise compiles only a few shaders at a time, so the first start
+# takes longer and render threads wait behind background compiles
+export MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION=${MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION-1}
 export MVK_CONFIG_SHADER_CACHE_DIR="${MVK_CONFIG_SHADER_CACHE_DIR-$WINEPREFIX/moltenvk-cache}"
 # .NET games load ICU for globalization; Wine's icu.dll forwards to an ICU
 # build this runtime does not ship, so .NET would fail fast

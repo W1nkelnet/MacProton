@@ -129,9 +129,8 @@ enum VulkanDriver: String, Codable, CaseIterable {
     }
 
     /// Games that run on MoltenVK but not yet on KosmicKrisp, unless the
-    /// user picked a driver for them: Devolverland Expo's render thread
-    /// stalls for two minutes and Unreal gives up
-    static let moltenVKOnly: Set<Int> = [1283220]
+    /// user picked a driver for them
+    static let moltenVKOnly: Set<Int> = []
 
     static func effective(for game: Game) -> VulkanDriver {
         var driver = game.vulkanDriver ?? standard

@@ -1,0 +1,49 @@
+From c884a5028881c7330402c6d2f447fa404ffe43ce Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 01:44:19 +0100
+Subject: [PATCH] wsi/metal: Complete present waits when the GPU is done with
+ the image
+
+Waiting for the presented handler holds back a frame: vkd3d-proton
+limits its frame latency with present waits, and Medieval Dynasty ran at
+30 instead of 60 frames per second with the GPU idle half the time.
+Count a present as complete once its present semaphore signaled, as
+MoltenVK does on command buffer completion, unless
+MESA_WSI_METAL_PRESENT_WAIT=displayed.
+
+Generated-by: LLM
+---
+ src/vulkan/wsi/wsi_common_metal.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index 3d95f55..ffbd8c4 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -10,6 +10,7 @@
+ 
+ #include "util/cnd_monotonic.h"
+ #include <stdlib.h>
++#include <string.h>
+ #include "util/timespec.h"
+ #include "util/u_vector.h"
+ 
+@@ -755,6 +756,15 @@ wsi_metal_swapchain_wait_for_present(struct wsi_swapchain *wsi_chain,
+    if (result != VK_SUCCESS)
+       return result;
+ 
++   /* The image went to the drawable on the GPU by now. Waiting until it is on
++    * the display as well holds back a frame: vkd3d-proton limits its frame
++    * latency with present waits and Medieval Dynasty then runs at half the
++    * refresh rate. Like MoltenVK, count the present as complete here unless
++    * MESA_WSI_METAL_PRESENT_WAIT=displayed. */
++   const char *wait = getenv("MESA_WSI_METAL_PRESENT_WAIT");
++   if (!wait || strcmp(wait, "displayed"))
++      return VK_SUCCESS;
++
+    timespec_from_nsec(&abs_timespec, abs_timeout);
+ 
+    mtx_lock(&present_info->mutex);
+-- 
+2.56.0
+

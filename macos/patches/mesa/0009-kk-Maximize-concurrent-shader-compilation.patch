@@ -1,0 +1,33 @@
+From aa953c7d9777dd7b1b66ff889ac64ce976ec4e61 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Fri, 30 Oct 2026 01:53:46 +0100
+Subject: [PATCH] kk: Maximize concurrent shader compilation
+
+Metal otherwise compiles only a few libraries at a time. DXVK compiles
+pipelines ahead on background threads, and when the render thread needs
+one that is not there yet it waits behind those: Devolverland Expo's
+render thread stalled for two minutes until Unreal gave up.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/bridge/mtl_device.m | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/kosmickrisp/bridge/mtl_device.m b/src/kosmickrisp/bridge/mtl_device.m
+index 753cda3..0825388 100644
+--- a/src/kosmickrisp/bridge/mtl_device.m
++++ b/src/kosmickrisp/bridge/mtl_device.m
+@@ -26,6 +26,10 @@ mtl_device_create()
+       
+       for (uint32_t i = 0u; i < device_count; ++i) {
+          if ([devs[i] supportsFamily:MTLGPUFamilyMetal4]) {
++            /* Metal otherwise compiles only a few shaders at a time, and a
++             * game's render thread then waits behind the pipelines DXVK and
++             * vkd3d compile ahead in the background */
++            devs[i].shouldMaximizeConcurrentCompilation = YES;
+             device = (mtl_device *)[devs[i] retain];
+             break;
+          }
+-- 
+2.56.0
+

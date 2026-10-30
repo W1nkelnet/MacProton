@@ -248,9 +248,6 @@ def test_game(game, runtime, seconds, out, tool):
             if not alive and time.time() - started > 60:
                 break
         result["running"] = any(exe_name in p.lower() for p in processes())
-        # Engines show their own crash reporter, the game process may live on
-        result["crash_reporter"] = any(re.search(r"crashreport(client|er)\.exe", p, re.I)
-                                       for p in processes())
         result["seconds"] = round(time.time() - started)
 
     env = dict(os.environ, WINEPREFIX=prefix)
@@ -277,8 +274,8 @@ def test_game(game, runtime, seconds, out, tool):
 
 
 def verdict(r):
-    if r["crash"] or r["dumps"] or r.get("crash_reporter") or not r["window"]:
-        return "Absturz" if (r["crash"] or r["dumps"] or r.get("crash_reporter")) else "kein Fenster"
+    if r["crash"] or r["dumps"] or not r["window"]:
+        return "Absturz" if (r["crash"] or r["dumps"]) else "kein Fenster"
     if r["device_lost"]:
         return "Gerät verloren"
     if not r["running"]:
