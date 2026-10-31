@@ -84,7 +84,7 @@ Brücke zum nativen Steam-Client + `proton`-Startskript.
 | Fenster/Eingabe | `winemac.drv` statt `winex11.drv`/`winewayland.drv` | Ist im Wine-Baum bereits vorhanden. |
 | D3D9–11 | DXVK über **MoltenVK** | Einzige quelloffene Option. Lücken: Transform Feedback, einige Formate; Geometry Shader bildet MoltenVK mit Compute nach. |
 | D3D12 | vkd3d-proton, erste Schritte (siehe Phase 4) | Läuft auf MoltenVK mit Abstrichen, mit Spielen noch ungetestet. |
-| Sync-Primitive | fsync/ntsync auf macOS deaktiviert, Fallback auf wineserver-Sync; später msync-artige Lösung über Mach-Semaphoren | fsync basiert auf Linux-`futex_waitv`, ntsync auf einem Linux-Kernelmodul. |
+| Sync-Primitive | fsync über `os_sync_wait_on_address` (macOS 14.4+, Wine-Patch 0006), sonst wineserver-Sync; ntsync aus | fsync basiert unter Linux auf `futex_waitv`, ntsync auf einem Linux-Kernelmodul. |
 | Build | nativer Build auf macOS statt Docker/Steam-Runtime-Container | Der Linux-Container erzeugt keine Mach-O-Binärdateien. |
 
 ## Phasen
@@ -101,7 +101,7 @@ Bisherige Wine-Anpassungen für macOS (alle per `#ifdef` bzw. configure, Linux-V
 
 | Datei | Änderung |
 |---|---|
-| `server/fsync.c`, `dlls/ntdll/unix/fsync.c` | Futex-Syscalls nur unter Linux, sonst `ENOSYS` (fsync wird auf macOS nie aktiviert) |
+| `server/fsync.c`, `dlls/ntdll/unix/fsync.c` | Futex-Syscalls nur unter Linux; auf macOS `os_sync_wait_on_address` (Wine-Patch 0006) |
 | `server/inproc_sync.c`, `dlls/ntdll/unix/sync.c` | `ntsync_tmp.h` nur unter Linux → vorhandener Fallback greift |
 | `dlls/ntdll/unix/loader.c` | `malloc.h`/`mallopt(M_PERTURB)` nur mit glibc |
 | `dlls/ntdll/unix/signal_x86_64.c` | `set_thread_teb` nur unter Linux (macOS setzt %gs in `init_syscall_frame`); `jmp *%rcx` statt `jmp %rcx` |
@@ -204,6 +204,12 @@ Gewählt ist vkd3d-proton auf MoltenVK (Patches in `macos/patches/vkd3d-proton`,
 ### Anzeige
 - [x] **Hochskalierung** (Einstellung in MacProton, „Anzeige“): Ohne Retina-Modus sind Fenster und Swapchain in Punkten groß, macOS verdoppelt jedes Bild bilinear. Mit `MVK_CONFIG_UPSCALING=metalfx` rendert das Spiel weiter in seine Bilder, MoltenVK rechnet sie beim Present mit MetalFX Spatial auf die Pixel des Displays hoch (MoltenVK-Patch 0009). MetalFX wird erst zur Laufzeit geladen. „Pixelgenau“ setzt `MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST`. MetalFX Temporal bräuchte Tiefe und Bewegungsvektoren vom Spiel und ist deshalb nicht wählbar
 
+### Synchronisation
+- [x] **fsync auf macOS** (Wine-Patch 0006): Threads warten in gemeinsamem Speicher statt über Anfragen an den wineserver. macOS 14.4 kann mit `os_sync_wait_on_address(_with_timeout)` und dem Flag `SHARED` prozessübergreifend auf eine Adresse warten; das reicht für ein Objekt. Für `futex_waitv` (mehrere Objekte) schläft ein Thread auf einer von 48 Sequenznummern in den reservierten ersten Slots, gewählt nach Thread-ID (`tid >> 2`, Thread-IDs sind Vielfache von 4). Die Slots sind dafür 32 statt 16 Byte groß; die letzten 8 Byte zählen solche Warter (untere 16 Bit) und markieren ihre Sequenznummern, `futex_wake` erhöht die markierten und weckt sie. `run.sh` setzt `WINEFSYNC=1`, `WINEFSYNC=0` schaltet zurück
+- Gemessen: Event-Ping-Pong zwischen Threads 6 statt 20 µs, über Prozessgrenzen 8 µs. Green Hell (KosmicKrisp) rund 10 % schneller, Rise of the Tomb Raider gleich schnell
+- Ein schlafender Thread verpasst unter macOS ab und zu seinen Weckruf oder kommt sekundenlang nicht dran; Rise of the Tomb Raider hing dadurch mit fsync etwa in jedem zweiten Benchmark 0,5 bis 4 s. Kein Warten schläft deshalb länger als 250 ms am Stück, danach prüft der Aufrufer seine Objekte neu wie nach einem unechten Aufwachen. Danach in 14 Läufen kein Bild über 100 ms außer dem Kaltstart-Muster im Geothermalen Tal (vier Bilder um 500 ms im ersten Lauf nach einer Pause), das es ohne fsync genauso gibt. Synthetische Tests (Semaphoren-Last, Timer, Weckrufe vom Server unter Volllast) verlieren keinen Weckruf; die Ursache ist offen
+- `docs/macos/synctest.c` prüft die Sync-Objekte mit und ohne fsync: Ping-Pong, Semaphoren, Mutexe, Wait-Any/All, APCs, Timeouts, verlassene Mutexe, `SignalObjectAndWait`, Waits länger als 250 ms und Prozessgrenzen
+
 ### Ladezeiten
 - [x] **MSL-Cache** (MoltenVK-Patch 0010): MoltenVK übersetzte jeden Shader bei jedem Start neu von SPIR-V nach MSL. Das läuft unter Rosetta und kostete Horizon Zero Dawn beim Laden rund 50.000 Übersetzungen mit je 17 bis 45 ms auf sieben Threads. Den Metal-Teil cacht macOS selbst (`$(getconf DARWIN_USER_CACHE_DIR)org.winehq.wine/com.apple.metal`). Mit `MVK_CONFIG_SHADER_CACHE_DIR` hängt MoltenVK jede Übersetzung an eine Datei an, Schlüssel sind der SPIR-V-Code und die serialisierte Konfiguration, die die Pipeline anfordert. Spätere Starts und spätere Pipelines im selben Start nehmen das MSL aus der Datei. `run.sh` legt den Cache in `$WINEPREFIX/moltenvk-cache` an; die Datei gilt nur für denselben MoltenVK-Build (Mach-O-UUID) und dasselbe Gerät, Dateien anderer Builds löscht MoltenVK. Leer gesetzt schaltet die Variable den Cache ab
 - Gemessen mit Horizon Zero Dawn (Apple M3, „Fortfahren“ bis zur Spielwelt): nach einem Update von vkd3d-proton und MoltenVK (alle Caches ungültig) rund 27 Minuten für 24.000 Pipelines; mit warmem Metal-Cache, aber ohne MSL-Cache 140 s; mit MSL-Cache 35 s. Der MSL-Cache belegt 144 MB
@@ -235,7 +241,7 @@ Linux-Annahmen im Skript `proton`:
 - `LD_LIBRARY_PATH` (Zeile ~48) → `DYLD_FALLBACK_LIBRARY_PATH`
 - `libdl.so.2`, `libGLX_nvidia.so.0` (~415–460) → auf macOS überspringen
 - `/proc/modules`, `/proc/sys/vm/max_map_count` (~1421, ~2012) → überspringen
-- `WINEFSYNC`/ntsync-Logik (~1766–1784) → auf macOS aus
+- `WINEFSYNC`/ntsync-Logik (~1766–1784) → ntsync auf macOS aus; `run.sh` setzt `WINEFSYNC=1`
 - Steam-Runtime/pressure-vessel-Annahmen entfernen
 
 ### Phase 7 – Verteilung über GitHub

@@ -67,6 +67,9 @@ if { [ "${MACPROTON_VULKAN_DRIVER-}" = kosmickrisp ] || [ "${MACPROTON_OPENGL-}"
 fi
 export WINEDLLOVERRIDES="steam.exe=b;mshtml=;d3d8,d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b;${WINEDLLOVERRIDES-}"
 export SteamAppId=$appid SteamGameId=$appid SteamOverlayGameId=$appid
+# Threads wait for each other in shared memory instead of through the
+# wineserver (Wine patch 0006, macOS 14.4 and later); WINEFSYNC=0 turns it off
+export WINEFSYNC=${WINEFSYNC-1}
 # Keep resources alive that bound descriptor sets still reference after the
 # game destroyed them; Metal otherwise loses the device ("Invalid Resource")
 export MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES=${MVK_CONFIG_LIVE_CHECK_ALL_RESOURCES-1}

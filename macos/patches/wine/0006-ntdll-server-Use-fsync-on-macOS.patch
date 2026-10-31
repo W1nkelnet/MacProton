@@ -1,0 +1,436 @@
+From aa0871fb84ed5e0fa9a856b44b9164fe55a6f05e Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sat, 31 Oct 2026 15:43:44 +0100
+Subject: [PATCH] ntdll, server: Use fsync on macOS.
+
+macOS 14.4 and later can wait on an address shared between processes
+(os_sync_wait_on_address), which is all fsync needs for one object. A
+wait on several objects sleeps on one of 48 sequence numbers in the
+reserved first slots, chosen by thread id; each object, now 32 bytes,
+counts such waiters and marks their sequence numbers, and a wake bumps
+those.
+
+A sleeping thread now and then misses its wake on macOS, for up to
+seconds in Rise of the Tomb Raider. No wait sleeps longer than 250 ms;
+after that the caller checks its objects again, as after a spurious
+wake.
+
+Event ping-pong between threads takes 6 instead of 20 microseconds;
+Green Hell runs about 10 % faster.
+---
+ dlls/ntdll/unix/fsync.c | 157 ++++++++++++++++++++++++++++++++++++++--
+ server/fsync.c          |  69 ++++++++++++++++--
+ server/inproc_sync.c    |  15 ++++
+ 3 files changed, 229 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index 88c2c0cb7ef..d13bff0e138 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -42,6 +42,9 @@
+ #ifdef HAVE_LINUX_FUTEX_H
+ # include <linux/futex.h>
+ #endif
++#ifdef __APPLE__
++# include <os/os_sync_wait_on_address.h>
++#endif
+ #include <unistd.h>
+ #include <stdint.h>
+ 
+@@ -80,6 +83,14 @@ struct futex_waitv {
+ 
+ #define u64_to_ptr(x) (void *)(uintptr_t)(x)
+ 
++#ifdef __APPLE__
++/* The second half of each object tells which threads wait on it together
++ * with other objects; see futex_wait_multiple(). */
++# define FSYNC_SLOT_SIZE 32
++#else
++# define FSYNC_SLOT_SIZE 16
++#endif
++
+ struct timespec64
+ {
+     long long tv_sec;
+@@ -138,6 +149,86 @@ static void simulate_sched_quantum(void)
+     usleep(0);
+ }
+ 
++#ifdef __APPLE__
++
++static void *get_shm( unsigned int idx );
++
++/* macOS has no futex_waitv(), but os_sync_wait_on_address() waits on one
++ * address shared between processes. A wait on several objects instead sleeps
++ * on one of FSYNC_SEQ_COUNT sequence numbers in the first, reserved slots,
++ * chosen by thread id. The last 8 bytes of each object count such waiters
++ * (low 16 bits) and mark the sequence numbers they sleep on; futex_wake()
++ * bumps those. */
++
++#define FSYNC_SEQ_COUNT 48
++#define FSYNC_SEQ_DUMMY 56  /* an int in the reserved slots that is always 0 */
++
++static inline UINT64 *multi_wait_word( const int *addr )
++{
++    return (UINT64 *)((char *)addr + 24);
++}
++
++static inline int *seq_word( unsigned int i )
++{
++    return (int *)get_shm( 0 ) + i;
++}
++
++static void add_multi_waiter( const int *addr, UINT64 bit )
++{
++    UINT64 *word = multi_wait_word( addr ), old = __atomic_load_n( word, __ATOMIC_SEQ_CST ), new;
++
++    do new = (old & ~(UINT64)0xffff) | ((old + 1) & 0xffff) | bit;
++    while (!__atomic_compare_exchange_n( word, &old, new, FALSE, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ));
++}
++
++static void remove_multi_waiter( const int *addr )
++{
++    UINT64 *word = multi_wait_word( addr ), old = __atomic_load_n( word, __ATOMIC_SEQ_CST ), new;
++
++    do
++    {
++        new = old - 1;
++        if (!(new & 0xffff)) new = 0;
++    }
++    while (!__atomic_compare_exchange_n( word, &old, new, FALSE, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ));
++}
++
++/* Now and then a thread sleeps through its wake (seen in Rise of the Tomb
++ * Raider, for seconds); sleep at most this long, and let the caller check
++ * the objects again, as after a spurious wake. */
++#define FSYNC_MAX_SLEEP 250000000ll  /* ns */
++
++static int mac_wait( const int *addr, int val, const struct timespec64 *end, clockid_t clock_id )
++{
++    long long ns = LLONG_MAX;  /* no timeout */
++    int ret;
++
++    if (!__builtin_available( macOS 14.4, * ))
++    {
++        errno = ENOSYS;
++        return -1;
++    }
++
++    if (end)
++    {
++        struct timespec now;
++
++        clock_gettime( clock_id, &now );
++        ns = (end->tv_sec - now.tv_sec) * 1000000000ll + end->tv_nsec - now.tv_nsec;
++        if (ns <= 0)
++        {
++            errno = ETIMEDOUT;
++            return -1;
++        }
++    }
++    ret = os_sync_wait_on_address_with_timeout( (void *)addr, (uint32_t)val, 4, OS_SYNC_WAIT_ON_ADDRESS_SHARED,
++                                                OS_CLOCK_MACH_ABSOLUTE_TIME, min( ns, FSYNC_MAX_SLEEP ) );
++    if (ret < 0 && errno == ETIMEDOUT && ns > FSYNC_MAX_SLEEP) return 0;
++    return ret < 0 ? ret : 0;
++}
++
++#endif
++
+ static inline int futex_wait_multiple( const struct futex_waitv *futexes,
+         int count, const struct timespec64 *end, clockid_t clock_id )
+ {
+@@ -146,6 +237,29 @@ static inline int futex_wait_multiple( const struct futex_waitv *futexes,
+         return syscall( __NR_futex_waitv, futexes, count, 0, end, clock_id );
+    else
+         return syscall( __NR_futex_waitv, futexes, count, 0, NULL, 0 );
++#elif defined(__APPLE__)
++    /* thread ids are multiples of 4 */
++    unsigned int bucket = (GetCurrentThreadId() >> 2) % FSYNC_SEQ_COUNT;
++    int *seq = seq_word( bucket ), current, i, ret = 0;
++
++    if (count == 1) return mac_wait( u64_to_ptr(futexes[0].uaddr), futexes[0].val, end, clock_id );
++
++    for (i = 0; i < count; i++)
++        add_multi_waiter( u64_to_ptr(futexes[i].uaddr), (UINT64)1 << (16 + bucket) );
++    current = __atomic_load_n( seq, __ATOMIC_SEQ_CST );
++    for (i = 0; i < count; i++)
++    {
++        if (__atomic_load_n( (int *)u64_to_ptr(futexes[i].uaddr), __ATOMIC_SEQ_CST ) != (int)futexes[i].val)
++        {
++            errno = EAGAIN;
++            ret = -1;
++            break;
++        }
++    }
++    if (!ret) ret = mac_wait( seq, current, end, clock_id );
++    for (i = 0; i < count; i++)
++        remove_multi_waiter( u64_to_ptr(futexes[i].uaddr) );
++    return ret;
+ #else
+     errno = ENOSYS;
+     return -1;
+@@ -156,6 +270,29 @@ static inline int futex_wake( int *addr, int val )
+ {
+ #ifdef __linux__
+     return syscall( __NR_futex, addr, 1, val, NULL, 0, 0 );
++#elif defined(__APPLE__)
++    UINT64 word;
++
++    if (!__builtin_available( macOS 14.4, * ))
++    {
++        errno = ENOSYS;
++        return -1;
++    }
++
++    if (val == 1) os_sync_wake_by_address_any( addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED );
++    else os_sync_wake_by_address_all( addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED );
++
++    if ((word = __atomic_load_n( multi_wait_word( addr ), __ATOMIC_SEQ_CST )) & 0xffff)
++    {
++        for (word >>= 16; word; word &= word - 1)
++        {
++            int *seq = seq_word( __builtin_ctzll( word ) );
++
++            __atomic_add_fetch( seq, 1, __ATOMIC_SEQ_CST );
++            os_sync_wake_by_address_all( seq, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED );
++        }
++    }
++    return 0;
+ #else
+     errno = ENOSYS;
+     return -1;
+@@ -201,13 +338,13 @@ static volatile void *shm_addrs[8192];
+ 
+ static void *get_shm( unsigned int idx )
+ {
+-    int entry  = (idx * 16) / FSYNC_SHM_PAGE_SIZE;
+-    int offset = (idx * 16) % FSYNC_SHM_PAGE_SIZE;
++    int entry  = (idx * FSYNC_SLOT_SIZE) / FSYNC_SHM_PAGE_SIZE;
++    int offset = (idx * FSYNC_SLOT_SIZE) % FSYNC_SHM_PAGE_SIZE;
+ 
+     if (entry >= ARRAY_SIZE(shm_addrs))
+     {
+         ERR( "idx %u exceeds maximum of %u.\n", idx,
+-             (unsigned int)ARRAY_SIZE(shm_addrs) * (FSYNC_SHM_PAGE_SIZE / 16) );
++             (unsigned int)ARRAY_SIZE(shm_addrs) * (FSYNC_SHM_PAGE_SIZE / FSYNC_SLOT_SIZE) );
+         return NULL;
+     }
+ 
+@@ -303,8 +440,8 @@ static unsigned int shm_index_from_shm( char *shm )
+     {
+         if (shm >= (char *)shm_addrs[i] && shm < (char *)shm_addrs[i] + FSYNC_SHM_PAGE_SIZE)
+         {
+-            idx_offset = (shm - (char *)shm_addrs[i]) / 16;
+-            return i * (FSYNC_SHM_PAGE_SIZE / 16) + idx_offset;
++            idx_offset = (shm - (char *)shm_addrs[i]) / FSYNC_SLOT_SIZE;
++            return i * (FSYNC_SHM_PAGE_SIZE / FSYNC_SLOT_SIZE) + idx_offset;
+         }
+     }
+ 
+@@ -468,6 +605,9 @@ void fsync_init( DWORD pid )
+     fsync_enabled = 1;
+ #ifdef __linux__
+     syscall( __NR_futex_waitv, NULL, 0, 0, NULL, 0 );
++#elif defined(__APPLE__)
++    if (__builtin_available( macOS 14.4, * )) errno = 0;
++    else errno = ENOSYS;
+ #else
+     errno = ENOSYS;
+ #endif
+@@ -771,7 +911,9 @@ NTSTATUS fsync_wait_objects( DWORD count, const HANDLE *handles,
+     int has_fsync = 0, has_server = 0;
+     clockid_t clock_id = 0;
+     struct timespec64 end;
++#ifndef __APPLE__
+     int dummy_futex = 0;
++#endif
+     BOOL waited = FALSE;
+     DWORD waitcount;
+     int i, ret;
+@@ -954,7 +1096,12 @@ NTSTATUS fsync_wait_objects( DWORD count, const HANDLE *handles,
+                 else
+                 {
+                     /* Avoid breaking things entirely. */
++#ifdef __APPLE__
++                    /* it must be in shm, for the multiple waits word next to it */
++                    futex_vector_set( &futexes[i], seq_word( FSYNC_SEQ_DUMMY ), 0 );
++#else
+                     futex_vector_set( &futexes[i], &dummy_futex, dummy_futex );
++#endif
+                 }
+             }
+ 
+diff --git a/server/fsync.c b/server/fsync.c
+index e84ec4b3634..cbd169d7ae9 100644
+--- a/server/fsync.c
++++ b/server/fsync.c
+@@ -35,6 +35,9 @@
+ # include <sys/syscall.h>
+ #endif
+ #include <unistd.h>
++#ifdef __APPLE__
++# include <os/os_sync_wait_on_address.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -52,6 +55,19 @@
+ #define __NR_futex_waitv 449
+ #endif
+ 
++#ifdef __APPLE__
++/* The second half of each object tells which threads wait on it together
++ * with other objects, and the first slots hold the sequence numbers they
++ * sleep on; see futex_wake() and ntdll. macOS can't grow shared memory, so
++ * the whole section is sized up front; the kernel only backs touched pages. */
++# define FSYNC_SLOT_SIZE 32
++# define FSYNC_SHM_MAX_SIZE (1024 * FSYNC_SHM_PAGE_SIZE)
++# define FSYNC_RESERVED_SLOTS 8
++#else
++# define FSYNC_SLOT_SIZE 16
++# define FSYNC_RESERVED_SLOTS 1
++#endif
++
+ int do_fsync_cached = -1;
+ 
+ int fsync_check_support(void)
+@@ -59,6 +75,9 @@ int fsync_check_support(void)
+ #ifdef __linux__
+     syscall( __NR_futex_waitv, 0, 0, 0, 0, 0 );
+     return getenv( "WINEFSYNC" ) && atoi(getenv( "WINEFSYNC" )) && errno != ENOSYS && errno != EPERM;
++#elif defined(__APPLE__)
++    if (!__builtin_available( macOS 14.4, * )) return 0;
++    return getenv( "WINEFSYNC" ) && atoi(getenv( "WINEFSYNC" ));
+ #else
+     return 0;
+ #endif
+@@ -107,7 +126,11 @@ void fsync_init(void)
+     shm_addrs = calloc( 128, sizeof(shm_addrs[0]) );
+     shm_addrs_size = 128;
+ 
++#ifdef __APPLE__
++    shm_size = FSYNC_SHM_MAX_SIZE;
++#else
+     shm_size = FSYNC_SHM_PAGE_SIZE;
++#endif
+     if (ftruncate( shm_fd, shm_size ) == -1)
+         perror( "ftruncate" );
+ 
+@@ -118,7 +141,7 @@ void fsync_init(void)
+     shm_idx_free_map_size = 256;
+     shm_idx_free_map = malloc( shm_idx_free_map_size * sizeof(*shm_idx_free_map) );
+     memset( shm_idx_free_map, 0xff, shm_idx_free_map_size * sizeof(*shm_idx_free_map) );
+-    shm_idx_free_map[0] &= ~(uint64_t)1; /* Avoid allocating shm_index 0. */
++    shm_idx_free_map[0] &= ~(((uint64_t)1 << FSYNC_RESERVED_SLOTS) - 1); /* Avoid allocating shm_index 0 and the reserved slots. */
+ 
+     atexit( shm_cleanup );
+ }
+@@ -135,8 +158,8 @@ struct fsync
+ 
+ static void *get_shm( unsigned int idx )
+ {
+-    int entry  = (idx * 16) / FSYNC_SHM_PAGE_SIZE;
+-    int offset = (idx * 16) % FSYNC_SHM_PAGE_SIZE;
++    int entry  = (idx * FSYNC_SLOT_SIZE) / FSYNC_SHM_PAGE_SIZE;
++    int offset = (idx * FSYNC_SLOT_SIZE) % FSYNC_SHM_PAGE_SIZE;
+ 
+     if (entry >= shm_addrs_size)
+     {
+@@ -185,7 +208,7 @@ static int alloc_shm_idx_from_word( unsigned int word_index )
+ 
+ unsigned int fsync_alloc_shm( int low, int high )
+ {
+-#ifdef __linux__
++#if defined(__linux__) || defined(__APPLE__)
+     unsigned int i;
+     int shm_idx;
+     int *shm;
+@@ -219,7 +242,15 @@ unsigned int fsync_alloc_shm( int low, int high )
+         shm_idx = alloc_shm_idx_from_word( old_size );
+     }
+ 
+-    while (shm_idx * 16 >= shm_size)
++#ifdef __APPLE__
++    if ((off_t)shm_idx * FSYNC_SLOT_SIZE >= shm_size)
++    {
++        fprintf( stderr, "fsync: out of shared memory for objects\n" );
++        shm_idx_free_map[shm_idx / BITS_IN_FREE_MAP_WORD] |= (uint64_t)1 << (shm_idx % BITS_IN_FREE_MAP_WORD);
++        return 0;
++    }
++#endif
++    while ((off_t)shm_idx * FSYNC_SLOT_SIZE >= shm_size)
+     {
+         /* Better expand the shm section. */
+         shm_size += FSYNC_SHM_PAGE_SIZE;
+@@ -289,9 +320,9 @@ void fsync_cleanup_process_shm_indices( process_id_t id )
+         free_word = shm_idx_free_map[i];
+         if (free_word == ~(uint64_t)0) continue;
+         shmbase = get_shm( i * BITS_IN_FREE_MAP_WORD );
+-        for (j = !i; j < BITS_IN_FREE_MAP_WORD; ++j)
++        for (j = i ? 0 : FSYNC_RESERVED_SLOTS; j < BITS_IN_FREE_MAP_WORD; ++j)
+         {
+-            shm = (int *)((char *)shmbase + j * 16);
++            shm = (int *)((char *)shmbase + j * FSYNC_SLOT_SIZE);
+             if (!(free_word & ((uint64_t)1 << j)) && shm[3] == id
+                   && __atomic_load_n( &shm[2], __ATOMIC_SEQ_CST ) == 1)
+                 fsync_free_shm_idx( i * BITS_IN_FREE_MAP_WORD + j );
+@@ -312,6 +343,30 @@ static inline int futex_wake( int *addr, int val )
+ {
+ #ifdef __linux__
+     return syscall( __NR_futex, addr, 1, val, NULL, 0, 0 );
++#elif defined(__APPLE__)
++    /* fsync_check_support() checked for macOS 14.4 */
++    if (__builtin_available( macOS 14.4, * ))
++    {
++        uint64_t word;
++
++        if (val == 1) os_sync_wake_by_address_any( addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED );
++        else os_sync_wake_by_address_all( addr, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED );
++
++        /* wake the threads waiting on this object and others, see ntdll */
++        word = __atomic_load_n( (uint64_t *)(addr + 6), __ATOMIC_SEQ_CST );
++
++        if (word & 0xffff)
++        {
++            for (word >>= 16; word; word &= word - 1)
++            {
++                int *seq = (int *)get_shm( 0 ) + __builtin_ctzll( word );
++
++                __atomic_add_fetch( seq, 1, __ATOMIC_SEQ_CST );
++                os_sync_wake_by_address_all( seq, 4, OS_SYNC_WAKE_BY_ADDRESS_SHARED );
++            }
++        }
++    }
++    return 0;
+ #else
+     /* fsync_check_support() never enables fsync without futexes */
+     errno = ENOSYS;
+diff --git a/server/inproc_sync.c b/server/inproc_sync.c
+index 0bfe3ccf7d4..8a995a5aa19 100644
+--- a/server/inproc_sync.c
++++ b/server/inproc_sync.c
+@@ -38,6 +38,21 @@
+ 
+ #ifdef __linux__
+ #include "ntsync_tmp.h"
++#elif defined(__APPLE__)
++/* macOS has no ntsync device, but fsync uses the same objects. The ioctls
++ * below are never reached there: get_inproc_device_fd() only returns a
++ * descriptor when fsync is in use. */
++typedef uint32_t __u32;
++struct ntsync_sem_args { __u32 count; __u32 max; };
++struct ntsync_mutex_args { __u32 owner; __u32 count; };
++struct ntsync_event_args { __u32 manual; __u32 signaled; };
++#define NTSYNC_IOC_CREATE_SEM   0
++#define NTSYNC_IOC_CREATE_MUTEX 0
++#define NTSYNC_IOC_CREATE_EVENT 0
++#define NTSYNC_IOC_MUTEX_KILL   0
++#define NTSYNC_IOC_EVENT_SET    0
++#define NTSYNC_IOC_EVENT_RESET  0
++#define NTSYNC_IOC_EVENT_READ   0
+ #endif
+ 
+ #ifdef NTSYNC_IOC_EVENT_READ
+-- 
+2.56.0
+
