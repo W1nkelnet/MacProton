@@ -1,0 +1,523 @@
+From a6121cf354f70a66c5f482f5e7a7992f6ee5b2b0 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 00:07:53 +0100
+Subject: [PATCH] kk: Build Metal pipelines on a compile queue
+
+vkCreate*Pipelines waited for Metal to build each pipeline, so a game
+compiled at most as many pipelines at once as it had threads creating
+them. Horizon Zero Dawn creates its pipelines on six threads while
+Metal's compiler processes could use all cores.
+
+The MSL is still generated during pipeline creation, but the Metal
+libraries and pipeline states of compute shaders and of the VS that
+holds a graphics pipeline are now built on a device queue with one
+thread per core. Binding a shader waits for its build, or builds it
+on the calling thread if the queue has not started it yet. Destroying
+a shader drops its build if it has not started. Draws and dispatches
+with a pipeline Metal could not build are skipped instead of failing
+pipeline creation.
+
+Horizon Zero Dawn's first start with empty caches, 15 minutes: Metal
+built 8,644 instead of 4,240 pipelines, its compiler used 6.4 instead
+of 3.3 cores. Rise of the Tomb Raider's benchmark with warm caches is
+unchanged at 27.1 fps.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_dispatch.c |   8 +
+ src/kosmickrisp/vulkan/kk_cmd_draw.c     |   5 +
+ src/kosmickrisp/vulkan/kk_device.c       |  13 ++
+ src/kosmickrisp/vulkan/kk_device.h       |   3 +
+ src/kosmickrisp/vulkan/kk_shader.c       | 185 +++++++++++++++++------
+ src/kosmickrisp/vulkan/kk_shader.h       |  20 ++-
+ 6 files changed, 188 insertions(+), 46 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c b/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
+index 4df22e7..b3202d5 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
+@@ -80,6 +80,10 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
+    struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
+    struct mtl_size local_size = cs->info.cs.local_size;
+ 
++   /* Metal could not build the pipeline */
++   if (cs->pipeline.cs == NULL)
++      return;
++
+    mtl_compute_encoder *encoder = cs_get_compute(cmd);
+    if (cmd->state.cond_render.enabled) {
+       /* Convert to indirect for predication */
+@@ -129,6 +133,10 @@ kk_CmdDispatchIndirect2KHR(VkCommandBuffer commandBuffer,
+    struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
+    struct mtl_size local_size = cs->info.cs.local_size;
+ 
++   /* Metal could not build the pipeline */
++   if (cs->pipeline.cs == NULL)
++      return;
++
+    mtl_compute_encoder *encoder = cs_get_compute(cmd);
+    if (cmd->state.cond_render.enabled) {
+       struct kk_ptr patched =
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 14e0532..746dfa1 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -2410,6 +2410,11 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+ {
+    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+ 
++   /* Metal could not build the pipeline */
++   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
++   if (vs == NULL || vs->pipeline.gfx.render == NULL)
++      return;
++
+    kk_flush_gfx_state(cmd);
+ 
+    data->restart = dyn->ia.primitive_restart_enable;
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index 83773d0..8bf7a8e 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -30,6 +30,7 @@
+ #include "vk_pipeline_cache.h"
+ 
+ #include <time.h>
++#include <unistd.h>
+ 
+ struct kk_mtl_compiler {
+    mtl_compiler *handle;
+@@ -300,6 +301,15 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+    if (dev->mtl_compiler_handle == NULL)
+       goto fail_init;
+ 
++   /* Metal's compiler runs in processes of its own; one thread per core keeps
++    * it busy while games create pipelines on a few threads */
++   if (!util_queue_init(&dev->compile_queue, "kk_compile", 64,
++                        MAX2(sysconf(_SC_NPROCESSORS_ONLN), 1),
++                        UTIL_QUEUE_INIT_RESIZE_IF_FULL, NULL)) {
++      result = VK_ERROR_INITIALIZATION_FAILED;
++      goto fail_compiler_handle;
++   }
++
+    /* We need to initialize the device residency set before any bo is created. */
+    simple_mtx_init(&dev->residency_set.mutex, mtx_plain);
+    simple_mtx_init(&dev->upscaler_lock, mtx_plain);
+@@ -376,6 +386,8 @@ fail_vab_memory:
+    mtl_release(dev->residency_set.handle);
+    simple_mtx_destroy(&dev->residency_set.mutex);
+ fail_compiler:
++   util_queue_destroy(&dev->compile_queue);
++fail_compiler_handle:
+    kk_release_compiler(dev);
+ fail_init:
+    vk_device_finish(&dev->vk);
+@@ -423,6 +435,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+    mtl_release(dev->residency_set.handle);
+    simple_mtx_destroy(&dev->residency_set.mutex);
+ 
++   util_queue_destroy(&dev->compile_queue);
+    kk_release_compiler(dev);
+ 
+    vk_device_finish(&dev->vk);
+diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
+index c5dbc57..6a146b8 100644
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -20,6 +20,7 @@
+ #include "libkk_shaders.h"
+ 
+ #include "util/u_dynarray.h"
++#include "util/u_queue.h"
+ 
+ #include "vk_device.h"
+ #include "vk_meta.h"
+@@ -82,6 +83,8 @@ struct kk_device {
+ 
+    mtl_device *mtl_handle;
+    mtl_compiler *mtl_compiler_handle;
++   /* Builds the Metal pipelines of new shaders, see kk_shader */
++   struct util_queue compile_queue;
+ 
+    /* Dispatch table exposed to the user. Required since we need to record all
+     * commands due to Metal limitations */
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index bf6c45c..7db2b72 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -84,7 +84,7 @@ kk_nir_pack_tcs_patches(nir_shader *nir, unsigned vertices, unsigned per_group)
+  * making Metal pipelines from them, summed over all threads. */
+ static struct {
+    uint64_t start_ns, last_ns;
+-   uint64_t compiled, cached;
++   uint64_t compiled, cached, built;
+    uint64_t msl_ns, msl_cpu_ns, library_ns, pipeline_ns;
+ } kk_stats;
+ 
+@@ -160,9 +160,10 @@ kk_stats_report(void)
+ 
+    fprintf(stderr,
+            "kk: %.0f s: %" PRIu64 " pipelines compiled, %" PRIu64
+-           " from cache; MSL %.1f s (CPU %.1f s), libraries %.1f s, pipelines"
+-           " %.1f s\n",
++           " from cache, %" PRIu64 " built by Metal; MSL %.1f s (CPU %.1f s),"
++           " libraries %.1f s, pipelines %.1f s\n",
+            (now - kk_stats.start_ns) / 1e9, kk_stats.compiled, kk_stats.cached,
++           kk_stats.built,
+            kk_stats.msl_ns / 1e9, kk_stats.msl_cpu_ns / 1e9,
+            kk_stats.library_ns / 1e9, kk_stats.pipeline_ns / 1e9);
+ }
+@@ -968,6 +969,20 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
+ static const struct vk_shader_ops kk_shader_ops;
+ static void kk_shader_pack(struct kk_shader *shader);
+ 
++static struct kk_shader *
++kk_shader_alloc(struct kk_device *dev, mesa_shader_stage stage,
++                const VkAllocationCallbacks *pAllocator)
++{
++   struct kk_shader *shader = vk_shader_zalloc(
++      &dev->vk, &kk_shader_ops, stage, pAllocator, sizeof(*shader));
++   if (shader == NULL)
++      return NULL;
++
++   util_queue_fence_init(&shader->compile_fence);
++   simple_mtx_init(&shader->compile_lock, mtx_plain);
++   return shader;
++}
++
+ static void
+ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+                   const VkAllocationCallbacks *pAllocator)
+@@ -976,6 +991,9 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+ 
+    struct kk_pipeline_handles *pipe = &shader->pipeline;
+ 
++   /* Drops the compile if it has not started, else waits for it */
++   util_queue_drop_job(&dev->compile_queue, &shader->compile_fence);
++
+    if (shader->xfb_gs)
+       kk_shader_destroy(vk_dev, shader->xfb_gs, pAllocator);
+ 
+@@ -1031,6 +1049,8 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+    ralloc_free((void *)shader->gs_pre.code);
+    free(shader->gs_pre.packed);
+ 
++   util_queue_fence_destroy(&shader->compile_fence);
++   simple_mtx_destroy(&shader->compile_lock);
+    vk_shader_free(&dev->vk, pAllocator, &shader->vk);
+ }
+ 
+@@ -1212,8 +1232,7 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+    VkResult result = VK_SUCCESS;
+ 
+    mesa_shader_stage stage = nir->info.stage;
+-   shader = vk_shader_zalloc(&dev->vk, &kk_shader_ops, stage, pAllocator,
+-                             sizeof(*shader));
++   shader = kk_shader_alloc(dev, stage, pAllocator);
+    if (shader == NULL) {
+       ralloc_free(nir);
+       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+@@ -1446,6 +1465,30 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
+    return nir;
+ }
+ 
++/* The MSL of data for Metal, unpacked if needed. Free it with
++ * kk_msl_code_free. */
++static const char *
++kk_msl_code(const struct msl_compile_data *data)
++{
++   if (data->code)
++      return data->code;
++
++   char *code = malloc(data->code_size);
++   if (code && !lz_decompress(data->packed, data->packed_size, code,
++                              data->code_size)) {
++      free(code);
++      return NULL;
++   }
++   return code;
++}
++
++static void
++kk_msl_code_free(const struct msl_compile_data *data, const char *code)
++{
++   if (code != data->code)
++      free((void *)code);
++}
++
+ static VkResult
+ kk_compile_compute_pipeline(struct kk_device *device,
+                             const struct msl_compile_data *data,
+@@ -1454,11 +1497,16 @@ kk_compile_compute_pipeline(struct kk_device *device,
+ {
+    struct kk_physical_device *pdev = kk_device_physical(device);
+ 
++   const char *code = kk_msl_code(data);
++   if (code == NULL)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++
+    uint64_t start = kk_stats_now();
+    mtl_library *library = mtl_new_library(
+-      device->mtl_compiler_handle, data->code, pdev->info.msl_version,
++      device->mtl_compiler_handle, code, pdev->info.msl_version,
+       MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+    kk_stats_add(&kk_stats.library_ns, start);
++   kk_msl_code_free(data, code);
+    if (library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1754,10 +1802,14 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+    }
+ 
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
++   const char *vs_code = kk_msl_code(vs_data);
++   if (vs_code == NULL)
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    uint64_t start = kk_stats_now();
+    mtl_library *vertex_library = mtl_new_library(
+-      device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
++      device->mtl_compiler_handle, vs_code, pdev->info.msl_version,
+       MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++   kk_msl_code_free(vs_data, vs_code);
+    if (vertex_library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1766,9 +1818,13 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+                                           vs_data->entrypoint_name);
+ 
+    const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
+-   mtl_library *fragment_library = mtl_new_library(
+-      device->mtl_compiler_handle, fs_data->code, pdev->info.msl_version,
+-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++   const char *fs_code = kk_msl_code(fs_data);
++   mtl_library *fragment_library =
++      fs_code ? mtl_new_library(device->mtl_compiler_handle, fs_code,
++                                pdev->info.msl_version, MTL_MATH_MODE_FAST,
++                                MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST)
++              : NULL;
++   kk_msl_code_free(fs_data, fs_code);
+    if (fragment_library == NULL) {
+       result = VK_ERROR_INVALID_SHADER_NV;
+       goto destroy_vertex;
+@@ -1831,6 +1887,70 @@ destroy_vertex:
+    return result;
+ }
+ 
++/* Builds the Metal pipelines of a compute shader or of the VS holding a
++ * graphics pipeline. A failed build leaves them NULL, and draws and dispatches
++ * with the shader are skipped. */
++static void
++kk_shader_compile_metal(struct kk_device *dev, struct kk_shader *shader)
++{
++   VkResult result = VK_SUCCESS;
++
++   if (shader->info.stage == MESA_SHADER_COMPUTE) {
++      uint32_t local_size_threads = shader->info.cs.local_size.x *
++                                    shader->info.cs.local_size.y *
++                                    shader->info.cs.local_size.z;
++      result = kk_compile_compute_pipeline(
++         dev, &shader->msl_data[MESA_SHADER_COMPUTE], local_size_threads,
++         &shader->pipeline.cs);
++   } else if (shader->info.stage == MESA_SHADER_VERTEX) {
++      result = kk_compile_graphics_pipeline(dev, shader);
++   }
++
++   if (result != VK_SUCCESS)
++      mesa_loge("kk: Metal could not build the pipeline of a %s shader",
++                mesa_shader_stage_name(shader->info.stage));
++   if (shader->info.stage == MESA_SHADER_COMPUTE ||
++       shader->info.stage == MESA_SHADER_VERTEX)
++      p_atomic_inc(&kk_stats.built);
++   kk_stats_report();
++}
++
++void
++kk_shader_wait_compiled(struct kk_shader *shader)
++{
++   if (p_atomic_read(&shader->compiled))
++      return;
++
++   struct kk_device *dev =
++      container_of(shader->vk.base.device, struct kk_device, vk);
++
++   simple_mtx_lock(&shader->compile_lock);
++   if (!shader->compiled) {
++      kk_shader_compile_metal(dev, shader);
++      p_atomic_set(&shader->compiled, true);
++   }
++   simple_mtx_unlock(&shader->compile_lock);
++}
++
++static void
++kk_shader_compile_job(void *job, UNUSED void *gdata, UNUSED int thread_index)
++{
++   kk_shader_wait_compiled(job);
++}
++
++/* The MSL must not change anymore: kk_shader_serialize reads it while the
++ * queue compiles. */
++static void
++kk_shader_queue_compile(struct kk_device *dev, struct kk_shader *shader)
++{
++   if (shader->info.stage != MESA_SHADER_COMPUTE &&
++       shader->info.stage != MESA_SHADER_VERTEX)
++      return;
++
++   util_queue_add_job(&dev->compile_queue, shader, &shader->compile_fence,
++                      kk_shader_compile_job, NULL, 0);
++}
++
+ static bool
+ move_primitive_id(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+ {
+@@ -2125,22 +2245,12 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+       p_atomic_add(&kk_stats.msl_cpu_ns, kk_stats_cpu_now() - msl_cpu_start);
+    p_atomic_inc(&kk_stats.compiled);
+ 
+-   /* Compile pipeline:
+-    * 1. Compute pipeline
+-    * 2. Graphics with all stages (since we don't support GPL nor shader
+-    * objects for now). This will be addressed later.
++   /* The Metal pipeline, compute or graphics with all stages (since we don't
++    * support GPL nor shader objects for now), is built on the compile queue.
++    * A graphics pipeline lives in the VS, which gets the MSL of all stages.
+     */
+-   if (shaders[0]->vk.stage == MESA_SHADER_COMPUTE) {
+-      struct kk_shader *s = shaders[0];
+-      uint32_t local_size_threads = s->info.cs.local_size.x *
+-                                    s->info.cs.local_size.y *
+-                                    s->info.cs.local_size.z;
+-      result =
+-         kk_compile_compute_pipeline(dev, &s->msl_data[MESA_SHADER_COMPUTE],
+-                                     local_size_threads, &s->pipeline.cs);
+-   } else {
++   if (shaders[0]->vk.stage != MESA_SHADER_COMPUTE) {
+       gather_graphics_pipeline_create_info(state, shaders, total_shaders);
+-      result = kk_compile_graphics_pipeline(dev, shaders[0]);
+ 
+       /* The VS keeps the transform feedback GS and binds it */
+       if (xfb_gs_index >= 0) {
+@@ -2165,6 +2275,7 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+    } else {
+       for (uint32_t i = 0; i < shader_count; i++)
+          kk_shader_pack(shaders[i]);
++      kk_shader_queue_compile(dev, shaders[0]);
+       memcpy(shaders_out, shaders, shader_count * sizeof(*shaders_out));
+    }
+ 
+@@ -2297,8 +2408,7 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+    if (blob->overrun)
+       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+ 
+-   struct kk_shader *shader = vk_shader_zalloc(
+-      &dev->vk, &kk_shader_ops, info.stage, pAllocator, sizeof(*shader));
++   struct kk_shader *shader = kk_shader_alloc(dev, info.stage, pAllocator);
+    if (shader == NULL)
+       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
+@@ -2336,9 +2446,7 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+ 
+    /* The transform feedback GS only needs its info, the VS holds its code */
+    if (info.stage == MESA_SHADER_VERTEX && blob_read_uint8(blob)) {
+-      shader->xfb_gs =
+-         vk_shader_zalloc(&dev->vk, &kk_shader_ops, MESA_SHADER_GEOMETRY,
+-                          pAllocator, sizeof(*shader));
++      shader->xfb_gs = kk_shader_alloc(dev, MESA_SHADER_GEOMETRY, pAllocator);
+       if (shader->xfb_gs == NULL) {
+          result = VK_ERROR_OUT_OF_HOST_MEMORY;
+          goto fail;
+@@ -2351,21 +2459,8 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+       goto fail;
+    }
+ 
+-   if (info.stage == MESA_SHADER_COMPUTE) {
+-      uint32_t local_size_threads = shader->info.cs.local_size.x *
+-                                    shader->info.cs.local_size.y *
+-                                    shader->info.cs.local_size.z;
+-      result = kk_compile_compute_pipeline(
+-         dev, &shader->msl_data[MESA_SHADER_COMPUTE], local_size_threads,
+-         &shader->pipeline.cs);
+-   } else if (info.stage == MESA_SHADER_VERTEX) {
+-      result = kk_compile_graphics_pipeline(dev, shader);
+-   }
+-
+-   if (result != VK_SUCCESS)
+-      goto fail;
+-
+    kk_shader_pack(shader);
++   kk_shader_queue_compile(dev, shader);
+    if (info.stage == MESA_SHADER_COMPUTE || info.stage == MESA_SHADER_VERTEX)
+       p_atomic_inc(&kk_stats.cached);
+    kk_stats_report();
+@@ -2382,6 +2477,8 @@ fail:
+ void
+ kk_cmd_bind_compute_shader(struct kk_cmd_buffer *cmd, struct kk_shader *shader)
+ {
++   if (shader)
++      kk_shader_wait_compiled(shader);
+    cmd->state.shaders[MESA_SHADER_COMPUTE] = shader;
+ }
+ 
+@@ -2397,6 +2494,8 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
+    if (stage != MESA_SHADER_VERTEX)
+       return;
+ 
++   kk_shader_wait_compiled(shader);
++
+    bool requires_dynamic_depth_stencil = shader->pipeline.gfx.ds_handle == NULL;
+    if (cmd->state.gfx.is_depth_stencil_dynamic) {
+       /* If we are switching from dynamic to static, we need to clean up
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index 4ad8de7..95f2b54 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -19,6 +19,9 @@
+ 
+ #include "vk_shader.h"
+ 
++#include "util/simple_mtx.h"
++#include "util/u_queue.h"
++
+ struct kk_cmd_buffer;
+ 
+ struct kk_tess_info {
+@@ -156,9 +159,10 @@ struct kk_pipeline_handles {
+ struct msl_compile_data {
+    char *code;
+    char *entrypoint_name;
+-   /* Once the Metal pipeline exists the MSL is only needed to serialize the
+-    * shader, and is kept compressed there: code is NULL then. Big games keep
+-    * tens of thousands of pipelines, and their MSL took gigabytes. */
++   /* Once the shader is created the MSL is only needed to build its Metal
++    * pipelines and to serialize it, and is kept compressed: code is NULL
++    * then. Big games keep tens of thousands of pipelines, and their MSL took
++    * gigabytes. */
+    void *packed;
+    uint32_t packed_size;
+    uint32_t code_size;
+@@ -180,6 +184,14 @@ struct kk_shader {
+    /* GS a VS holding a pipeline binds along, which passes the outputs of the
+     * stage capturing transform feedback through */
+    struct kk_shader *xfb_gs;
++
++   /* Metal compiles the pipelines on the device's compile queue, so threads
++    * creating pipelines do not wait for it. Whoever needs them first, the
++    * queue or a command buffer binding the shader, builds them under
++    * compile_lock. */
++   struct util_queue_fence compile_fence;
++   simple_mtx_t compile_lock;
++   bool compiled;
+ };
+ 
+ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
+@@ -187,6 +199,8 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
+ 
+ extern const struct vk_device_shader_ops kk_device_shader_ops;
+ 
++void kk_shader_wait_compiled(struct kk_shader *shader);
++
+ static inline nir_address_format
+ kk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness)
+ {
+-- 
+2.56.0
+
