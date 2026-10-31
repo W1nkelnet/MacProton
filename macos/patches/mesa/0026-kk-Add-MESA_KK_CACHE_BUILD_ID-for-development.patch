@@ -1,0 +1,39 @@
+From 186bd73226ce99b0957e453cd3a5fab0c85a0306 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sat, 31 Oct 2026 01:09:22 +0100
+Subject: [PATCH] kk: Add MESA_KK_CACHE_BUILD_ID for development
+
+The shader caches are named after the driver's build ID, so every build
+starts with empty ones, and warming Rise of the Tomb Raider's take ten
+minutes. Builds that leave the shader compiler alone can name them with
+MESA_KK_CACHE_BUILD_ID instead and keep using an earlier build's.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_instance.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_instance.c b/src/kosmickrisp/vulkan/kk_instance.c
+index 90abd52..628c77c 100644
+--- a/src/kosmickrisp/vulkan/kk_instance.c
++++ b/src/kosmickrisp/vulkan/kk_instance.c
+@@ -135,6 +135,16 @@ kk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+                  "UUID size mismatch");
+    memcpy(instance->driver_build_sha, build_id_data(note), VK_UUID_SIZE);
+ 
++   /* For development: builds that leave the shader compiler alone can keep
++    * using the shader caches of an earlier one under the same name. Each
++    * build otherwise starts with empty caches. */
++   const char *cache_build_id = debug_get_option("MESA_KK_CACHE_BUILD_ID", NULL);
++   if (cache_build_id) {
++      blake3_hash hash;
++      _mesa_blake3_compute(cache_build_id, strlen(cache_build_id), hash);
++      memcpy(instance->driver_build_sha, hash, VK_UUID_SIZE);
++   }
++
+    kk_process_debug_variable();
+ 
+    *pInstance = kk_instance_to_handle(instance);
+-- 
+2.56.0
+

@@ -1,0 +1,275 @@
+From cf1f141201ecab023ee6eb481c2c7162fe77394a Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sat, 31 Oct 2026 01:09:22 +0100
+Subject: [PATCH] kk: Fill SIMD groups when emulating tessellation
+
+The tessellator kernels ran one patch per threadgroup and the TCS one
+patch per threadgroup of its output vertices, so a SIMD group of 32
+lanes worked on one patch with one to four lanes busy. The tessellator
+now runs 64 patches per threadgroup, and the TCS as many patches as fit
+32 lanes, its patch and invocation IDs computed from the packed group.
+
+Indirect draws dispatched the VS and TCS grids as threadgroup counts of
+vertices and TCS invocations, 64 and output-patch-size times too many
+threads, the TCS ones reading and writing past the patches. They are
+thread counts with a threadgroup size now.
+
+Rise of the Tomb Raider's benchmark, Spine of the Mountain, which
+tessellates the snow, warm caches, alternating runs with cooldowns:
+30.6 and 30.8 fps instead of 29.2 and 28.9, 29.9 and 30.2 with only the
+TCS packed. Without the game's tessellation it runs at 38 fps.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/libkk/kk_tessellation.cl | 24 ++++++++-----
+ src/kosmickrisp/libkk/kk_tessellator.cl  | 16 +++++++--
+ src/kosmickrisp/libkk/kk_tessellator.h   |  4 +++
+ src/kosmickrisp/vulkan/kk_cmd_draw.c     | 19 +++++-----
+ src/kosmickrisp/vulkan/kk_shader.c       | 46 +++++++++++++++++++++++-
+ src/kosmickrisp/vulkan/kk_shader.h       |  9 +++++
+ 6 files changed, 96 insertions(+), 22 deletions(-)
+
+diff --git a/src/kosmickrisp/libkk/kk_tessellation.cl b/src/kosmickrisp/libkk/kk_tessellation.cl
+index c4a9cae..2b97855 100644
+--- a/src/kosmickrisp/libkk/kk_tessellation.cl
++++ b/src/kosmickrisp/libkk/kk_tessellation.cl
+@@ -7,6 +7,7 @@
+ 
+ #include "poly/geometry.h"
+ #include "poly/tessellator.h"
++#include "kk_tessellator.h"
+ 
+ KERNEL(1)
+ libkk_tess_setup_indirect(
+@@ -76,18 +77,25 @@ libkk_tess_setup_indirect(
+          poly_index_buffer_range_el(in_index_buffer_range_el, indirect[2]);
+    }
+ 
+-   /* VS grid size */
++   /* VS grid: threads, then the threadgroup size (KK_POLY_WG_SIZE) */
+    grids[0] = count;
+    grids[1] = instance_count;
+    grids[2] = 1;
+-
+-   /* TCS grid size */
+-   grids[3] = in_patches * p->output_patch_size;
+-   grids[4] = instance_count;
++   grids[3] = 64;
++   grids[4] = 1;
+    grids[5] = 1;
+ 
+-   /* Tess grid size */
+-   grids[6] = unrolled_patches;
+-   grids[7] = 1;
++   /* TCS grid: threads, then the threadgroup size, as many patches as
++    * kk_tcs_patches_per_group */
++   grids[6] = in_patches * p->output_patch_size;
++   grids[7] = instance_count;
+    grids[8] = 1;
++   grids[9] = max(1u, 32u / p->output_patch_size) * p->output_patch_size;
++   grids[10] = 1;
++   grids[11] = 1;
++
++   /* Tessellator grid, in threadgroups */
++   grids[12] = DIV_ROUND_UP(unrolled_patches, KK_TESS_WG_SIZE);
++   grids[13] = 1;
++   grids[14] = 1;
+ }
+diff --git a/src/kosmickrisp/libkk/kk_tessellator.cl b/src/kosmickrisp/libkk/kk_tessellator.cl
+index fc6e8da..e97ac72 100644
+--- a/src/kosmickrisp/libkk/kk_tessellator.cl
++++ b/src/kosmickrisp/libkk/kk_tessellator.cl
+@@ -5,27 +5,37 @@
+  */
+ 
+ #include "poly/cl/tessellator.h"
++#include "kk_tessellator.h"
+ 
+-KERNEL(1)
++KERNEL(KK_TESS_WG_SIZE)
+ libkk_tess_isoline(constant struct poly_tess_params *p,
+                    enum poly_tess_mode tess_mode)
+ {
+    uint patch = cl_global_id.x;
++   if (patch >= p->nr_patches)
++      return;
++
+    poly_tess_isoline_process(p, patch, tess_mode);
+ }
+ 
+-KERNEL(1)
++KERNEL(KK_TESS_WG_SIZE)
+ libkk_tess_tri(constant struct poly_tess_params *p,
+                enum poly_tess_mode tess_mode)
+ {
+    uint patch = cl_global_id.x;
++   if (patch >= p->nr_patches)
++      return;
++
+    poly_tess_tri_process(p, patch, tess_mode);
+ }
+ 
+-KERNEL(1)
++KERNEL(KK_TESS_WG_SIZE)
+ libkk_tess_quad(constant struct poly_tess_params *p,
+                 enum poly_tess_mode tess_mode)
+ {
+    uint patch = cl_global_id.x;
++   if (patch >= p->nr_patches)
++      return;
++
+    poly_tess_quad_process(p, patch, tess_mode);
+ }
+diff --git a/src/kosmickrisp/libkk/kk_tessellator.h b/src/kosmickrisp/libkk/kk_tessellator.h
+index 5d687f4..74a24db 100644
+--- a/src/kosmickrisp/libkk/kk_tessellator.h
++++ b/src/kosmickrisp/libkk/kk_tessellator.h
+@@ -9,6 +9,10 @@
+ 
+ #include "poly/tessellator.h"
+ 
++/* Patches per threadgroup of the tessellator kernels. With one, as before,
++ * each SIMD group ran a single lane. */
++#define KK_TESS_WG_SIZE 64
++
+ #define libkk_tessellate(context, grid, barrier, prim, mode, state)            \
+    if (prim == TESS_PRIMITIVE_QUADS) {                                         \
+       libkk_tess_quad(context, grid, barrier, state, mode);                    \
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 3570b5e..14e0532 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -1255,9 +1255,10 @@ kk_upload_tess_params(struct kk_cmd_buffer *cmd, struct poly_tess_params *out,
+       args.out_draws = addr + draw_offs;
+       args.counts = addr + count_offs;
+    } else {
+-      /* Allocate 3x indirect global+local grids for VS/TCS/tess */
+-      uint32_t grid_stride = sizeof(uint32_t) * 3;
+-      gfx->tess.indirect_ptr = kk_pool_alloc(cmd, grid_stride * 3, 4);
++      /* Indirect grids: thread counts and threadgroup sizes for the VS and
++       * TCS, threadgroup counts for the tessellator, see
++       * libkk_tess_setup_indirect */
++      gfx->tess.indirect_ptr = kk_pool_alloc(cmd, sizeof(uint32_t) * 15, 4);
+ 
+       struct kk_ptr ptr = kk_pool_alloc(cmd, draw_stride_B, 4);
+       gfx->tess.out_draws_addr = ptr.gpu;
+@@ -2160,12 +2161,10 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
+ 
+       libkk_tess_setup_indirect_struct(cmd, kk_grid_1d(1), true, args);
+ 
+-      uint32_t grid_stride = sizeof(uint32_t) * 3;
+-      grid_vs = kk_grid_indirect(gfx->tess.indirect_ptr.gpu + 0u * grid_stride);
+-      grid_tcs =
+-         kk_grid_indirect(gfx->tess.indirect_ptr.gpu + 1u * grid_stride);
+-      grid_tess =
+-         kk_grid_indirect(gfx->tess.indirect_ptr.gpu + 2u * grid_stride);
++      uint64_t grids = gfx->tess.indirect_ptr.gpu;
++      grid_vs = kk_grid_indirect_local(grids);
++      grid_tcs = kk_grid_indirect_local(grids + 6u * sizeof(uint32_t));
++      grid_tess = kk_grid_indirect(grids + 12u * sizeof(uint32_t));
+    } else {
+       uint32_t patches = draw.grid.size.x / input_patch_size;
+       grid_vs = grid_tcs = kk_grid_2d(draw.grid.size.x, draw.grid.size.y);
+@@ -2187,7 +2186,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
+    }
+    {
+       mtl_compute_pipeline_state *pipeline = vs->pipeline.gfx.pre_render[1];
+-      struct mtl_size local_size = {tcs->info.tess.tcs_output_patch_size, 1, 1};
++      struct mtl_size local_size = {vs->info.vs.tess_local_thread_size, 1, 1};
+       /* Avoid Metal validation error by trying to launch empty compute. Return
+        * empty data. We set restart to true to avoid unroll. */
+       if (grid_tcs.mode == KK_GRID_DIRECT && grid_tcs.size.x == 0u)
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 896abb9..bf6c45c 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -40,6 +40,45 @@
+ #include "util/u_atomic.h"
+ #include "util/u_debug.h"
+ 
++/* poly runs a TCS with one threadgroup per patch, the patch from the
++ * workgroup ID and the invocation from the local invocation ID. Runs it with
++ * per_group patches per threadgroup instead. A patch's invocations stay in
++ * one SIMD group, which poly's subgroup barriers need. */
++static bool
++kk_nir_pack_tcs_patches(nir_shader *nir, unsigned vertices, unsigned per_group)
++{
++   if (per_group == 1)
++      return false;
++
++   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
++   nir_builder b = nir_builder_at(nir_before_impl(impl));
++   nir_def *wg = nir_load_workgroup_id(&b);
++   nir_def *lid = nir_load_local_invocation_id(&b);
++   nir_def *lid_x = nir_channel(&b, lid, 0);
++   nir_def *patch = nir_iadd(&b, nir_imul_imm(&b, nir_channel(&b, wg, 0), per_group),
++                             nir_udiv_imm(&b, lid_x, vertices));
++   nir_def *packed_wg = nir_vector_insert_imm(&b, wg, patch, 0);
++   nir_def *packed_lid =
++      nir_vector_insert_imm(&b, lid, nir_umod_imm(&b, lid_x, vertices), 0);
++
++   nir_foreach_block(block, impl) {
++      nir_foreach_instr_safe(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++         if (intr->intrinsic == nir_intrinsic_load_workgroup_id &&
++             &intr->def != wg) {
++            nir_def_replace(&intr->def, packed_wg);
++         } else if (intr->intrinsic == nir_intrinsic_load_local_invocation_id &&
++                    &intr->def != lid) {
++            nir_def_replace(&intr->def, packed_lid);
++         }
++      }
++   }
++
++   return nir_progress(true, impl, nir_metadata_control_flow);
++}
++
+ /* MESA_KK_COMPILE_STATS=1 logs where pipeline creation spends its time every
+  * two seconds: translating to MSL, compiling MSL to Metal libraries, and
+  * making Metal pipelines from them, summed over all threads. */
+@@ -1221,6 +1260,9 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+                nir_var_shader_in | nir_var_shader_out, NULL, NULL);
+ 
+       NIR_PASS(_, nir, poly_nir_lower_tcs, false);
++      NIR_PASS(_, nir, kk_nir_pack_tcs_patches,
++               nir->info.tess.tcs_vertices_out,
++               kk_tcs_patches_per_group(nir->info.tess.tcs_vertices_out));
+ 
+       shader->info.tess.info.ccw = nir->info.tess.ccw;
+       shader->info.tess.info.points = nir->info.tess.point_mode;
+@@ -1607,7 +1649,9 @@ gather_graphics_pipeline_create_info(
+       info->vs.additional_stages_bits |= BITFIELD_BIT(stage);
+ 
+       if (s->info.stage == MESA_SHADER_TESS_CTRL)
+-         info->vs.tess_local_thread_size = s->info.tess.tcs_output_patch_size;
++         info->vs.tess_local_thread_size =
++            s->info.tess.tcs_output_patch_size *
++            kk_tcs_patches_per_group(s->info.tess.tcs_output_patch_size);
+ 
+       if (s->info.stage == MESA_SHADER_GEOMETRY) {
+          kk_msl_copy(&vs->gs_main, &s->gs_main);
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index 7460897..4ad8de7 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -121,6 +121,15 @@ struct kk_shader_info {
+  * dispatched with */
+ #define KK_POLY_WG_SIZE 64u
+ 
++/* Patches a TCS compute pass runs per threadgroup, so that patches with few
++ * output vertices share a SIMD group instead of leaving most of its lanes
++ * idle. libkk_tess_setup_indirect computes the same. */
++static inline unsigned
++kk_tcs_patches_per_group(unsigned output_patch_size)
++{
++   return MAX2(1u, 32u / output_patch_size);
++}
++
+ /* Counters of a GS draw nothing reads, such as the pipeline statistics poly
+  * keeps, go to a sink this many bytes after the geometry parameters */
+ #define KK_GS_SINK_OFFSET 320u
+-- 
+2.56.0
+

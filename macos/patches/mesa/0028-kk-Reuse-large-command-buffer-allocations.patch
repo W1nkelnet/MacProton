@@ -1,0 +1,154 @@
+From 5cc803d9b199e86fd19a9e16fec5a19c07618f91 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sat, 31 Oct 2026 02:00:01 +0100
+Subject: [PATCH] kk: Reuse large command buffer allocations
+
+Allocations above the 128 KB command buffer BOs, which tessellation and
+geometry shaders take for every draw, each became a new Metal heap added
+to the device's residency set and were destroyed with the command
+buffer. In Rise of the Tomb Raider's tessellated scenes that took a
+sixth of a render thread. The command pool now keeps them, sized in
+powers of two, up to 64 MB, for its next command buffers.
+
+The pool also never initialized its count of free small BOs, so whether
+it kept any for reuse depended on the memory it got.
+
+Spine of the Mountain, warm caches, alternating runs with cooldowns:
+32.3 and 32.1 instead of 31.0 and 30.7 fps.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c | 10 +++---
+ src/kosmickrisp/vulkan/kk_cmd_pool.c   | 44 ++++++++++++++++++++++++++
+ src/kosmickrisp/vulkan/kk_cmd_pool.h   | 11 +++++++
+ 3 files changed, 59 insertions(+), 6 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index cdb5bd9..bca1a89 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -50,10 +50,8 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
+ 
+    kk_cmd_pool_free_bo_list(pool, &cmd->uploader.bos);
+ 
+-   /* Release all BOs used as descriptor buffers for submissions */
+-   util_dynarray_foreach(&cmd->large_bos, struct kk_bo *, bo) {
+-      kk_destroy_bo(dev, *bo);
+-   }
++   util_dynarray_foreach(&cmd->large_bos, struct kk_bo *, bo)
++      kk_cmd_pool_free_large_bo(pool, *bo);
+    util_dynarray_clear(&cmd->large_bos);
+    util_dynarray_clear(&cmd->post_render_writes);
+    util_dynarray_clear(&cmd->ts_resolves);
+@@ -724,8 +722,8 @@ kk_pool_alloc(struct kk_cmd_buffer *cmd, uint32_t size_B, uint32_t alignment_B)
+     */
+    if (size_B > KK_CMD_BO_SIZE) {
+       struct kk_bo *buffer = NULL;
+-      const VkResult result =
+-         kk_alloc_bo(dev, &cmd->vk.base, size_B, alignment_B, &buffer);
++      const VkResult result = kk_cmd_pool_alloc_large_bo(
++         kk_cmd_buffer_pool(cmd), size_B, &buffer);
+       if (result != VK_SUCCESS) {
+          vk_command_buffer_set_error(&cmd->vk, result);
+          return (struct kk_ptr){0};
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_pool.c b/src/kosmickrisp/vulkan/kk_cmd_pool.c
+index e2c2fc8..d391635 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_pool.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_pool.c
+@@ -51,6 +51,47 @@ kk_cmd_pool_destroy_bos(struct kk_cmd_pool *pool)
+       kk_cmd_bo_destroy(pool, bo);
+ 
+    list_inithead(&pool->free_bos);
++   pool->num_free_bos = 0;
++
++   util_dynarray_foreach(&pool->free_large_bos, struct kk_bo *, bo)
++      kk_destroy_bo(kk_cmd_pool_device(pool), *bo);
++   util_dynarray_clear(&pool->free_large_bos);
++   pool->free_large_bos_B = 0;
++}
++
++/* Each new BO is a Metal heap added to the device's residency set, which
++ * took a sixth of a render thread in Rise of the Tomb Raider's tessellated
++ * scenes, where every draw needed one */
++VkResult
++kk_cmd_pool_alloc_large_bo(struct kk_cmd_pool *pool, uint64_t size_B,
++                           struct kk_bo **bo_out)
++{
++   size_B = util_next_power_of_two64(size_B);
++
++   util_dynarray_foreach(&pool->free_large_bos, struct kk_bo *, bo) {
++      if ((*bo)->size_B == size_B) {
++         *bo_out = *bo;
++         pool->free_large_bos_B -= size_B;
++         util_dynarray_delete_unordered(&pool->free_large_bos, struct kk_bo *,
++                                        *bo);
++         return VK_SUCCESS;
++      }
++   }
++
++   return kk_alloc_bo(kk_cmd_pool_device(pool), &pool->vk.base, size_B, 0,
++                      bo_out);
++}
++
++void
++kk_cmd_pool_free_large_bo(struct kk_cmd_pool *pool, struct kk_bo *bo)
++{
++   if (pool->free_large_bos_B + bo->size_B > KK_CMD_POOL_LARGE_BO_MAX_B) {
++      kk_destroy_bo(kk_cmd_pool_device(pool), bo);
++      return;
++   }
++
++   util_dynarray_append(&pool->free_large_bos, bo);
++   pool->free_large_bos_B += bo->size_B;
+ }
+ 
+ VkResult
+@@ -148,6 +189,9 @@ kk_CreateCommandPool(VkDevice _device,
+    pool->metal.free_cmd_bufs = UTIL_DYNARRAY_INIT;
+ 
+    list_inithead(&pool->free_bos);
++   pool->num_free_bos = 0;
++   pool->free_large_bos = UTIL_DYNARRAY_INIT;
++   pool->free_large_bos_B = 0;
+ 
+    *pCmdPool = kk_cmd_pool_to_handle(pool);
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_pool.h b/src/kosmickrisp/vulkan/kk_cmd_pool.h
+index 479e70e..dbfeb4d 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_pool.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_pool.h
+@@ -16,6 +16,8 @@
+ 
+ #define KK_CMD_BO_SIZE     (1024 * 128)
+ #define KK_CMD_POOL_BO_MAX 32
++/* Bytes of larger command buffer BOs a pool keeps for reuse */
++#define KK_CMD_POOL_LARGE_BO_MAX_B (64ull << 20)
+ 
+ /* Recyclable command buffer BO, used for both push buffers and upload */
+ struct kk_cmd_bo {
+@@ -32,6 +34,11 @@ struct kk_cmd_pool {
+    struct list_head free_bos;
+    uint32_t num_free_bos;
+ 
++   /** kk_bo pointers above KK_CMD_BO_SIZE, sized in powers of two, as
++    * tessellation and geometry shaders take them for every draw */
++   struct util_dynarray free_large_bos;
++   uint64_t free_large_bos_B;
++
+    struct {
+       struct util_dynarray free_allocators;
+       struct util_dynarray free_cmd_bufs;
+@@ -52,6 +59,10 @@ VkResult kk_cmd_pool_alloc_bo(struct kk_cmd_pool *pool,
+ 
+ void kk_cmd_pool_free_bo_list(struct kk_cmd_pool *pool, struct list_head *bos);
+ 
++VkResult kk_cmd_pool_alloc_large_bo(struct kk_cmd_pool *pool, uint64_t size_B,
++                                    struct kk_bo **bo_out);
++void kk_cmd_pool_free_large_bo(struct kk_cmd_pool *pool, struct kk_bo *bo);
++
+ mtl_command_allocator *kk_cmd_pool_get_allocator(struct kk_cmd_pool *pool);
+ void kk_cmd_pool_return_allocator(struct kk_cmd_pool *pool,
+                                   mtl_command_allocator *allocator);
+-- 
+2.56.0
+
