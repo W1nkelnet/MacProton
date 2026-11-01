@@ -9,9 +9,9 @@ enum Upscaling: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .system: return "macOS (weich)"
-        case .metalFX: return "MetalFX Spatial (schärfer)"
-        case .nearest: return "Pixelgenau"
+        case .system: return String(localized: "macOS (weich)")
+        case .metalFX: return String(localized: "MetalFX Spatial (schärfer)")
+        case .nearest: return String(localized: "Pixelgenau")
         }
     }
 
@@ -46,8 +46,11 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("Sprache") {
+                LanguagePicker()
+            }
             Section("Steam") {
-                TextField("Konto", text: $steamAccount, prompt: Text(detectSteamAccount() ?? "Steam-Kontoname"))
+                TextField("Konto", text: $steamAccount, prompt: Text(detectSteamAccount() ?? String(localized: "Steam-Kontoname")))
                 Text("Leer lassen, um das zuletzt in Steam angemeldete Konto zu verwenden.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Bei Steam anmelden …") {
@@ -58,7 +61,7 @@ struct SettingsView: View {
             }
             Section("Steam Cloud") {
                 if let name = cloud.accountName {
-                    LabeledContent("Angemeldet als", value: name.isEmpty ? "Steam-Konto" : name)
+                    LabeledContent("Angemeldet als", value: name.isEmpty ? String(localized: "Steam-Konto") : name)
                     Toggle("Spielstände von Windows-Spielen abgleichen", isOn: $cloudSync)
                     Button("Abmelden") { cloud.signOut() }
                 } else {
@@ -83,7 +86,7 @@ struct SettingsView: View {
                         panel.canChooseDirectories = true
                         panel.canChooseFiles = false
                         panel.canCreateDirectories = true
-                        panel.prompt = "Wählen"
+                        panel.prompt = String(localized: "Wählen")
                         panel.directoryURL = Paths.gameLocation
                         if panel.runModal() == .OK, let url = panel.url { gameLocation = url.path }
                     }

@@ -81,19 +81,20 @@ private struct DownloadRow: View {
         case .running: parts.append(download.phase)
         case .queued: parts.append("Wartet")
         case .paused: parts.append(download.phase == "Unterbrochen" ? "Unterbrochen" : "Pausiert")
-        case .failed: parts.append("Fehlgeschlagen")
+        case .failed: parts.append(String(localized: "Fehlgeschlagen"))
         }
         if download.progress > 0 { parts.append("\(Int(download.progress * 100)) %") }
         if download.bytesTotal > 0 {
             let done = ByteCountFormatter.string(fromByteCount: download.bytesDone, countStyle: .file)
             let total = ByteCountFormatter.string(fromByteCount: download.bytesTotal, countStyle: .file)
-            parts.append("\(done) von \(total)" + (download.verifying ? " geprüft" : ""))
+            parts.append(String(localized: "\(done) von \(total)") + (download.verifying ? String(localized: " geprüft") : ""))
         }
         if download.state == .running, let speed = installer.speeds[download.appID], speed > 0 {
             parts.append(ByteCountFormatter.string(fromByteCount: Int64(speed), countStyle: .file) + "/s")
             let left = Double(download.bytesTotal - download.bytesDone) / speed
             if left > 0, left < 30 * 86400 {
-                parts.append("noch " + Duration.seconds(left).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated)))
+                let remaining = Duration.seconds(left).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
+                parts.append(String(localized: "noch \(remaining)"))
             }
         }
         if let error = download.error { parts.append(error) }

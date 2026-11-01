@@ -33,9 +33,9 @@ final class SteamCMDSetup: ObservableObject {
                 if Paths.steamcmd == nil { try await Self.install(into: Paths.steamcmdDir, report: report) }
                 if !Paths.steamRedistAvailable { try await Self.downloadRedist(report: report) }
                 progress = 1
-                status = "Fertig"
+                status = String(localized: "Fertig")
             } catch {
-                self.error = "steamcmd konnte nicht eingerichtet werden: \(error.localizedDescription)"
+                self.error = String(localized: "steamcmd konnte nicht eingerichtet werden: \(error.localizedDescription)")
             }
             running = false
         }
@@ -45,36 +45,36 @@ final class SteamCMDSetup: ObservableObject {
     /// so it does not take over the Steam client's session.
     nonisolated static func downloadRedist(report: @escaping @Sendable (Double, String) -> Void = { _, _ in }) async throws {
         guard let steamcmd = Paths.steamcmd else { throw SteamCMDError.notInstalled }
-        report(0.75, "Lade Valves Steam-Komponenten für Windows …")
+        report(0.75, String(localized: "Lade Valves Steam-Komponenten für Windows …"))
         let output = try await runLive(steamcmd, ["+@sSteamCmdForcePlatformType", "windows",
                                                   "+force_install_dir", Paths.steamRedistDir.path,
                                                   "+login", "anonymous", "+app_update", "1007", "validate", "+quit"]) { line in
             if let value = SteamCMD.parseProgress(line) {
-                report(0.75 + 0.25 * value, "Lade Valves Steam-Komponenten für Windows …")
+                report(0.75 + 0.25 * value, String(localized: "Lade Valves Steam-Komponenten für Windows …"))
             }
         }
         guard output.contains("Success! App '1007'") else {
-            throw SteamCMDError.failed("Valves Steamworks-Redist konnte nicht geladen werden.")
+            throw SteamCMDError.failed(String(localized: "Valves Steamworks-Redist konnte nicht geladen werden."))
         }
     }
 
     nonisolated static func install(into dir: URL, report: @escaping @Sendable (Double, String) -> Void = { _, _ in }) async throws {
-        report(0, "Lade steamcmd von Valve …")
-        let file = try await download(url) { report(0.2 * $0, "Lade steamcmd von Valve …") }
+        report(0, String(localized: "Lade steamcmd von Valve …"))
+        let file = try await download(url) { report(0.2 * $0, String(localized: "Lade steamcmd von Valve …")) }
         defer { try? FileManager.default.removeItem(at: file) }
 
-        report(0.2, "Prüfe Valves Signatur …")
+        report(0.2, String(localized: "Prüfe Valves Signatur …"))
         let staging = dir.deletingLastPathComponent().appendingPathComponent("steamcmd.partial", isDirectory: true)
         try? FileManager.default.removeItem(at: staging)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
         guard run("/usr/bin/tar", ["-xzf", file.path, "-C", staging.path]) else {
-            throw SteamCMDError.failed("Das steamcmd-Archiv ist beschädigt.")
+            throw SteamCMDError.failed(String(localized: "Das steamcmd-Archiv ist beschädigt."))
         }
         for binary in ["steamcmd", "crashhandler.dylib"] {
             let path = staging.appendingPathComponent(binary).path
             guard run("/usr/bin/codesign", ["--verify", "--strict", "-R=" + requirement, path]) else {
-                throw SteamCMDError.failed("\(binary) ist nicht von Valve signiert.")
+                throw SteamCMDError.failed(String(localized: "\(binary) ist nicht von Valve signiert."))
             }
         }
 
@@ -84,19 +84,19 @@ final class SteamCMDSetup: ObservableObject {
         // The first start updates steamcmd, and the old version sometimes
         // crashes right after; get that done here rather than during a login
         let steamcmd = dir.appendingPathComponent("steamcmd.sh").path
-        report(0.25, "steamcmd aktualisiert sich …")
+        report(0.25, String(localized: "steamcmd aktualisiert sich …"))
         for _ in 0..<3 {
             let output = (try? await runLive(steamcmd, ["+quit"]) { line in
                 // "[ 45%] Downloading update (7,077 of 15,797 KB)..."
                 if line.hasPrefix("["), let close = line.firstIndex(of: "%"),
                    let value = Double(line[line.index(after: line.startIndex)..<close].trimmingCharacters(in: .whitespaces)) {
-                    report(0.25 + 0.5 * value / 100, "steamcmd aktualisiert sich …")
+                    report(0.25 + 0.5 * value / 100, String(localized: "steamcmd aktualisiert sich …"))
                 }
             }) ?? ""
             if output.contains("Unloading Steam API...OK") { return }
         }
         try? FileManager.default.removeItem(at: dir)
-        throw SteamCMDError.failed("steamcmd ließ sich nach dem Update nicht starten.")
+        throw SteamCMDError.failed(String(localized: "steamcmd ließ sich nach dem Update nicht starten."))
     }
 
     /// Runs steamcmd through script(1), so it sees a terminal and prints progress live.
@@ -109,7 +109,7 @@ final class SteamCMDSetup: ObservableObject {
     private nonisolated static func download(_ url: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         let (bytes, response) = try await URLSession.shared.bytes(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw SteamCMDError.failed("Der Download von Valve ist fehlgeschlagen.")
+            throw SteamCMDError.failed(String(localized: "Der Download von Valve ist fehlgeschlagen."))
         }
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".tar.gz")
         FileManager.default.createFile(atPath: file.path, contents: nil)

@@ -15,7 +15,7 @@ struct LaunchOptionsView: View {
 
         var title: String {
             switch self {
-            case .game: return "Wie vom Spiel vorgesehen"
+            case .game: return String(localized: "Wie vom Spiel vorgesehen")
             case .dx11: return "Direct3D 11 (-dx11)"
             case .dx12: return "Direct3D 12 (-dx12)"
             }

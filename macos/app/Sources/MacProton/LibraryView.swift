@@ -96,7 +96,7 @@ struct LibraryView: View {
                 Picker("Filter", selection: $filter) {
                     ForEach(Filter.allCases, id: \.self) { item in
                         let count = installer.downloads.count
-                        Text(item == .downloads && count > 0 ? "Downloads (\(count))" : item.rawValue)
+                        Text(item == .downloads && count > 0 ? "Downloads (\(count))" : LocalizedStringKey(item.rawValue))
                     }
                 }
                 .pickerStyle(.segmented)
@@ -104,14 +104,15 @@ struct LibraryView: View {
             ToolbarItem {
                 Menu {
                     Picker("Plattform", selection: $platform) {
-                        ForEach(Platform.allCases, id: \.self) { Label($0.rawValue, systemImage: $0.symbol).tag($0) }
+                        ForEach(Platform.allCases, id: \.self) { Label(LocalizedStringKey($0.rawValue), systemImage: $0.symbol).tag($0) }
                     }
                     .pickerStyle(.inline)
                 } label: {
                     Label("Plattform", systemImage: platform == .all ? "line.3.horizontal.decrease.circle"
                                                                      : "line.3.horizontal.decrease.circle.fill")
                 }
-                .help(platform == .all ? "Nach Plattform filtern" : "Gefiltert: \(platform.rawValue)")
+                .help(platform == .all ? String(localized: "Nach Plattform filtern")
+                      : String(localized: "Gefiltert: \(String(localized: String.LocalizationValue(platform.rawValue)))"))
             }
             ToolbarItem {
                 Button { sync.sync(library: library, account: installer.account) } label: {
@@ -164,13 +165,16 @@ struct LibraryView: View {
                 prompt.answer(nil)
             }
         } message: { prompt in
-            Text("\(prompt.game.name): \(prompt.files.count == 1 ? "Eine Datei hat" : "\(prompt.files.count) Dateien haben") sich seit dem letzten Abgleich in der Steam Cloud und auf diesem Mac geändert, etwa \(prompt.files.first.map { ($0 as NSString).lastPathComponent } ?? ""). Welche Version soll gelten? Die andere wird vorher gesichert.")
+            let example = prompt.files.first.map { ($0 as NSString).lastPathComponent } ?? ""
+            Text(prompt.files.count == 1
+                 ? String(localized: "\(prompt.game.name): Eine Datei hat sich seit dem letzten Abgleich in der Steam Cloud und auf diesem Mac geändert, etwa \(example). Welche Version soll gelten? Die andere wird vorher gesichert.")
+                 : String(localized: "\(prompt.game.name): \(prompt.files.count) Dateien haben sich seit dem letzten Abgleich in der Steam Cloud und auf diesem Mac geändert, etwa \(example). Welche Version soll gelten? Die andere wird vorher gesichert."))
         }
         .alert("Steam Cloud nicht erreichbar", isPresented: cloudFailureBinding, presenting: runner.cloudFailure) { prompt in
             Button("Ohne Abgleich starten") { runner.cloudFailure = nil; prompt.answer(true) }
             Button("Abbrechen", role: .cancel) { runner.cloudFailure = nil; prompt.answer(false) }
         } message: { prompt in
-            Text("Die Spielstände von \(prompt.game.name) konnten nicht abgeglichen werden: \(prompt.message)\n\nOhne Abgleich lädt MacProton nach dem Spielen nur neue und geänderte Dateien hoch und löscht nichts in der Cloud.")
+            Text(String(localized: "Die Spielstände von \(prompt.game.name) konnten nicht abgeglichen werden: \(prompt.message)\n\nOhne Abgleich lädt MacProton nach dem Spielen nur neue und geänderte Dateien hoch und löscht nichts in der Cloud."))
         }
         .alert("Steam ist offline", isPresented: offlineBinding) {
             Button("Offline spielen") {
@@ -210,38 +214,38 @@ struct LibraryView: View {
 
     @ViewBuilder private var banners: some View {
         if let release = appUpdates.newRelease {
-            Banner(text: "MacProton \(release.version) ist verfügbar.", color: .blue,
-                   action: ("Herunterladen", { NSWorkspace.shared.open(release.url) }))
+            Banner(text: String(localized: "MacProton \(release.version) ist verfügbar."), color: .blue,
+                   action: (String(localized: "Herunterladen"), { NSWorkspace.shared.open(release.url) }))
         }
         if !Paths.runtimeAvailable {
-            Banner(text: "Proton-Laufzeit nicht gefunden (\(Paths.runtime.path)). Lege den Ordner in den Einstellungen fest.",
+            Banner(text: String(localized: "Proton-Laufzeit nicht gefunden (\(Paths.runtime.path)). Lege den Ordner in den Einstellungen fest."),
                    color: .orange)
         }
         if Paths.needsRosetta {
-            Banner(text: "Rosetta 2 fehlt. Die Windows-Laufzeit braucht es auf Macs mit Apple-Chip.",
+            Banner(text: String(localized: "Rosetta 2 fehlt. Die Windows-Laufzeit braucht es auf Macs mit Apple-Chip."),
                    color: .orange, action: ("Installieren", { installer.installRosetta() }))
         }
         if steamcmdSetup.running {
-            Banner(text: "steamcmd wird von Valve geladen und eingerichtet …", color: .yellow)
+            Banner(text: String(localized: "steamcmd wird von Valve geladen und eingerichtet …"), color: .yellow)
         } else if let error = steamcmdSetup.error {
             Banner(text: error, color: .orange, action: ("Erneut versuchen", { steamcmdSetup.setUpIfNeeded() }))
         }
         if !steamRunning {
-            Banner(text: "Steam läuft nicht. Spiele brauchen den angemeldeten Steam-Client.", color: .yellow)
+            Banner(text: String(localized: "Steam läuft nicht. Spiele brauchen den angemeldeten Steam-Client."), color: .yellow)
         } else if runner.reconnecting {
-            Banner(text: "Steam wird neu gestartet und meldet sich wieder an …", color: .yellow)
+            Banner(text: String(localized: "Steam wird neu gestartet und meldet sich wieder an …"), color: .yellow)
         } else if steamOnline == false {
-            Banner(text: "Steam ist offline. Lobbys und Online-Funktionen in Spielen gehen erst nach dem Neuverbinden.",
-                   color: .yellow, action: ("Neu verbinden", { runner.reconnectSteam() }))
+            Banner(text: String(localized: "Steam ist offline. Lobbys und Online-Funktionen in Spielen gehen erst nach dem Neuverbinden."),
+                   color: .yellow, action: (String(localized: "Neu verbinden"), { runner.reconnectSteam() }))
         }
     }
 
     private var offlineText: String {
         runner.running.isEmpty
-            ? "Steam hat sich nach dem Neustart nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster. "
-                + "Ohne Verbindung gehen Lobbys und Online-Funktionen nicht."
-            : "Der Steam-Client hat keine Verbindung. Zum Neuverbinden müsste MacProton Steam neu starten, "
-                + "das würde die laufenden Spiele trennen. Ohne Verbindung gehen Lobbys und Online-Funktionen nicht."
+            ? String(localized: "Steam hat sich nach dem Neustart nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster. ")
+                + String(localized: "Ohne Verbindung gehen Lobbys und Online-Funktionen nicht.")
+            : String(localized: "Der Steam-Client hat keine Verbindung. Zum Neuverbinden müsste MacProton Steam neu starten, ")
+                + String(localized: "das würde die laufenden Spiele trennen. Ohne Verbindung gehen Lobbys und Online-Funktionen nicht.")
     }
 
     /// steamcmd's login replaced the Steam client's session
@@ -260,9 +264,9 @@ struct LibraryView: View {
     private var cloudWarningText: String {
         let name = runner.cloudWarningGame?.name ?? "Dieses Spiel"
         if let game = runner.cloudWarningGame, !game.runsNatively, !(game.cloudRules ?? []).isEmpty {
-            return "\(name) speichert in Windows-Ordnern in der Steam Cloud, und die gleicht Steam für macOS nicht ab. Melde dich in den Einstellungen unter „Steam Cloud“ an, dann lädt MacProton die Spielstände vor jedem Start und danach wieder hoch.\n\nOhne Anmeldung kannst du sie per Rechtsklick mit „Cloud-Spielstände holen …“ von Hand holen."
+            return String(localized: "\(name) speichert in Windows-Ordnern in der Steam Cloud, und die gleicht Steam für macOS nicht ab. Melde dich in den Einstellungen unter „Steam Cloud“ an, dann lädt MacProton die Spielstände vor jedem Start und danach wieder hoch.\n\nOhne Anmeldung kannst du sie per Rechtsklick mit „Cloud-Spielstände holen …“ von Hand holen.")
         }
-        return "\(name) speichert in der Steam Cloud, und Steam hat die Spielstände auf diesem Mac noch nicht geladen. Für Windows-Spiele lädt Steam sie erst beim Beenden.\n\nHast du auf einem anderen Gerät gespielt: Starte das Spiel nur bis ins Hauptmenü und beende es wieder. Fragt Steam dann nach einem Konflikt, wähle die Cloud-Version. Ab dem nächsten Start sind deine Spielstände da."
+        return String(localized: "\(name) speichert in der Steam Cloud, und Steam hat die Spielstände auf diesem Mac noch nicht geladen. Für Windows-Spiele lädt Steam sie erst beim Beenden.\n\nHast du auf einem anderen Gerät gespielt: Starte das Spiel nur bis ins Hauptmenü und beende es wieder. Fragt Steam dann nach einem Konflikt, wähle die Cloud-Version. Ab dem nächsten Start sind deine Spielstände da.")
     }
 
     private var cloudWarningBinding: Binding<Bool> {
@@ -395,16 +399,16 @@ struct GameCard: View {
 
     private func chooseInstallFolder() {
         guard let folder = GameLocation.choose(
-            prompt: "Hier installieren",
-            message: "„\(game.name)“ bekommt in diesem Ordner einen eigenen Ordner, zum Beispiel auf einer externen Festplatte.")
+            prompt: String(localized: "Hier installieren"),
+            message: String(localized: "„\(game.name)“ bekommt in diesem Ordner einen eigenen Ordner, zum Beispiel auf einer externen Festplatte."))
         else { return }
         installer.install(game, in: folder, library: library)
     }
 
     private func chooseMoveTarget() {
         guard let folder = GameLocation.choose(
-            prompt: "Hierher verschieben",
-            message: "Der Ordner von „\(game.name)“ kommt in den gewählten Ordner. Auf ein anderes Laufwerk wird er kopiert und danach am alten Ort gelöscht.")
+            prompt: String(localized: "Hierher verschieben"),
+            message: String(localized: "Der Ordner von „\(game.name)“ kommt in den gewählten Ordner. Auf ein anderes Laufwerk wird er kopiert und danach am alten Ort gelöscht."))
         else { return }
         installer.move(game, to: folder, library: library)
     }
@@ -420,7 +424,7 @@ struct GameCard: View {
                 Label("Wartet auf Download", systemImage: "clock").font(.caption).foregroundStyle(.secondary)
             case .paused:
                 ProgressView(value: download.progress) {
-                    Text("Download pausiert – \(Int(download.progress * 100)) %" + (download.error.map { " · \($0)" } ?? ""))
+                    Text(String(localized: "Download pausiert – \(Int(download.progress * 100)) %") + (download.error.map { " · \($0)" } ?? ""))
                         .font(.caption).foregroundStyle(download.error == nil ? Color.secondary : .orange)
                 }
             case .failed:
@@ -443,21 +447,21 @@ struct GameCard: View {
             if !game.isInstalledNatively {
                 Text("Mac-Version · Installation über Steam").font(.caption).foregroundStyle(.secondary)
             } else if let played = game.lastPlayed {
-                Text("Mac-Version · zuletzt gespielt " + played.formatted(.relative(presentation: .named)))
+                Text(String(localized: "Mac-Version · zuletzt gespielt \(played.formatted(.relative(presentation: .named)))"))
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("Mac-Version · in Steam installiert").font(.caption).foregroundStyle(.secondary)
             }
         } else if !game.locationAvailable {
-            Label("Laufwerk „\(game.externalVolume ?? "")“ nicht verbunden", systemImage: "externaldrive.badge.exclamationmark")
+            Label(String(localized: "Laufwerk „\(game.externalVolume ?? "")“ nicht verbunden"), systemImage: "externaldrive.badge.exclamationmark")
                 .font(.caption).foregroundStyle(.orange)
         } else if game.isInstalled && updates.available.contains(game.appID) {
             Label("Update verfügbar", systemImage: "arrow.down.circle.fill")
                 .font(.caption).foregroundStyle(.orange)
         } else if !game.isInstalled {
-            Text("Nicht installiert" + sizeText).font(.caption).foregroundStyle(.secondary)
+            Text(String(localized: "Nicht installiert") + sizeText).font(.caption).foregroundStyle(.secondary)
         } else if let played = game.lastPlayed {
-            Text("Zuletzt gespielt " + played.formatted(.relative(presentation: .named)))
+            Text(String(localized: "Zuletzt gespielt \(played.formatted(.relative(presentation: .named)))"))
                 .font(.caption).foregroundStyle(.secondary)
         } else {
             Text("Installiert").font(.caption).foregroundStyle(.secondary)

@@ -31,6 +31,8 @@ Corporation verbunden und wird von ihr weder unterstützt noch gesponsert.
   per Bluetooth.
 - **Hinweise:** Markiert Spiele mit Anti-Cheat, fremden Launchern oder
   Online-Pflicht.
+- **Deutsch und Englisch:** Die App folgt der Sprache von macOS. Beim
+  ersten Start und in den Einstellungen lässt sie sich umstellen.
 
 ## Voraussetzungen
 

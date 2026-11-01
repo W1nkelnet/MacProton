@@ -17,9 +17,9 @@ enum CompatibilityIssue: String, Codable, Hashable {
 
     var title: String {
         switch self {
-        case .antiCheatOffline: return "Anti-Cheat: nur offline"
+        case .antiCheatOffline: return String(localized: "Anti-Cheat: nur offline")
         case .antiCheat: return "Anti-Cheat"
-        case .antiCheatFiles: return "Anti-Cheat im Spiel"
+        case .antiCheatFiles: return String(localized: "Anti-Cheat im Spiel")
         case .thirdPartyLauncher: return "Fremd-Launcher"
         case .needsInternet: return "Braucht Internet"
         }
@@ -28,15 +28,15 @@ enum CompatibilityIssue: String, Codable, Hashable {
     var explanation: String {
         switch self {
         case .antiCheatOffline:
-            return "Der normale Start nutzt Anti-Cheat (EasyAntiCheat/BattlEye), das unter MacProton nicht läuft. MacProton startet stattdessen die Version ohne Anti-Cheat – Einzelspieler oder nicht-offizielle Server können funktionieren, offizielle Online-Server nicht."
+            return String(localized: "Der normale Start nutzt Anti-Cheat (EasyAntiCheat/BattlEye), das unter MacProton nicht läuft. MacProton startet stattdessen die Version ohne Anti-Cheat – Einzelspieler oder nicht-offizielle Server können funktionieren, offizielle Online-Server nicht.")
         case .antiCheat:
-            return "Das Spiel nutzt Anti-Cheat (EasyAntiCheat/BattlEye). Dafür gibt es unter MacProton keine Laufzeitumgebung; das Spiel startet sehr wahrscheinlich nicht."
+            return String(localized: "Das Spiel nutzt Anti-Cheat (EasyAntiCheat/BattlEye). Dafür gibt es unter MacProton keine Laufzeitumgebung; das Spiel startet sehr wahrscheinlich nicht.")
         case .antiCheatFiles:
-            return "Im Spielordner liegt EasyAntiCheat oder BattlEye. Online-Modi mit Anti-Cheat funktionieren unter MacProton nicht; manche Spiele bieten im Launcher einen Start ohne Anti-Cheat."
+            return String(localized: "Im Spielordner liegt EasyAntiCheat oder BattlEye. Online-Modi mit Anti-Cheat funktionieren unter MacProton nicht; manche Spiele bieten im Launcher einen Start ohne Anti-Cheat.")
         case .thirdPartyLauncher:
-            return "Das Spiel braucht einen eigenen Launcher (z. B. EA app oder Ubisoft Connect), der mit installiert werden muss und unter Wine oft Probleme macht."
+            return String(localized: "Das Spiel braucht einen eigenen Launcher (z. B. EA app oder Ubisoft Connect), der mit installiert werden muss und unter Wine oft Probleme macht.")
         case .needsInternet:
-            return "Laut Steam braucht auch der Einzelspielermodus eine Internetverbindung."
+            return String(localized: "Laut Steam braucht auch der Einzelspielermodus eine Internetverbindung.")
         }
     }
 

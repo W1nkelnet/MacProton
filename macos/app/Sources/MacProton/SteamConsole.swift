@@ -38,11 +38,11 @@ final class SteamConsole: @unchecked Sendable {
     /// before it would prompt for a password.
     func login(_ account: String) async throws {
         guard try await wait(timeout: 180, account: account, until: { $0.contains("Steam>") }) else {
-            throw SteamCMDError.failed("steamcmd antwortet nicht.")
+            throw SteamCMDError.failed(String(localized: "steamcmd antwortet nicht."))
         }
         send("login \(account)")
         guard try await wait(timeout: 90, account: account, until: { $0.contains("Waiting for user info...OK") }) else {
-            throw SteamCMDError.failed("Anmeldung bei Steam fehlgeschlagen.")
+            throw SteamCMDError.failed(String(localized: "Anmeldung bei Steam fehlgeschlagen."))
         }
     }
 

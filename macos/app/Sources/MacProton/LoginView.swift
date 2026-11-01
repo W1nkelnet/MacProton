@@ -31,13 +31,13 @@ struct LoginView: View {
                     .textContentType(.password)
                     .onSubmit(submit)
             case .emailCode:
-                prompt("Steam hat dir einen Code per E-Mail geschickt.")
+                prompt(String(localized: "Steam hat dir einen Code per E-Mail geschickt."))
                 TextField("Steam-Guard-Code", text: $secret).onSubmit(submit)
             case .mobileCode:
-                prompt("Gib den Code aus der Steam-App auf deinem Handy ein.")
+                prompt(String(localized: "Gib den Code aus der Steam-App auf deinem Handy ein."))
                 TextField("Steam-Guard-Code", text: $secret).onSubmit(submit)
             case .mobileConfirmation:
-                prompt("Bestätige die Anmeldung in der Steam-App auf deinem Handy.")
+                prompt(String(localized: "Bestätige die Anmeldung in der Steam-App auf deinem Handy."))
                 ProgressView().controlSize(.small)
             case .connecting:
                 HStack { ProgressView().controlSize(.small); Text("Verbinde mit Steam …").font(.callout) }
@@ -77,7 +77,7 @@ struct LoginView: View {
 
     private var awaitsAnswer: Bool { [.password, .emailCode, .mobileCode].contains(login.step) }
 
-    private var primaryTitle: String { awaitsAnswer ? "Weiter" : "Anmelden" }
+    private var primaryTitle: String { awaitsAnswer ? String(localized: "Weiter") : String(localized: "Anmelden") }
 
     private var canSubmit: Bool {
         awaitsAnswer ? !secret.isEmpty : (login.step == .idle || isFailed) && !account.trimmingCharacters(in: .whitespaces).isEmpty

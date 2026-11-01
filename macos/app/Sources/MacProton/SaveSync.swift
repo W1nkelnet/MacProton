@@ -58,7 +58,7 @@ enum SaveSync {
                 if URL(fileURLWithPath: target).standardizedFileURL == macDir.standardizedFileURL {
                     report.linked.append(macDir.path)
                 } else {
-                    report.skipped.append("\(winDir.path) ist bereits eine Verknüpfung nach \(target)")
+                    report.skipped.append(String(localized: "\(winDir.path) ist bereits eine Verknüpfung nach \(target)"))
                 }
                 continue
             }
@@ -67,7 +67,7 @@ enum SaveSync {
             let winReal = winDir.deletingLastPathComponent().resolvingSymlinksInPath()
                 .appendingPathComponent(winDir.lastPathComponent).path
             guard winReal.hasPrefix(prefixReal + "/") else {
-                report.skipped.append("\(winDir.path) liegt außerhalb des Prefix (\(winReal))")
+                report.skipped.append(String(localized: "\(winDir.path) liegt außerhalb des Prefix (\(winReal))"))
                 continue
             }
 

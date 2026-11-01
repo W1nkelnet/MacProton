@@ -62,10 +62,10 @@ enum GameLocation {
     static func installProblem(_ game: Game, dir: URL) -> String? {
         let folder = dir.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: folder.path) else {
-            return "MacProton darf in „\(folder.path)“ nicht schreiben. Laufwerke im Windows-Format NTFS kann macOS nur lesen."
+            return String(localized: "MacProton darf in „\(folder.path)“ nicht schreiben. Laufwerke im Windows-Format NTFS kann macOS nur lesen.")
         }
         if !hasManifest(of: game.appID, in: dir), game.sizeBytes > 0, let free = freeSpace(at: folder), free < game.sizeBytes {
-            return "\(game.name) braucht \(format(game.sizeBytes)), auf dem Laufwerk sind nur \(format(free)) frei."
+            return String(localized: "\(game.name) braucht \(format(game.sizeBytes)), auf dem Laufwerk sind nur \(format(free)) frei.")
         }
         return nil
     }
@@ -90,13 +90,13 @@ enum GameLocation {
         // Both exist, so they resolve alike, unlike the target
         let from = source.resolvingSymlinksInPath().path, into = folder.resolvingSymlinksInPath().path
         if into == from || into.hasPrefix(from + "/") {
-            throw Failure("Ein Spiel kann nicht in seinen eigenen Ordner verschoben werden.")
+            throw Failure(String(localized: "Ein Spiel kann nicht in seinen eigenen Ordner verschoben werden."))
         }
         if fm.fileExists(atPath: target.path) {
-            throw Failure("In „\(folder.path)“ gibt es schon einen Ordner „\(target.lastPathComponent)“.")
+            throw Failure(String(localized: "In „\(folder.path)“ gibt es schon einen Ordner „\(target.lastPathComponent)“."))
         }
         guard fm.isWritableFile(atPath: folder.path) else {
-            throw Failure("MacProton darf in „\(folder.path)“ nicht schreiben. Laufwerke im Windows-Format NTFS kann macOS nur lesen.")
+            throw Failure(String(localized: "MacProton darf in „\(folder.path)“ nicht schreiben. Laufwerke im Windows-Format NTFS kann macOS nur lesen."))
         }
         if sameVolume(source, folder) {
             try fm.moveItem(at: source, to: target)
@@ -115,7 +115,7 @@ enum GameLocation {
             total += size
         }
         if let free = freeSpace(at: folder), free < total {
-            throw Failure("Das Spiel braucht \(format(total)), auf dem Ziellaufwerk sind nur \(format(free)) frei.")
+            throw Failure(String(localized: "Das Spiel braucht \(format(total)), auf dem Ziellaufwerk sind nur \(format(free)) frei."))
         }
 
         var copied: Int64 = 0
@@ -136,7 +136,7 @@ enum GameLocation {
             throw error
         }
         do { try fm.removeItem(at: source) } catch {
-            return "Der alte Ordner „\(source.path)“ ließ sich nicht ganz löschen: \(error.localizedDescription)"
+            return String(localized: "Der alte Ordner „\(source.path)“ ließ sich nicht ganz löschen: \(error.localizedDescription)")
         }
         return nil
     }

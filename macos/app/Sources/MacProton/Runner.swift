@@ -63,19 +63,19 @@ final class Runner: ObservableObject {
     func play(_ game: Game, allowOffline: Bool = false) {
         guard !isRunning(game), !reconnecting else { return }
         guard !game.launchesViaURL else {
-            lastError = "\(game.name) startet über den Launcher eines anderen Anbieters (\(game.executable.prefix { $0 != ":" })). Solche Launcher unterstützt MacProton noch nicht."
+            lastError = String(localized: "\(game.name) startet über den Launcher eines anderen Anbieters (\(game.executable.prefix { $0 != ":" })). Solche Launcher unterstützt MacProton noch nicht.")
             return
         }
         guard Paths.runtimeAvailable else {
-            lastError = "Proton-Laufzeit nicht gefunden in \(Paths.runtime.path). Lege sie in den Einstellungen fest."
+            lastError = String(localized: "Proton-Laufzeit nicht gefunden in \(Paths.runtime.path). Lege sie in den Einstellungen fest.")
             return
         }
         guard game.locationAvailable else {
-            lastError = "Das Laufwerk „\(game.externalVolume ?? "")“ mit \(game.name) ist nicht verbunden."
+            lastError = String(localized: "Das Laufwerk „\(game.externalVolume ?? "")“ mit \(game.name) ist nicht verbunden.")
             return
         }
         guard Paths.steamRunning else {
-            lastError = "Steam läuft nicht. Starte Steam und melde dich an."
+            lastError = String(localized: "Steam läuft nicht. Starte Steam und melde dich an.")
             return
         }
         // macOS Steam does not download cloud saves before a Windows game starts
@@ -95,14 +95,14 @@ final class Runner: ObservableObject {
             defer { syncTasks[game.appID] = nil }
             let prefix = prefix(of: game)
             if !FileManager.default.fileExists(atPath: prefix.appendingPathComponent("system.reg").path) {
-                preparing[game.appID] = "Richte Wine ein …"
+                preparing[game.appID] = String(localized: "Richte Wine ein …")
                 await runScript(["--prepare", String(game.appID)])
             }
             await runInstallScripts(game, prefix: prefix)
             preparing[game.appID] = nil
             if Self.syncSaves, !(game.cloudSaves ?? []).isEmpty { await linkSaves(game) }
             if CloudSync.applies(to: game) {
-                preparing[game.appID] = "Gleiche Spielstände mit der Steam Cloud ab …"
+                preparing[game.appID] = String(localized: "Gleiche Spielstände mit der Steam Cloud ab …")
                 let start = await syncCloudBeforeStart(game, prefix: prefix)
                 preparing[game.appID] = nil
                 guard start else {
@@ -136,13 +136,13 @@ final class Runner: ObservableObject {
             if let backup = summary.backup {
                 var parts: [String] = []
                 if summary.downloaded > 0 {
-                    parts.append("\(summary.downloaded) Spielstand-Dateien von \(game.name) kamen aus der Steam Cloud.")
+                    parts.append(String(localized: "\(summary.downloaded) Spielstand-Dateien von \(game.name) kamen aus der Steam Cloud."))
                 }
                 if summary.backedUpFromMac > 0 {
-                    parts.append("\(summary.backedUpFromMac) Dateien dieses Macs, die dabei ersetzt wurden, liegen gesichert in \(backup.appendingPathComponent("mac").path).")
+                    parts.append(String(localized: "\(summary.backedUpFromMac) Dateien dieses Macs, die dabei ersetzt wurden, liegen gesichert in \(backup.appendingPathComponent("mac").path)."))
                 }
                 if summary.backedUpFromCloud > 0 {
-                    parts.append("Die Cloud-Version von \(summary.backedUpFromCloud) Dateien liegt gesichert in \(backup.appendingPathComponent("cloud").path). Nach dem Spielen lädt MacProton die Version dieses Macs hoch.")
+                    parts.append(String(localized: "Die Cloud-Version von \(summary.backedUpFromCloud) Dateien liegt gesichert in \(backup.appendingPathComponent("cloud").path). Nach dem Spielen lädt MacProton die Version dieses Macs hoch."))
                 }
                 notice = parts.joined(separator: " ")
             }
@@ -170,9 +170,9 @@ final class Runner: ObservableObject {
             _ = try await CloudSync.apply(plan, resolving: resolution)
         } catch {
             if Task.isCancelled {
-                notice = "Hochladen der Spielstände von \(game.name) abgebrochen. Sie bleiben auf diesem Mac und gehen nach dem nächsten Spielen mit hoch."
+                notice = String(localized: "Hochladen der Spielstände von \(game.name) abgebrochen. Sie bleiben auf diesem Mac und gehen nach dem nächsten Spielen mit hoch.")
             } else {
-                lastError = "Die Spielstände von \(game.name) konnten nicht in die Steam Cloud geladen werden: \(error.localizedDescription) Sie bleiben auf diesem Mac und gehen nach dem nächsten Spielen mit hoch."
+                lastError = String(localized: "Die Spielstände von \(game.name) konnten nicht in die Steam Cloud geladen werden: \(error.localizedDescription) Sie bleiben auf diesem Mac und gehen nach dem nächsten Spielen mit hoch.")
             }
         }
     }
@@ -208,7 +208,7 @@ final class Runner: ObservableObject {
         try? FileManager.default.createDirectory(at: Paths.logsDir, withIntermediateDirectories: true)
         let log = Paths.logsDir.appendingPathComponent("\(game.appID)-setup.log")
         for (i, step) in steps.enumerated() {
-            preparing[game.appID] = "Installiere Komponenten des Spiels (\(i + 1)/\(steps.count)) …"
+            preparing[game.appID] = String(localized: "Installiere Komponenten des Spiels (\(i + 1)/\(steps.count)) …")
             let status = await runScript(["--exec", String(game.appID), step.program] + step.arguments, log: log)
             // 3010: reboot required, 1638: a newer version is installed
             if [0, 3010, 1638].contains(status) {
@@ -224,12 +224,12 @@ final class Runner: ObservableObject {
         do {
             let report = try SaveSync.link(game, prefix: prefix)
             if !report.skipped.isEmpty {
-                notice = "Spielstand-Sync für \(game.name) teilweise nicht eingerichtet:\n" + report.skipped.joined(separator: "\n")
+                notice = String(localized: "Spielstand-Sync für \(game.name) teilweise nicht eingerichtet:\n") + report.skipped.joined(separator: "\n")
             } else if let backup = report.backup {
-                notice = "Spielstände von \(game.name) werden jetzt mit Steam Cloud synchronisiert. Eine Sicherung der bisherigen Spielstände liegt in \(backup.path)."
+                notice = String(localized: "Spielstände von \(game.name) werden jetzt mit Steam Cloud synchronisiert. Eine Sicherung der bisherigen Spielstände liegt in \(backup.path).")
             }
         } catch {
-            notice = "Spielstand-Sync für \(game.name) fehlgeschlagen, das Spiel startet ohne Sync: \(error.localizedDescription)"
+            notice = String(localized: "Spielstand-Sync für \(game.name) fehlgeschlagen, das Spiel startet ohne Sync: \(error.localizedDescription)")
         }
     }
 
@@ -307,10 +307,10 @@ final class Runner: ObservableObject {
                 self.processes[appID] = nil
                 // A quick non-zero exit means the game did not start at all
                 if status != 0 && Date().timeIntervalSince(started) < 15 {
-                    self.lastError = "Das Spiel konnte nicht gestartet werden (Code \(status)). Protokoll: \(logURL.path)"
+                    self.lastError = String(localized: "Das Spiel konnte nicht gestartet werden (Code \(status)). Protokoll: \(logURL.path)")
                 }
                 if CloudSync.applies(to: game) {
-                    self.preparing[appID] = "Lade Spielstände in die Steam Cloud …"
+                    self.preparing[appID] = String(localized: "Lade Spielstände in die Steam Cloud …")
                     let upload = Task {
                         await self.waitForPrefix(game)
                         await self.syncCloudAfterExit(game)
@@ -329,7 +329,7 @@ final class Runner: ObservableObject {
             processes[appID] = process
         } catch {
             running.remove(appID)
-            lastError = "Start fehlgeschlagen: \(error.localizedDescription)"
+            lastError = String(localized: "Start fehlgeschlagen: \(error.localizedDescription)")
         }
     }
 
@@ -348,14 +348,14 @@ final class Runner: ObservableObject {
     /// Automatic reconnects (after steamcmd ran) skip quietly while games run.
     func reconnectSteam(then game: Game? = nil, automatic: Bool = false) {
         guard running.isEmpty else {
-            if !automatic { lastError = "Beende zuerst die laufenden Spiele, Steam wird dafür neu gestartet." }
+            if !automatic { lastError = String(localized: "Beende zuerst die laufenden Spiele, Steam wird dafür neu gestartet.") }
             return
         }
         reconnect { online in
             if let game {
                 if online { self.play(game) } else { self.offlineGame = game }
             } else if !online {
-                self.lastError = "Steam hat sich nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster."
+                self.lastError = String(localized: "Steam hat sich nicht wieder verbunden. Prüfe die Anmeldung im Steam-Fenster.")
             }
         }
     }

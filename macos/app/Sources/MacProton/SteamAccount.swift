@@ -28,7 +28,7 @@ enum SteamWebAPI {
         guard status == 200,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = object["response"] as? [String: Any] else {
-            throw SteamConnection.Failure(description: "Steam antwortet nicht wie erwartet (\(method), HTTP \(status)).")
+            throw SteamConnection.Failure(description: String(localized: "Steam antwortet nicht wie erwartet (\(method), HTTP \(status))."))
         }
         return result
     }
@@ -120,7 +120,7 @@ final class SteamCloudAccount: ObservableObject {
                 guard var clientID = begin["client_id"] as? String,
                       let requestID = begin["request_id"] as? String,
                       let url = begin["challenge_url"] as? String else {
-                    throw SteamConnection.Failure(description: "Steam hat keine Anmeldung angelegt.")
+                    throw SteamConnection.Failure(description: String(localized: "Steam hat keine Anmeldung angelegt."))
                 }
                 qrCode = Self.qrImage(url)
                 let interval = (begin["interval"] as? Double) ?? 5
@@ -142,7 +142,7 @@ final class SteamCloudAccount: ObservableObject {
                         return
                     }
                 }
-                error = "Die Anmeldung ist abgelaufen. Starte sie neu."
+                error = String(localized: "Die Anmeldung ist abgelaufen. Starte sie neu.")
             } catch is CancellationError {
             } catch {
                 self.error = error.localizedDescription

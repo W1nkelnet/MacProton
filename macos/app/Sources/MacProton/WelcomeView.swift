@@ -33,7 +33,7 @@ struct WelcomeView: View {
                         Button("Erneut versuchen") { setup.setUpIfNeeded() }
                     } else {
                         ProgressView(value: setup.progress) {
-                            Text(setup.status.isEmpty ? "Bereite vor …" : setup.status).font(.callout)
+                            Text(setup.status.isEmpty ? String(localized: "Bereite vor …") : setup.status).font(.callout)
                         } currentValueLabel: {
                             Text("\(Int(setup.progress * 100)) %").font(.caption).monospacedDigit()
                         }
@@ -79,12 +79,18 @@ struct WelcomeView: View {
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .topTrailing) {
+            LanguagePicker()
+                .pickerStyle(.menu)
+                .fixedSize()
+                .padding(16)
+        }
     }
 
     /// A login in this window, or one cached from earlier
     private var loggedIn: Bool { login.step == .done || (!steamAccount.isEmpty && !login.isPresented && login.step == .idle) }
 
-    private func step<Content: View>(number: Int, title: String, done: Bool,
+    private func step<Content: View>(number: Int, title: LocalizedStringKey, done: Bool,
                                      @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .top, spacing: 14) {
             ZStack {

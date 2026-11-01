@@ -36,7 +36,7 @@ struct AddGameView: View {
                         } else {
                             Text("Startdatei: \(info.executable)").font(.caption)
                             if info.sizeBytes > 0 {
-                                Text("Größe: \(ByteCountFormatter.string(fromByteCount: info.sizeBytes, countStyle: .file))")
+                                Text(String(localized: "Größe: \(ByteCountFormatter.string(fromByteCount: info.sizeBytes, countStyle: .file))"))
                                     .font(.caption)
                             }
                             HStack {
@@ -106,7 +106,7 @@ struct AddGameView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        panel.prompt = "Wählen"
+        panel.prompt = String(localized: "Wählen")
         if panel.runModal() == .OK, let url = panel.url { installDir = url.path }
     }
 

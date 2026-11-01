@@ -73,10 +73,10 @@ final class Installer: ObservableObject {
         let script = Paths.support.appendingPathComponent("install-rosetta.command")
         let text = """
         #!/bin/bash
-        echo "Rosetta 2 für MacProton installieren …"
+        echo String(localized: "Rosetta 2 für MacProton installieren …")
         /usr/sbin/softwareupdate --install-rosetta --agree-to-license
         echo
-        echo "Fertig. Dieses Fenster kann geschlossen werden."
+        echo String(localized: "Fertig. Dieses Fenster kann geschlossen werden.")
         """
         try? text.write(to: script, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
@@ -115,7 +115,7 @@ final class Installer: ObservableObject {
         let flags = state?["StateFlags"]?.string.flatMap(Int.init) ?? 4
         // Fully installed and no update pending
         guard flags & 4 == 0 || flags & 2 != 0 else { return nil }
-        var download = Download(appID: game.appID, name: game.name, state: .paused, phase: "Unterbrochen")
+        var download = Download(appID: game.appID, name: game.name, state: .paused, phase: String(localized: "Unterbrochen"))
         download.bytesDone = Int64(state?["BytesDownloaded"]?.string ?? "") ?? 0
         download.bytesTotal = Int64(state?["BytesToDownload"]?.string ?? "") ?? 0
         if download.bytesTotal > 0 { download.progress = Double(download.bytesDone) / Double(download.bytesTotal) }
@@ -133,7 +133,7 @@ final class Installer: ObservableObject {
         guard game.isInstalled || FileManager.default.fileExists(atPath: game.installDir) else {
             if location != Paths.gamesDir {
                 guard FileManager.default.fileExists(atPath: location.path) else {
-                    lastError = "Der Standard-Speicherort „\(location.path)“ ist nicht da. Schließ das Laufwerk an oder ändere ihn in den Einstellungen."
+                    lastError = String(localized: "Der Standard-Speicherort „\(location.path)“ ist nicht da. Schließ das Laufwerk an oder ändere ihn in den Einstellungen.")
                     return
                 }
             }
@@ -163,7 +163,7 @@ final class Installer: ObservableObject {
 
     private func enqueue(_ game: Game) {
         guard game.locationAvailable else {
-            lastError = "Das Laufwerk „\(game.externalVolume ?? "")“ mit \(game.name) ist nicht verbunden. Schließ es an oder wähle per Rechtsklick „Installieren in …“ einen anderen Ort."
+            lastError = String(localized: "Das Laufwerk „\(game.externalVolume ?? "")“ mit \(game.name) ist nicht verbunden. Schließ es an oder wähle per Rechtsklick „Installieren in …“ einen anderen Ort.")
             return
         }
         guard !account.isEmpty else {
@@ -174,7 +174,7 @@ final class Installer: ObservableObject {
             downloads[index].state = .queued
             downloads[index].error = nil
         } else {
-            downloads.append(Download(appID: game.appID, name: game.name, state: .queued, phase: "Wartet"))
+            downloads.append(Download(appID: game.appID, name: game.name, state: .queued, phase: String(localized: "Wartet")))
         }
         save()
         pump()
@@ -184,7 +184,7 @@ final class Installer: ObservableObject {
         guard let index = downloads.firstIndex(where: { $0.appID == appID }),
               downloads[index].state == .running || downloads[index].state == .queued else { return }
         downloads[index].state = .paused
-        downloads[index].phase = "Pausiert"
+        downloads[index].phase = String(localized: "Pausiert")
         speeds[appID] = nil
         save()
         // The run ends and starts the next download
@@ -195,7 +195,7 @@ final class Installer: ObservableObject {
         guard let index = downloads.firstIndex(where: { $0.appID == appID }),
               downloads[index].state == .paused || downloads[index].state == .failed else { return }
         downloads[index].state = .queued
-        downloads[index].phase = "Wartet"
+        downloads[index].phase = String(localized: "Wartet")
         downloads[index].error = nil
         save()
         pump()
@@ -229,21 +229,21 @@ final class Installer: ObservableObject {
         }
         guard game.locationAvailable else {
             downloads[index].state = .paused
-            downloads[index].phase = "Pausiert"
-            downloads[index].error = "Laufwerk „\(game.externalVolume ?? "")“ nicht verbunden"
+            downloads[index].phase = String(localized: "Pausiert")
+            downloads[index].error = String(localized: "Laufwerk „\(game.externalVolume ?? "")“ nicht verbunden")
             save()
             return pump()
         }
         let account = self.account
         guard !account.isEmpty else {
             downloads[index].state = .paused
-            downloads[index].error = "Steam-Anmeldung nötig"
+            downloads[index].error = String(localized: "Steam-Anmeldung nötig")
             save()
             loginRequired = ""
             return
         }
         downloads[index].state = .running
-        downloads[index].phase = "Verbinde mit Steam …"
+        downloads[index].phase = String(localized: "Verbinde mit Steam …")
         downloads[index].error = nil
         save()
         let handle = SteamCMD.Handle()
@@ -258,8 +258,8 @@ final class Installer: ObservableObject {
         if await Self.steamcmdRunning(in: game.installDir) {
             update(appID) {
                 $0.state = .paused
-                $0.phase = "Pausiert"
-                $0.error = "Ein steamcmd aus einer früheren Sitzung lädt das Spiel noch. Setze fort, wenn es fertig ist."
+                $0.phase = String(localized: "Pausiert")
+                $0.error = String(localized: "Ein steamcmd aus einer früheren Sitzung lädt das Spiel noch. Setze fort, wenn es fertig ist.")
             }
             handles[appID] = nil
             save()
@@ -274,7 +274,7 @@ final class Installer: ObservableObject {
             if handle.wasStopped {
                 // Paused, removed or quitting; the state is already set
             } else if case SteamCMDError.loginRequired(let name) = error {
-                update(appID) { $0.state = .paused; $0.phase = "Pausiert"; $0.error = "Steam-Anmeldung nötig" }
+                update(appID) { $0.state = .paused; $0.phase = String(localized: "Pausiert"); $0.error = String(localized: "Steam-Anmeldung nötig") }
                 loginRequired = name
             } else {
                 update(appID) { $0.state = .failed; $0.error = error.localizedDescription }
@@ -391,7 +391,7 @@ final class Installer: ObservableObject {
                     library.upsert(moved)
                 }
             } catch {
-                lastError = "\(game.name) wurde nicht verschoben: \(error.localizedDescription)"
+                lastError = String(localized: "\(game.name) wurde nicht verschoben: \(error.localizedDescription)")
             }
             moves[appID] = nil
         }

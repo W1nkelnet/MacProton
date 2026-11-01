@@ -61,7 +61,7 @@ final class SteamConnection {
             .filter { ($0["type"] as? String) == "websockets" }
             .compactMap { $0["endpoint"] as? String }
         guard let endpoint = endpoints.first, let url = URL(string: "wss://\(endpoint)/cmsocket/") else {
-            throw Failure(description: "Steam nennt keinen Server für die Verbindung.")
+            throw Failure(description: String(localized: "Steam nennt keinen Server für die Verbindung."))
         }
         let connection = SteamConnection(url: url)
         do {
@@ -149,7 +149,7 @@ final class SteamConnection {
     // MARK: Session
 
     private func logon(_ session: SteamSession) async throws {
-        guard let id = UInt64(session.steamID) else { throw Failure(description: "Die Steam-Anmeldung nennt kein Konto.") }
+        guard let id = UInt64(session.steamID) else { throw Failure(description: String(localized: "Die Steam-Anmeldung nennt kein Konto.")) }
         steamID = id
 
         var hello = ProtoWriter()
@@ -180,8 +180,8 @@ final class SteamConnection {
                 let eresult = response.int(1) ?? 2
                 guard eresult == 1 else {
                     throw Failure(description: eresult == 5 || eresult == 15
-                                  ? "Steam hat die Anmeldung von MacProton nicht angenommen. Melde dich in den Einstellungen neu an."
-                                  : "Steam-Anmeldung fehlgeschlagen (EResult \(eresult)).", eresult: eresult)
+                                  ? String(localized: "Steam hat die Anmeldung von MacProton nicht angenommen. Melde dich in den Einstellungen neu an.")
+                                  : String(localized: "Steam-Anmeldung fehlgeschlagen (EResult \(eresult))."), eresult: eresult)
                 }
                 if let s = packet.header.uint(1) { steamID = s }
                 sessionID = Int32(truncatingIfNeeded: packet.header.int(2) ?? 0)
@@ -190,7 +190,7 @@ final class SteamConnection {
                 return
             }
             if packet.emsg == EMsg.clientLoggedOff {
-                throw Failure(description: "Steam hat die Verbindung beendet (EResult \(try ProtoMessage(packet.body).int(1) ?? 0)).")
+                throw Failure(description: String(localized: "Steam hat die Verbindung beendet (EResult \(try ProtoMessage(packet.body).int(1) ?? 0))."))
             }
         }
     }
@@ -281,10 +281,10 @@ enum SteamCloudService {
         request.string(2, path)
         request.uint(3, 1)  // k_ESteamRealmSteamGlobal
         let r = try await connection.call("Cloud.ClientFileDownload#1", request.data)
-        guard !r.bool(11) else { throw SteamConnection.Failure(description: "\(path) ist verschlüsselt gespeichert.") }
+        guard !r.bool(11) else { throw SteamConnection.Failure(description: String(localized: "\(path) ist verschlüsselt gespeichert.")) }
         guard let host = r.string(7), let urlPath = r.string(8),
               let url = URL(string: (r.bool(9) ? "https://" : "http://") + host + urlPath) else {
-            throw SteamConnection.Failure(description: "Steam nennt keine Download-Adresse für \(path).")
+            throw SteamConnection.Failure(description: String(localized: "Steam nennt keine Download-Adresse für \(path)."))
         }
         var http = URLRequest(url: url)
         for h in r.all(10) {
@@ -300,10 +300,10 @@ enum SteamCloudService {
     static func fetch(_ ticket: DownloadTicket) async throws -> Data {
         let (data, response) = try await URLSession.shared.data(for: ticket.request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else { throw SteamConnection.Failure(description: "Download von \(ticket.path): HTTP \(status)") }
+        guard status == 200 else { throw SteamConnection.Failure(description: String(localized: "Download von \(ticket.path): HTTP \(status)")) }
         let raw = (ticket.fileSize != ticket.rawSize && ticket.rawSize > 0) ? try unzipSingle(data, rawSize: ticket.rawSize) : data
         guard sha1(raw) == ticket.sha else {
-            throw SteamConnection.Failure(description: "\(ticket.path) kam beschädigt an (SHA-1 weicht ab).")
+            throw SteamConnection.Failure(description: String(localized: "\(ticket.path) kam beschädigt an (SHA-1 weicht ab)."))
         }
         return raw
     }
@@ -379,7 +379,7 @@ enum SteamCloudService {
             return  // the cloud has this content already
         }
         guard !started.bool(1) else {
-            throw SteamConnection.Failure(description: "Steam verlangt Verschlüsselung für \(upload.path).")
+            throw SteamConnection.Failure(description: String(localized: "Steam verlangt Verschlüsselung für \(upload.path)."))
         }
 
         var succeeded = true
@@ -414,7 +414,7 @@ enum SteamCloudService {
         commit.string(4, upload.path)
         let committed = try await connection.call("Cloud.ClientCommitFileUpload#1", commit.data).bool(1)
         guard succeeded, committed else {
-            throw SteamConnection.Failure(description: "Steam hat \(upload.path) nicht angenommen.")
+            throw SteamConnection.Failure(description: String(localized: "Steam hat \(upload.path) nicht angenommen."))
         }
     }
 }

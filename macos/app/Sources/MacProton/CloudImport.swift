@@ -167,7 +167,7 @@ enum CloudImport {
 
         let targets = try items.map { item -> (URL, URL) in
             guard let target = destination(of: item, game: game, prefix: prefix) else {
-                throw SteamCMDError.failed("Ungültiger Pfad: \(item.path)")
+                throw SteamCMDError.failed(String(localized: "Ungültiger Pfad: \(item.path)"))
             }
             return (item.source, target)
         }

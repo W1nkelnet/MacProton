@@ -33,6 +33,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key><array><string>de</string><string>en</string></array>
     <key>CFBundleExecutable</key><string>MacProton</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>org.macproton.MacProton</string>
@@ -61,10 +63,15 @@ if [ ! -f "$src/.build/AppIcon.icns" ] || [ "$src/make-icon.swift" -nt "$src/.bu
 fi
 cp "$src/.build/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 
+# German texts are the source, English comes from Localization/en.py; the
+# language follows macOS or the choice in Settings
+python3 "$src/Localization/make-strings.py" "$app/Contents/Resources"
+
 # License texts of everything the app ships (macos/collect-licenses.sh), the
 # app's Lizenzen … menu opens them; the standard About panel shows Credits.html
 cp -R "$src/../licenses" "$app/Contents/Resources/Licenses"
-cat > "$app/Contents/Resources/Credits.html" <<'EOF'
+cat > "$app/Contents/Resources/de.lproj/Credits.html" <<'EOF'
+<meta charset="utf-8">
 <div style="font: 11px -apple-system; text-align: center">
 <p>MacProton baut auf Valves Proton auf, mit Wine, DXVK, vkd3d-proton,
 Mesa (KosmicKrisp), MoltenVK, FreeType, GnuTLS, GMP, Nettle und SDL2.</p>
@@ -72,6 +79,16 @@ Mesa (KosmicKrisp), MoltenVK, FreeType, GnuTLS, GMP, Nettle und SDL2.</p>
 weder unterstützt noch gesponsert. Steam und Proton sind Marken der Valve
 Corporation.</p>
 <p>Lizenztexte und Quellcode-Hinweise: Menü MacProton › Lizenzen …</p>
+</div>
+EOF
+cat > "$app/Contents/Resources/en.lproj/Credits.html" <<'EOF'
+<meta charset="utf-8">
+<div style="font: 11px -apple-system; text-align: center">
+<p>MacProton builds on Valve's Proton, with Wine, DXVK, vkd3d-proton,
+Mesa (KosmicKrisp), MoltenVK, FreeType, GnuTLS, GMP, Nettle and SDL2.</p>
+<p>MacProton is not affiliated with, endorsed or sponsored by Valve
+Corporation. Steam and Proton are trademarks of Valve Corporation.</p>
+<p>License texts and source code notes: menu MacProton › Licenses …</p>
 </div>
 EOF
 

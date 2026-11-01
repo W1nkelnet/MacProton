@@ -27,11 +27,11 @@ enum SteamCMDError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notInstalled:
-            return "steamcmd ist noch nicht eingerichtet. MacProton lädt es beim Start von Valve; prüfe die Internetverbindung."
+            return String(localized: "steamcmd ist noch nicht eingerichtet. MacProton lädt es beim Start von Valve; prüfe die Internetverbindung.")
         case .loginRequired(let account):
-            return "steamcmd ist für \(account) nicht angemeldet."
+            return String(localized: "steamcmd ist für \(account) nicht angemeldet.")
         case .noWindowsVersion:
-            return "Für dieses Spiel gibt es keine Windows-Version."
+            return String(localized: "Für dieses Spiel gibt es keine Windows-Version.")
         case .failed(let message):
             return message
         }
@@ -50,7 +50,7 @@ enum SteamCMD {
             let output = try await run(steamcmd, args) { _ in }
             if let info = parseAppInfo(output, appID: appID) { return info }
         }
-        throw SteamCMDError.failed("Keine App-Informationen für \(appID) erhalten.")
+        throw SteamCMDError.failed(String(localized: "Keine App-Informationen für \(appID) erhalten."))
     }
 
     static func parseAppInfo(_ output: String, appID: Int) -> AppInfo? {
@@ -100,12 +100,12 @@ enum SteamCMD {
         guard line.contains("Update state"), let value = parseProgress(line),
               let close = line.firstIndex(of: ")"), let comma = line[close...].firstIndex(of: ",") else { return nil }
         let name = line[line.index(after: close)..<comma].trimmingCharacters(in: .whitespaces)
-        var state = UpdateState(phase: "Arbeite", progress: value)
-        if name.contains("verifying") { state.phase = "Prüfe vorhandene Dateien"; state.verifying = true }
-        else if name.contains("downloading") { state.phase = "Lade herunter"; state.downloading = true }
-        else if name.contains("preallocating") { state.phase = "Reserviere Speicherplatz" }
-        else if name.contains("committing") { state.phase = "Übernehme Dateien" }
-        else if name.contains("reconfiguring") { state.phase = "Bereite vor" }
+        var state = UpdateState(phase: String(localized: "Arbeite"), progress: value)
+        if name.contains("verifying") { state.phase = String(localized: "Prüfe vorhandene Dateien"); state.verifying = true }
+        else if name.contains("downloading") { state.phase = String(localized: "Lade herunter"); state.downloading = true }
+        else if name.contains("preallocating") { state.phase = String(localized: "Reserviere Speicherplatz") }
+        else if name.contains("committing") { state.phase = String(localized: "Übernehme Dateien") }
+        else if name.contains("reconfiguring") { state.phase = String(localized: "Bereite vor") }
         if let open = line.lastIndex(of: "("), let end = line.lastIndex(of: ")"), open < end {
             let numbers = line[line.index(after: open)..<end].split(separator: "/").compactMap {
                 Int64($0.trimmingCharacters(in: .whitespaces))
@@ -156,18 +156,18 @@ enum SteamCMD {
                     "+login", account, "+app_update", String(appID), "validate", "+quit"]
         let output = try await run("/usr/bin/script", args, handle: handle) { line in
             if let state = parseUpdateState(line) { progress(state) }
-            else if line.hasPrefix("Logging in user") { progress(UpdateState(phase: "Melde bei Steam an …", progress: 0)) }
+            else if line.hasPrefix("Logging in user") { progress(UpdateState(phase: String(localized: "Melde bei Steam an …"), progress: 0)) }
             try checkLogin(line, account: account)
         }
         if output.contains("Success! App '\(appID)'") { return }
         if output.contains("No subscription") {
-            throw SteamCMDError.failed("Das Spiel ist nicht in der Bibliothek von \(account).")
+            throw SteamCMDError.failed(String(localized: "Das Spiel ist nicht in der Bibliothek von \(account)."))
         }
         if output.contains("Invalid Password") || output.contains("Login Failure") {
             throw SteamCMDError.loginRequired(account)
         }
         let last = output.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
-        throw SteamCMDError.failed("Download fehlgeschlagen: \(last)")
+        throw SteamCMDError.failed(String(localized: "Download fehlgeschlagen: \(last)"))
     }
 
     /// steamcmd prints "Cached credentials not found." before prompting for a

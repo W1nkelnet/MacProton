@@ -103,7 +103,7 @@ struct CloudImportView: View {
             Label("importiert \(date.formatted(date: .abbreviated, time: .shortened))", systemImage: "checkmark.circle.fill")
                 .font(.caption).foregroundStyle(.green)
         case .changedSince(let date):
-            Label("importiert \(date.formatted(date: .abbreviated, time: .shortened)), seitdem geändert", systemImage: "pencil.circle.fill")
+            Label(String(localized: "importiert \(date.formatted(date: .abbreviated, time: .shortened)), seitdem geändert"), systemImage: "pencil.circle.fill")
                 .font(.caption).foregroundStyle(.orange)
                 .help("Das Spiel hat die Datei seit dem Import neu gespeichert.")
         }
@@ -125,11 +125,11 @@ struct CloudImportView: View {
                 .frame(width: 200)
             }
             if let target = destination(item.wrappedValue) {
-                Text((FileManager.default.fileExists(atPath: target.path) ? "Ersetzt (mit Sicherung): " : "Neu: ") + target.path)
+                Text((FileManager.default.fileExists(atPath: target.path) ? String(localized: "Ersetzt (mit Sicherung): ") : "Neu: ") + target.path)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
                 if let earlier = CloudImport.record(path: item.wrappedValue.path, folder: item.wrappedValue.folder,
                                                     in: CloudImport.records(game.appID)) {
-                    Text("Schon importiert am \(earlier.date.formatted(date: .abbreviated, time: .shortened)).")
+                    Text(String(localized: "Schon importiert am \(earlier.date.formatted(date: .abbreviated, time: .shortened))."))
                         .font(.caption).foregroundStyle(.orange)
                 }
             } else {
@@ -147,7 +147,7 @@ struct CloudImportView: View {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        panel.message = "Wähle die Dateien, die du von der Steam-Cloud-Seite geladen hast."
+        panel.message = String(localized: "Wähle die Dateien, die du von der Steam-Cloud-Seite geladen hast.")
         if panel.runModal() == .OK {
             items = CloudImport.items(for: panel.urls, game: game)
             result = nil
@@ -160,12 +160,12 @@ struct CloudImportView: View {
             let outcome = try CloudImport.run(items, game: game, prefix: runner.prefix(of: game))
             runner.markCloudHandled(game)
             var text = "\(outcome.copied) Datei(en) importiert."
-            if let backup = outcome.backup { text += " Sicherung der ersetzten Dateien: \(backup.path)" }
+            if let backup = outcome.backup { text += String(localized: " Sicherung der ersetzten Dateien: \(backup.path)") }
             result = text
             error = nil
             refresh()
         } catch {
-            self.error = "Import fehlgeschlagen: \(error.localizedDescription)"
+            self.error = String(localized: "Import fehlgeschlagen: \(error.localizedDescription)")
         }
     }
 }

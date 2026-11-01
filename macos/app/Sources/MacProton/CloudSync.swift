@@ -171,7 +171,7 @@ enum CloudSync {
     /// prefix; otherwise a missing file may just never have been downloaded.
     static func prepare(_ game: Game, prefix: URL, beforeStart: Bool, allowCloudDeletes: Bool = false) async throws -> Plan {
         guard let session = SteamSession.load() else {
-            throw SteamConnection.Failure(description: "MacProton ist nicht bei Steam angemeldet.")
+            throw SteamConnection.Failure(description: String(localized: "MacProton ist nicht bei Steam angemeldet."))
         }
         var state = loadState(game.appID)
         var rules = game.cloudRules ?? state.rules

@@ -19,7 +19,7 @@ final class LibrarySync: ObservableObject {
         }
         running = true
         progress = 0
-        status = "Lese Lizenzen …"
+        status = String(localized: "Lese Lizenzen …")
 
         Task {
             defer { running = false }
@@ -36,7 +36,7 @@ final class LibrarySync: ObservableObject {
                         added += 1
                     }
                 }
-                lastResult = "\(found.count) Windows-Spiele gefunden, \(added) neu in der Bibliothek."
+                lastResult = String(localized: "\(found.count) Windows-Spiele gefunden, \(added) neu in der Bibliothek.")
             } catch SteamCMDError.loginRequired {
                 loginRequired = account
             } catch {
@@ -72,7 +72,7 @@ final class LibrarySync: ObservableObject {
 
         // Packages with many apps are abbreviated in the license list
         for package in truncated {
-            status = "Lese Paket \(package) …"
+            status = String(localized: "Lese Paket \(package) …")
             if let text = try await console.block("package_info_print \(package)", marker: "PackageID : \(package)") {
                 apps.formUnion(Self.packageApps(text))
             }
@@ -82,7 +82,7 @@ final class LibrarySync: ObservableObject {
         let sorted = apps.sorted()
         for (index, appID) in sorted.enumerated() {
             progress = Double(index) / Double(max(sorted.count, 1))
-            status = "Prüfe Apps … \(index + 1)/\(sorted.count)"
+            status = String(localized: "Prüfe Apps … \(index + 1)/\(sorted.count)")
             guard let text = try await console.block("app_info_print \(appID)", marker: "AppID : \(appID)") else { continue }
             let root = VDF.parse(String(text[(text.firstIndex(of: "\n") ?? text.startIndex)...]))
             guard root[String(appID), "common", "type"]?.string?.lowercased() == "game",

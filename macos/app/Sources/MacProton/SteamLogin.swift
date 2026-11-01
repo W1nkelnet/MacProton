@@ -69,7 +69,7 @@ final class SteamLogin: ObservableObject {
             self.process = process
             self.input = input
         } catch {
-            step = .failed("steamcmd konnte nicht gestartet werden: \(error.localizedDescription)")
+            step = .failed(String(localized: "steamcmd konnte nicht gestartet werden: \(error.localizedDescription)"))
         }
     }
 
@@ -117,7 +117,7 @@ final class SteamLogin: ObservableObject {
         buffer = ""
         switch step {
         case .done, .failed, .idle: break
-        default: step = .failed("steamcmd wurde vor dem Ende der Anmeldung beendet.")
+        default: step = .failed(String(localized: "steamcmd wurde vor dem Ende der Anmeldung beendet."))
         }
     }
 
@@ -126,10 +126,10 @@ final class SteamLogin: ObservableObject {
         guard let range = text.range(of: #"(FAILED|ERROR) \(([^)]*)\)"#, options: .regularExpression) else { return nil }
         let reason = text[range].drop { $0 != "(" }.dropFirst().dropLast()
         switch reason {
-        case "Invalid Password": return "Benutzername oder Passwort ist falsch."
-        case "Two-factor code mismatch", "Invalid Login Auth Code": return "Der Steam-Guard-Code stimmt nicht."
-        case "Rate Limit Exceeded": return "Zu viele Anmeldeversuche. Warte ein paar Minuten."
-        default: return "Anmeldung fehlgeschlagen (\(reason))."
+        case "Invalid Password": return String(localized: "Benutzername oder Passwort ist falsch.")
+        case "Two-factor code mismatch", "Invalid Login Auth Code": return String(localized: "Der Steam-Guard-Code stimmt nicht.")
+        case "Rate Limit Exceeded": return String(localized: "Zu viele Anmeldeversuche. Warte ein paar Minuten.")
+        default: return String(localized: "Anmeldung fehlgeschlagen (\(reason)).")
         }
     }
 }

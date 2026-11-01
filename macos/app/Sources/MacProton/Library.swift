@@ -294,7 +294,7 @@ final class Library: ObservableObject {
             catch { failed.append(prefix.path) }
         }
         remove(game)
-        return failed.isEmpty ? nil : "Nicht in den Papierkorb gelegt:\n" + failed.joined(separator: "\n")
+        return failed.isEmpty ? nil : String(localized: "Nicht in den Papierkorb gelegt:\n") + failed.joined(separator: "\n")
     }
 
     func markPlayed(_ game: Game) {

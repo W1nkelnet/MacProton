@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct MacProtonApp: App {
-    @StateObject private var library = Library()
+    @StateObject private var library = { MacProtonApp.waitForPreviousInstance(); return Library() }()
     @StateObject private var runner = Runner()
     @StateObject private var installer = Installer()
     @StateObject private var sync = LibrarySync()
@@ -11,6 +11,14 @@ struct MacProtonApp: App {
     @StateObject private var updates = UpdateChecker()
     @StateObject private var appUpdates = AppUpdateChecker()
     @StateObject private var cloudAccount = SteamCloudAccount()
+
+    /// After a language change the previous instance may still be saving its
+    /// state; wait up to 10 s before this one reads it
+    private static func waitForPreviousInstance() {
+        let pid = UserDefaults.standard.integer(forKey: "waitForPID")
+        guard pid > 0 else { return }
+        for _ in 0..<100 where kill(pid_t(pid), 0) == 0 { usleep(100_000) }
+    }
 
     var body: some Scene {
         WindowGroup("MacProton") {
@@ -25,6 +33,8 @@ struct MacProtonApp: App {
                 .environmentObject(appUpdates)
                 .frame(minWidth: 720, minHeight: 480)
         }
+        // Room for the welcome screen on the first start
+        .defaultSize(width: 960, height: 720)
         .commands {
             CommandGroup(after: .appInfo) {
                 // The licenses of the software MacProton ships, bundled by build-app.sh
