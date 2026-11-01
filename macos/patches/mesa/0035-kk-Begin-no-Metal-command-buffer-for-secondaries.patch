@@ -1,0 +1,51 @@
+From 6b424f66304268d14b7401f60ea8625106dd1258 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 21:57:16 +0100
+Subject: [PATCH] kk: Begin no Metal command buffer for secondaries
+
+Secondary command buffers only fill their command queue, which the
+primary executing them replays, yet beginning one took a Metal command
+buffer and allocator from the pool and began and ended it empty. DXVK
+records every render pass into a secondary on tiling GPUs, so in Kebab
+Chefs' menu vkBeginCommandBuffer took a ninth of its CS thread's time,
+mostly in Metal resetting the command buffer.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index bca1a89..c58a74e 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -62,7 +62,8 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
+ static void
+ end_recording(struct kk_cmd_buffer *cmd)
+ {
+-   if (cmd->vk.state != MESA_VK_COMMAND_BUFFER_STATE_RECORDING)
++   if (cmd->vk.state != MESA_VK_COMMAND_BUFFER_STATE_RECORDING ||
++       cmd->vk.level != VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+       return;
+ 
+    cs_end(cmd);
+@@ -199,6 +200,16 @@ kk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    struct kk_cmd_pool *pool = kk_cmd_buffer_pool(cmd);
+ 
++   /* Secondaries only fill their command queue, which the primary executing
++    * them replays. DXVK records every render pass into one on tilers, and
++    * beginning a Metal command buffer for each cost time while recording. */
++   if (cmd->vk.level != VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
++      vk_command_buffer_begin(&cmd->vk, pBeginInfo);
++      cmd->one_time_submit =
++         pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++      return VK_SUCCESS;
++   }
++
+    /* If this is the first time starting the command buffer allocate Metal
+     * resources */
+    if (cmd->metal.cmd_buf == NULL) {
+-- 
+2.56.0
+
