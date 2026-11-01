@@ -1,0 +1,39 @@
+From 6b1828490f713e187ee54e4760d68029e5519cb2 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 21:43:52 +0100
+Subject: [PATCH] dxvk: Generate mipmaps with the compute shader on
+ KosmicKrisp.
+
+KosmicKrisp blits through a Metal render pass of its own, so a mip chain
+cost a render pass per level, recorded on the CS thread. Kebab Chefs
+generates about 110 levels per frame in its main menu; with one compute
+dispatch per chain it runs at 50 instead of 29 fps.
+
+The shader samples levels that do not halve exactly at slightly
+different positions than a blit, which docs/macos/d3d11-mipgen.c in
+MacProton takes into account.
+---
+ src/dxvk/dxvk_device.cpp | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index bd8ad03..87a0e41 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -739,9 +739,12 @@ namespace dxvk {
+     // Compute-based mip generation has some potential for performance
+     // regressions or driver issues. Just enable it on Nvidia and RADV
+     // (GFX10+) for now, where it is proven to work.
++    // KosmicKrisp starts a Metal render pass for every blit, and a mip chain
++    // costs it one per level.
+     hints.preferComputeMipGen = (m_adapter->matchesDriver(VK_DRIVER_ID_NVIDIA_PROPRIETARY_KHR)
+                              || (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV)
+-                              && m_properties.vk13.minSubgroupSize == 32u));
++                              && m_properties.vk13.minSubgroupSize == 32u)
++                             || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_KOSMICKRISP));
+ 
+     // On AMD we can expect it to be optimal to simply pass the heap offset
+     // to descriptor memory through as-is to avoid some ALU. Some other
+-- 
+2.56.0
+

@@ -1,0 +1,38 @@
+From 062ec795aa068b2d7259cec645339dd1f84b208c Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 21:28:07 +0100
+Subject: [PATCH] kk: Create no view of the other type for meta views
+
+Every sampled 2D or 2D array view also gets a Metal view of the other
+type, for D3D12 applications that bind one to a declaration of the other.
+Mesa's meta operations create views of their own for every blit, clear
+and copy, and their shaders declare the type of the view, so the extra
+Metal view only cost time while recording.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_image_view.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
+index b7c08d7..ae6d6c8 100644
+--- a/src/kosmickrisp/vulkan/kk_image_view.c
++++ b/src/kosmickrisp/vulkan/kk_image_view.c
+@@ -198,9 +198,12 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
+           * its bloom and tonemapping read as a 2D texture. Other APIs read
+           * such a view as its first layer, Metal reads garbage from a texture
+           * whose type differs from the declaration. Keep a view of the other
+-          * type for the shader to pick by its declaration.
++          * type for the shader to pick by its declaration. Mesa's own meta
++          * shaders declare the type of the view they create.
+           */
+-         if (view_layout.sample_count_sa <= 1 &&
++         if (!(view->vk.create_flags &
++               VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA) &&
++             view_layout.sample_count_sa <= 1 &&
+              (view_layout.view_type == VK_IMAGE_VIEW_TYPE_2D ||
+               view_layout.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
+             struct kk_view_layout other_layout = view_layout;
+-- 
+2.56.0
+
