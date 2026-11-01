@@ -25,6 +25,17 @@ struct MacProtonApp: App {
                 .environmentObject(appUpdates)
                 .frame(minWidth: 720, minHeight: 480)
         }
+        .commands {
+            CommandGroup(after: .appInfo) {
+                // The licenses of the software MacProton ships, bundled by build-app.sh
+                Button("Lizenzen …") {
+                    if let url = Bundle.main.url(forResource: "Licenses", withExtension: nil) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .disabled(Bundle.main.url(forResource: "Licenses", withExtension: nil) == nil)
+            }
+        }
         Settings {
             SettingsView()
                 .environmentObject(login)

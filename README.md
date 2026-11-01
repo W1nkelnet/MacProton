@@ -2,8 +2,12 @@
 
 Windows-Spiele aus deiner Steam-Bibliothek auf dem Mac spielen. MacProton
 ist eine Mac-App auf Basis von Valves [Proton](README.proton.md): Wine
-mit DXVK und vkd3d-proton, die Direct3D auf Vulkan umsetzen, und MoltenVK,
-das Vulkan auf Metal umsetzt.
+mit DXVK und vkd3d-proton, die Direct3D auf Vulkan umsetzen, und Mesas
+KosmicKrisp, das Vulkan auf Metal umsetzt. MoltenVK steht als Ausweich-Treiber
+bereit.
+
+MacProton ist ein unabhängiges Projekt. Es ist nicht mit der Valve
+Corporation verbunden und wird von ihr weder unterstützt noch gesponsert.
 
 ## Was MacProton kann
 
@@ -12,8 +16,8 @@ das Vulkan auf Metal umsetzt.
 - **Mac-Versionen nativ:** Gibt es ein Spiel auch für macOS, installiert
   und startet MacProton es über den Steam-Client, ganz ohne Wine.
 - **Windows-Spiele:** Lädt sie mit Valves steamcmd und startet sie mit
-  Wine. Unterstützt werden Direct3D 9, 10 und 11, Direct3D 12 erst in
-  Teilen.
+  Wine. Unterstützt werden Direct3D 9, 10, 11 und 12, auch in
+  32-Bit-Spielen.
 - **Downloads:** Ein eigener Reiter zeigt die Warteschlange. Downloads
   lassen sich pausieren und fortsetzen, auch nach einem Neustart.
 - **Speicherort:** Spiele können auf einer externen Festplatte liegen,
@@ -84,13 +88,12 @@ das Vulkan auf Metal umsetzt.
 
 ## Bekannte Einschränkungen
 
-- 32-Bit-Windows-Spiele stürzen derzeit beim Start ab. Betroffen sind vor
-  allem ältere Unity-Spiele.
-- Direct3D 12 ist neu und bisher nur mit einem eigenen Test geprüft, mit
-  keinem Spiel. MoltenVK fehlen dafür unter anderem Sparse-Ressourcen,
-  64-Bit-Atomics auf Texturen, Geometry Shader und Stream Output.
-  Unreal-Engine-5-Spiele lehnen Direct3D 12 deshalb ab und laufen weiter mit
-  Direct3D 11.
+- Einzelne 32-Bit-Spiele stürzen beim Start ab, etwa Rogue Tower (Unity).
+- Direct3D 12 läuft mit KosmicKrisp in Rise of the Tomb Raider, Horizon Zero
+  Dawn und Unreal-Engine-5-Spielen (getestet mit Town To City). Sparse-
+  Ressourcen, Raytracing und Mesh Shader fehlen; die Leistung ist auf
+  kleineren Macs oft knapp, und der erste Start dauert, bis die Shader
+  übersetzt sind.
 - Spiele, die OpenGL 4.2 oder neuer brauchen (etwa Foundation), starten
   nicht. macOS bietet höchstens OpenGL 4.1.
 - Spiele mit Anti-Cheat (Easy Anti-Cheat, BattlEye) funktionieren online
@@ -117,10 +120,12 @@ macos/build.sh ~/macproton-build
 macos/app/build-app.sh ~/macproton-app ~/macproton-build/dist
 ```
 
-`build.sh` lädt die Abhängigkeiten (MoltenVK, FreeType, GMP, Nettle,
-GnuTLS, SDL2) aus ihren offiziellen Quellen und prüft die Prüfsummen. Die
-Änderungen an Wine, DXVK, vkd3d-proton und MoltenVK liegen als Patches in
-`macos/patches`.
+`build.sh` lädt die Abhängigkeiten (Mesa, MoltenVK, FreeType, GMP, Nettle,
+GnuTLS, SDL2) in festen Versionen aus ihren offiziellen Quellen und prüft
+die Prüfsummen. Die Änderungen an Wine, DXVK, vkd3d-proton, Mesa und
+MoltenVK liegen als Patches in `macos/patches`. Ändert sich eine
+Komponente oder ihre Version, sammelt `macos/collect-licenses.sh` die
+Lizenztexte neu nach `macos/licenses`, die `build-app.sh` in die App legt.
 Details zum Port stehen in [docs/MACOS_PORT.md](docs/MACOS_PORT.md).
 
 Ein Release entsteht lokal: Commit mit `git tag -a vX.Y.Z` markieren,
@@ -133,13 +138,32 @@ macos/release.sh ~/macproton-build/dist
 ausführen. Das Skript baut die App, packt sie mit Prüfsumme und
 veröffentlicht sie per `gh` als GitHub-Release.
 
-## Lizenzen
+## Lizenzen und Quellcode
 
 MacProton steht wie Proton unter mehreren Lizenzen, siehe
-[LICENSE](LICENSE). Wine, vkd3d-proton und GnuTLS stehen unter der
-LGPL 2.1, DXVK unter der zlib-Lizenz, MoltenVK unter der Apache-Lizenz 2.0. Der Quellcode aller
-mitgelieferten Teile ist über dieses Repository, seine Submodule und die
-Patches in `macos/patches` verfügbar.
+[LICENSE](LICENSE) und [LICENSE.proton](LICENSE.proton). Die App enthält
+Software Dritter, unter anderem Wine, vkd3d-proton, GnuTLS, GMP und Nettle
+(LGPL), Mesa (MIT), MoltenVK (Apache 2.0), DXVK und SDL2 (zlib) sowie
+FreeType (FreeType License). Eine Übersicht mit Versionen und Quellen und
+alle Lizenztexte liegen in [macos/licenses](macos/licenses/README.md); in der
+App öffnet sie der Menüpunkt MacProton › Lizenzen …
 
-MacProton ist kein Produkt von Valve oder Apple. Steam und steamcmd sind
-Marken bzw. Software der Valve Corporation.
+Der vollständige Quellcode jeder Version ist dieses Repository am Tag des
+Release: Alle Komponenten sind auf feste Versionen festgelegt, jede
+Änderung an ihnen liegt als Patch in `macos/patches`, und `macos/build.sh`
+baut daraus genau die ausgelieferte Laufzeitumgebung. Die LGPL-Bibliotheken
+liegen als eigene Dateien in der App und lassen sich durch selbst gebaute
+ersetzen.
+
+## Haftung und Marken
+
+MacProton wird ohne jede Gewährleistung bereitgestellt, siehe die
+Lizenztexte. Die Nutzung erfolgt auf eigenes Risiko, auch für dein
+Steam-Konto und deine Spielstände; MacProton sichert Spielstände vor jedem
+Abgleich mit der Steam Cloud.
+
+MacProton ist kein Produkt von Valve oder Apple und mit keinem der beiden
+verbunden. Steam, steamcmd und Proton sind Marken bzw. Software der Valve
+Corporation, Metal und macOS Marken von Apple Inc. MacProton lädt steamcmd
+und die Steamworks-Laufzeitbibliotheken bei Bedarf direkt von Valves
+Servern und liefert sie nicht selbst aus.

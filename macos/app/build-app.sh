@@ -61,6 +61,20 @@ if [ ! -f "$src/.build/AppIcon.icns" ] || [ "$src/make-icon.swift" -nt "$src/.bu
 fi
 cp "$src/.build/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 
+# License texts of everything the app ships (macos/collect-licenses.sh), the
+# app's Lizenzen … menu opens them; the standard About panel shows Credits.html
+cp -R "$src/../licenses" "$app/Contents/Resources/Licenses"
+cat > "$app/Contents/Resources/Credits.html" <<'EOF'
+<div style="font: 11px -apple-system; text-align: center">
+<p>MacProton baut auf Valves Proton auf, mit Wine, DXVK, vkd3d-proton,
+Mesa (KosmicKrisp), MoltenVK, FreeType, GnuTLS, GMP, Nettle und SDL2.</p>
+<p>MacProton ist nicht mit der Valve Corporation verbunden und wird von ihr
+weder unterstützt noch gesponsert. Steam und Proton sind Marken der Valve
+Corporation.</p>
+<p>Lizenztexte und Quellcode-Hinweise: Menü MacProton › Lizenzen …</p>
+</div>
+EOF
+
 if [ -n "$runtime" ]; then
     rsync -a --delete "$runtime/" "$app/Contents/Resources/runtime/"
 fi
