@@ -1,0 +1,37 @@
+From 3599c308d780d03f076228033de01bdd4613f84a Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 01:51:34 +0100
+Subject: [PATCH] vkd3d: Report native 16-bit shader ops on KosmicKrisp.
+
+KosmicKrisp has 16-bit floats, integers and storage, but no float
+controls, so vkd3d could not tell that FP16 denorms are preserved. Apple
+GPUs do keep them, in Metal's fast and precise math alike, so report
+Native16BitShaderOpsSupported there. Apple GPUs run FP16 at twice the
+rate of FP32.
+
+With it the 16-bit and SM 6.x tests of vkd3d-proton's suite run instead
+of being skipped (about 37 million checks on an M3) and fail only where
+they did before: test_fp16_rounding_behavior_legacy,
+test_shader_sm62_denorm and test_shader_sm66_is_helper_lane.
+---
+ libs/vkd3d/device.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index e48fcd3..598706e 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -9337,6 +9337,10 @@ static bool d3d12_device_supports_16bit_shader_ops(struct d3d12_device *device,
+             device->device_info.vulkan_1_2_properties.shaderDenormPreserveFloat16 &&
+             device->device_info.vulkan_1_2_properties.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+ 
++    /* KosmicKrisp (driver ID 28) has no float controls, but Apple GPUs keep FP16 denorms */
++    if (device->device_info.vulkan_1_2_properties.driverID == (VkDriverId)28)
++        supports_fp16_denorm_preserve = true;
++
+     return device->device_info.vulkan_1_2_features.shaderFloat16 &&
+            device->device_info.features2.features.shaderInt16 &&
+            device->device_info.vulkan_1_1_features.storageBuffer16BitAccess &&
+-- 
+2.56.0
+

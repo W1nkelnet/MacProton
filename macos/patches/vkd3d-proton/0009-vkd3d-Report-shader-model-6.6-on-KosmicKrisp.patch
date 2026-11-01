@@ -1,0 +1,58 @@
+From 331ce4ad4713c20d1768520fb70689220330feec Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 01:07:45 +0100
+Subject: [PATCH] vkd3d: Report shader model 6.6 on KosmicKrisp.
+
+KosmicKrisp has no float controls and no compute shader derivatives
+extension, which held it at shader model 6.0. Apple GPUs flush FP32
+denorms, which is DXIL's default, and KosmicKrisp handles derivatives
+in compute shaders, so treat it like NVIDIA's older drivers here. With
+its 64-bit atomics this gives SM 6.6 and
+AtomicInt64OnTypedResourceSupported, which Unreal Engine 5 needs for
+D3D12.
+
+vkd3d-proton's SM 6.x tests pass on an M3 except test_shader_sm62_denorm
+(denorms are flushed even when a shader asks to preserve them) and
+test_shader_sm66_is_helper_lane.
+---
+ libs/vkd3d/device.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index a47acfb..e48fcd3 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -9921,6 +9921,12 @@ static void d3d12_device_caps_init_shader_model(struct d3d12_device *device)
+             }
+         }
+ 
++        /* KosmicKrisp (driver ID 28) has no float controls; Apple GPUs flush FP32 denorms,
++         * which is DXIL's default. Like with AMD's native drivers, the shader model does not
++         * hinge on shaders that ask to preserve them. */
++        if (device->device_info.vulkan_1_2_properties.driverID == (VkDriverId)28)
++            denorm_behavior = true;
++
+         if (denorm_behavior)
+         {
+             device->d3d12_caps.max_shader_model = D3D_SHADER_MODEL_6_2;
+@@ -9976,14 +9982,15 @@ static void d3d12_device_caps_init_shader_model(struct d3d12_device *device)
+          */
+         if (device->d3d12_caps.max_shader_model == D3D_SHADER_MODEL_6_5 &&
+                 (device->device_info.compute_shader_derivatives_features_khr.computeDerivativeGroupLinear ||
+-                        device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY) &&
++                        device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY ||
++                        device->device_info.vulkan_1_2_properties.driverID == (VkDriverId)28) &&
+                 device->device_info.vulkan_1_2_features.shaderBufferInt64Atomics &&
+                 device->device_info.vulkan_1_2_features.shaderInt8 &&
+                 d3d12_device_supports_required_subgroup_size_for_stage(device, VK_SHADER_STAGE_COMPUTE_BIT))
+         {
+             INFO("Enabling support for SM 6.6.\n");
+             if (!device->device_info.compute_shader_derivatives_features_khr.computeDerivativeGroupLinear)
+-                WARN("Enabling SM 6.6 on pre-Turing NVIDIA despite lack of native compute shader derivatives.\n");
++                WARN("Enabling SM 6.6 despite lack of native compute shader derivatives.\n");
+             device->d3d12_caps.max_shader_model = D3D_SHADER_MODEL_6_6;
+         }
+ 
+-- 
+2.56.0
+

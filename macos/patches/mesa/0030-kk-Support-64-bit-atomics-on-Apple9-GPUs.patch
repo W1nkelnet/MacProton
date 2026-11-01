@@ -1,0 +1,361 @@
+From 5fe3e3f78d983feee9924ee9c758c9778ba1a272 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 01:51:42 +0100
+Subject: [PATCH] kk: Support 64-bit atomics on Apple9 GPUs
+
+Metal has 64-bit atomic min and max, unsigned and without returning the
+old value, on device memory and on RG32Uint textures read as ulong, from
+the Apple9 family on. That is what Unreal Engine 5's Nanite needs for its
+visibility buffer, and with it vkd3d-proton can report shader model 6.6
+and 64-bit atomics on typed resources.
+
+Expose shaderBufferInt64Atomics and VK_EXT_shader_image_atomic_int64,
+with R64_UINT and R64_SINT storage images backed by RG32Uint. Storage
+images of RG32 that may be viewed in another format get atomic usage too,
+since vkd3d views them as R64 for 64-bit atomics.
+
+Non-returning umin and umax are native. Add, and, or and xor on buffers
+are two 32-bit atomics, which leave the right value in memory but may
+return a torn old value. The remaining operations, and all others on
+images, are reads and writes done one lane of the SIMD group after the
+other, so they only race between SIMD groups.
+
+vkd3d-proton's test_shader_sm66_64bit_atomics passes on an M3 (root
+descriptors, raw and typed descriptor tables, 96 checks); groupshared
+64-bit atomics stay unsupported. In the whole suite, compared with the
+build before, only tests that now run instead of being skipped fail
+(vkd3d also reports sampler feedback once 64-bit image atomics exist;
+three of its tests fail one check each).
+
+Generated-by: LLM
+---
+ src/kosmickrisp/compiler/nir_to_msl.c       | 178 ++++++++++++++++++++
+ src/kosmickrisp/vulkan/kk_format.c          |  11 ++
+ src/kosmickrisp/vulkan/kk_image.c           |   5 +
+ src/kosmickrisp/vulkan/kk_image_layout.c    |   8 +-
+ src/kosmickrisp/vulkan/kk_physical_device.c |  10 +-
+ 5 files changed, 210 insertions(+), 2 deletions(-)
+
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index aa071bf..1a925b3 100644
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -753,16 +753,38 @@ tex_type_name(nir_alu_type ty)
+       return "half";
+    case nir_type_float32:
+       return "float";
++   /* 64-bit images, for 64-bit atomics */
++   case nir_type_int64:
++   case nir_type_uint64:
++      return "ulong";
+    default:
+       return "BAD";
+    }
+ }
+ 
++static bool
++is_atomic64(nir_intrinsic_instr *instr)
++{
++   switch (instr->intrinsic) {
++   case nir_intrinsic_global_atomic:
++   case nir_intrinsic_global_atomic_swap:
++   case nir_intrinsic_bindless_image_atomic:
++   case nir_intrinsic_bindless_image_atomic_swap:
++      return instr->def.bit_size == 64;
++   default:
++      return false;
++   }
++}
++
+ static bool
+ instrinsic_needs_dest_type(nir_intrinsic_instr *instr)
+ {
+    const nir_intrinsic_info *info = &nir_intrinsic_infos[instr->intrinsic];
+    nir_intrinsic_op op = instr->intrinsic;
++   /* 64-bit atomics, swaps included, have their own codegen that assigns the
++    * declared value */
++   if (is_atomic64(instr))
++      return true;
+    if (op == nir_intrinsic_decl_reg || op == nir_intrinsic_load_reg ||
+        /* Atomic swaps have a custom codegen */
+        op == nir_intrinsic_global_atomic_swap ||
+@@ -1036,6 +1058,157 @@ atomic_swap_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
+    P(ctx, "%s t%d = ta%d;\n", type, instr->def.index, instr->def.index);
+ }
+ 
++/* The new value of a 64-bit atomic that is not atomic in Metal, from its old
++ * value o and its data v (and new value n for swaps) */
++static const char *
++atomic64_new_value(nir_atomic_op op)
++{
++   switch (op) {
++   case nir_atomic_op_iadd:
++      return "o + v";
++   case nir_atomic_op_imin:
++      return "(ulong)min((long)o, (long)v)";
++   case nir_atomic_op_umin:
++      return "min(o, v)";
++   case nir_atomic_op_imax:
++      return "(ulong)max((long)o, (long)v)";
++   case nir_atomic_op_umax:
++      return "max(o, v)";
++   case nir_atomic_op_iand:
++      return "o & v";
++   case nir_atomic_op_ior:
++      return "o | v";
++   case nir_atomic_op_ixor:
++      return "o ^ v";
++   case nir_atomic_op_xchg:
++      return "v";
++   case nir_atomic_op_cmpxchg:
++      return "o == v ? n : o";
++   default:
++      UNREACHABLE("Unhandled 64-bit atomic op");
++   }
++}
++
++/* Read-modify-write sequences standing in for 64-bit atomics run one lane of
++ * the SIMD group after the other, so that lanes of the same group do not
++ * overwrite each other. Different SIMD groups can still race. */
++static void
++atomic64_serialize_begin(struct nir_to_msl_ctx *ctx)
++{
++   P_IND(ctx, "uint rank = simd_prefix_exclusive_sum(1u);\n");
++   P_IND(ctx, "uint count = simd_sum(1u);\n");
++   P_IND(ctx, "for (uint i = 0u; i < count; i++) {\n");
++   ctx->indentlevel++;
++   P_IND(ctx, "if (i == rank) {\n");
++   ctx->indentlevel++;
++}
++
++static void
++atomic64_serialize_end(struct nir_to_msl_ctx *ctx)
++{
++   ctx->indentlevel--;
++   P_IND(ctx, "}\n");
++   P_IND(ctx, "simdgroup_barrier(mem_flags::mem_device | "
++              "mem_flags::mem_texture);\n");
++   ctx->indentlevel--;
++   P_IND(ctx, "}\n");
++}
++
++/* Metal (Apple9) only has 64-bit atomic min and max, unsigned, without
++ * returning the old value. Those are used where the shader does not need the
++ * old value, as for Nanite's visibility buffer. Add, and, or and xor on
++ * buffers are two 32-bit atomics, which leave the right value in memory but
++ * may return a torn old value. Everything else reads and writes without
++ * being atomic. */
++static void
++atomic64_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
++{
++   const nir_atomic_op op = nir_intrinsic_atomic_op(instr);
++   const bool image = instr->intrinsic == nir_intrinsic_bindless_image_atomic ||
++                      instr->intrinsic == nir_intrinsic_bindless_image_atomic_swap;
++   const bool swap = instr->intrinsic == nir_intrinsic_global_atomic_swap ||
++                     instr->intrinsic == nir_intrinsic_bindless_image_atomic_swap;
++   const bool native = (op == nir_atomic_op_umax || op == nir_atomic_op_umin) &&
++                       nir_def_is_unused(&instr->def);
++   const unsigned data = image ? 3 : 1;
++   const unsigned index = instr->def.index;
++
++   P_IND(ctx, "{\n");
++   ctx->indentlevel++;
++   P_IND(ctx, "ulong v = as_type<ulong>(");
++   src_to_msl(ctx, &instr->src[data]);
++   P(ctx, ");\n");
++   if (swap) {
++      P_IND(ctx, "ulong n = as_type<ulong>(");
++      src_to_msl(ctx, &instr->src[data + 1]);
++      P(ctx, ");\n");
++   }
++
++   if (image) {
++      if (native) {
++         P_INDENT(ctx);
++         src_to_msl(ctx, &instr->src[0]);
++         P(ctx, ".atomic_%s(", op == nir_atomic_op_umax ? "max" : "min");
++         image_coord_swizzle(ctx, instr);
++         P(ctx, ", ulong4(v));\n");
++      } else {
++         atomic64_serialize_begin(ctx);
++         P_IND(ctx, "ulong o = ");
++         src_to_msl(ctx, &instr->src[0]);
++         P(ctx, ".read(");
++         image_coord_swizzle(ctx, instr);
++         P(ctx, ").x;\n");
++         P_INDENT(ctx);
++         src_to_msl(ctx, &instr->src[0]);
++         P(ctx, ".write(ulong4(%s), ", atomic64_new_value(op));
++         image_coord_swizzle(ctx, instr);
++         P(ctx, ");\n");
++         if (!nir_def_is_unused(&instr->def))
++            P_IND(ctx, "t%u = as_type<decltype(t%u)>(o);\n", index, index);
++         atomic64_serialize_end(ctx);
++      }
++   } else {
++      P_IND(ctx, "device ulong *p = (device ulong *)");
++      src_to_msl(ctx, &instr->src[0]);
++      P(ctx, ";\n");
++      if (native) {
++         P_IND(ctx, "atomic_%s_explicit((device atomic_ulong *)p, v, "
++                    "memory_order_relaxed);\n",
++               op == nir_atomic_op_umax ? "max" : "min");
++      } else if (op == nir_atomic_op_iadd || op == nir_atomic_op_iand ||
++                 op == nir_atomic_op_ior || op == nir_atomic_op_ixor) {
++         const char *name = op == nir_atomic_op_iadd   ? "add"
++                            : op == nir_atomic_op_iand ? "and"
++                            : op == nir_atomic_op_ior  ? "or"
++                                                       : "xor";
++         P_IND(ctx, "device atomic_uint *q = (device atomic_uint *)p;\n");
++         P_IND(ctx, "uint lo = atomic_fetch_%s_explicit(&q[0], (uint)v, "
++                    "memory_order_relaxed);\n",
++               name);
++         /* The carry of the low word goes into the high word */
++         P_IND(ctx, "uint hi = atomic_fetch_%s_explicit(&q[1], "
++                    "(uint)(v >> 32)%s, memory_order_relaxed);\n",
++               name,
++               op == nir_atomic_op_iadd ? " + (lo + (uint)v < lo ? 1u : 0u)"
++                                        : "");
++         if (!nir_def_is_unused(&instr->def))
++            P_IND(ctx, "t%u = as_type<decltype(t%u)>(as_type<ulong>(uint2(lo, hi)));\n",
++                  index, index);
++      } else {
++         atomic64_serialize_begin(ctx);
++         P_IND(ctx, "ulong o = *(volatile device ulong *)p;\n");
++         P_IND(ctx, "*(volatile device ulong *)p = %s;\n",
++               atomic64_new_value(op));
++         if (!nir_def_is_unused(&instr->def))
++            P_IND(ctx, "t%u = as_type<decltype(t%u)>(o);\n", index, index);
++         atomic64_serialize_end(ctx);
++      }
++   }
++
++   ctx->indentlevel--;
++   P_IND(ctx, "}\n");
++}
++
+ static void
+ memory_modes_to_msl(struct nir_to_msl_ctx *ctx, nir_variable_mode modes)
+ {
+@@ -1164,6 +1337,11 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+        instr->intrinsic == nir_intrinsic_load_barycentric_at_offset)
+       return;
+ 
++   if (is_atomic64(instr)) {
++      atomic64_to_msl(ctx, instr);
++      return;
++   }
++
+    const nir_intrinsic_info *info = &nir_intrinsic_infos[instr->intrinsic];
+    if (instrinsic_needs_dest_type(instr)) {
+       P_IND(ctx, "t%d = ", instr->def.index);
+diff --git a/src/kosmickrisp/vulkan/kk_format.c b/src/kosmickrisp/vulkan/kk_format.c
+index a13f541..d58c6fe 100644
+--- a/src/kosmickrisp/vulkan/kk_format.c
++++ b/src/kosmickrisp/vulkan/kk_format.c
+@@ -31,6 +31,11 @@
+    .bit_widths = width, .filter = 1u, .write = 0u, .color = 1u, .blend = 1u,   \
+    .msaa = 1u, .resolve = 1u, .sparse = 1u, .atomic = 0u
+ 
++// Write, Atomic
++#define MTL_FMT_WA(width)                                                      \
++   .bit_widths = width, .filter = 0u, .write = 1u, .color = 0u, .blend = 0u,   \
++   .msaa = 0u, .resolve = 0u, .sparse = 0u, .atomic = 1u
++
+ // Filter, Write, Color, Blend, MSAA
+ #define MTL_FMT_FWCBM(width)                                                   \
+    .bit_widths = width, .filter = 1u, .write = 1u, .color = 1u, .blend = 1u,   \
+@@ -206,6 +211,12 @@ static const struct kk_va_format kk_vf_formats[] = {
+    // 64-bit formats
+    MTL_FMT_NATIVE(R32G32_UINT, MTL_FMT_WCMS(64), MTL_FMT_TB_WR),
+    MTL_FMT_NATIVE(R32G32_SINT, MTL_FMT_WCMS(64), MTL_FMT_TB_WR),
++   /* Storage images for 64-bit atomics (Apple9), whose shaders see the texels
++    * of RG32Uint as ulong */
++   MTL_FMT(R64_UINT, R32G32_UINT, MTL_SWIZZLE_IDENTITY, MTL_FMT_WA(64),
++           MTL_FMT_TB_NONE, false),
++   MTL_FMT(R64_SINT, R32G32_UINT, MTL_SWIZZLE_IDENTITY, MTL_FMT_WA(64),
++           MTL_FMT_TB_NONE, false),
+    MTL_FMT_NATIVE(R32G32_FLOAT, MTL_FMT_ALL_NO_ATOMIC(64), MTL_FMT_TB_WR),
+    MTL_FMT_NATIVE(R16G16B16A16_UNORM, MTL_FMT_ALL_NO_ATOMIC(64), MTL_FMT_TB_WR),
+    MTL_FMT_NATIVE(R16G16B16A16_SNORM, MTL_FMT_ALL_NO_ATOMIC(64), MTL_FMT_TB_WR),
+diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
+index 4be01d1..64a4309 100644
+--- a/src/kosmickrisp/vulkan/kk_image.c
++++ b/src/kosmickrisp/vulkan/kk_image.c
+@@ -44,6 +44,11 @@ kk_get_image_plane_format_features(struct kk_physical_device *pdev,
+    if (va_format == NULL)
+       return 0;
+ 
++   /* 64-bit images exist for 64-bit atomics, which need Apple9 */
++   if ((p_format == PIPE_FORMAT_R64_UINT || p_format == PIPE_FORMAT_R64_SINT) &&
++       (pdev->info.gpu_apple_family < 9 || tiling != VK_IMAGE_TILING_OPTIMAL))
++      return 0;
++
+    // Textures can at least be sampled
+    features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
+    features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+diff --git a/src/kosmickrisp/vulkan/kk_image_layout.c b/src/kosmickrisp/vulkan/kk_image_layout.c
+index e31bd92..519d822 100644
+--- a/src/kosmickrisp/vulkan/kk_image_layout.c
++++ b/src/kosmickrisp/vulkan/kk_image_layout.c
+@@ -274,8 +274,14 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
+    layout->linear = image->tiling != VK_IMAGE_TILING_OPTIMAL;
+    layout->optimized_layout = kk_image_layout_can_optimize(
+       pdev, usage, image->tiling, image->create_flags, format);
++   /* Storage images of RG32 may be viewed as R64 for 64-bit atomics */
++   const bool r64_view = (format == PIPE_FORMAT_R32G32_UINT ||
++                          format == PIPE_FORMAT_R32G32_SINT) &&
++                         (usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
++                         (image->create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
++                         pdev->info.gpu_apple_family >= 9;
+    layout->usage = vk_image_usage_flags_to_mtl_texture_usage(
+-      usage, image->create_flags, supported_format->atomic);
++      usage, image->create_flags, supported_format->atomic || r64_view);
+    layout->create_flags = image->create_flags;
+    layout->format.pipe = format;
+    layout->format.mtl = supported_format->mtl_pixel_format;
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 7ee3274..0217aa0 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -79,7 +79,8 @@ kk_get_device_extensions(const struct kk_instance *instance,
+       .KHR_imageless_framebuffer = true,
+       .KHR_sampler_mirror_clamp_to_edge = true,
+       .KHR_separate_depth_stencil_layouts = true,
+-      .KHR_shader_atomic_int64 = false,
++      /* Only 64-bit atomic min and max are native, from Apple9 on */
++      .KHR_shader_atomic_int64 = pdev->info.gpu_apple_family >= 9,
+       .KHR_shader_float_controls = true,
+       .KHR_shader_float16_int8 = true,
+       .KHR_shader_subgroup_extended_types = true,
+@@ -200,6 +201,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
+       .EXT_robustness2 = true,
+       .EXT_sample_locations = true,
+       .EXT_shader_atomic_float = true,
++      .EXT_shader_image_atomic_int64 = pdev->info.gpu_apple_family >= 9,
+       .EXT_shader_replicated_composites = true,
+       .EXT_shader_subgroup_ballot = true,
+       .EXT_shader_subgroup_vote = true,
+@@ -302,6 +304,9 @@ kk_get_device_features(
+       .scalarBlockLayout = true,
+       .separateDepthStencilLayouts = true,
+       .shaderFloat16 = true,
++      /* Metal has 64-bit atomic min and max on device memory only, the
++       * other operations are emulated, see nir_to_msl */
++      .shaderBufferInt64Atomics = pdev->info.gpu_apple_family >= 9,
+       .shaderInputAttachmentArrayDynamicIndexing = true,
+       .shaderInputAttachmentArrayNonUniformIndexing = true,
+       .shaderInt8 = true,
+@@ -509,6 +514,9 @@ kk_get_device_features(
+       /* VK_KHR_shader_subgroup_uniform_control_flow */
+       .shaderSubgroupUniformControlFlow = true,
+ 
++      /* VK_EXT_shader_image_atomic_int64 */
++      .shaderImageInt64Atomics = pdev->info.gpu_apple_family >= 9,
++
+       /* VK_EXT_shader_atomic_float */
+       .shaderBufferFloat32Atomics = true,
+       .shaderBufferFloat32AtomicAdd = true,
+-- 
+2.56.0
+
