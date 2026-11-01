@@ -1,0 +1,38 @@
+From d001d32ee269b34ade5924da34082af4b7f91be0 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 03:44:36 +0100
+Subject: [PATCH] win32u: Use vkGetPhysicalDeviceProperties2KHR for placed
+ memory map properties.
+
+In WoW64 processes, init_physical_device() queries the placed memory map
+properties of drivers with VK_EXT_map_memory_placed through the core
+vkGetPhysicalDeviceProperties2. The instance win32u creates for D3DKMT
+asks for no API version, so it is a Vulkan 1.0 instance where only the
+KHR alias of that function exists, and Mesa drivers return NULL for the
+core name. The call crashed inside D3DKMTOpenAdapterFromLuid, which left
+the pthread_once of the D3DKMT instance unfinished; the next display
+mode change then took the display lock and aborted on the recursive
+once, leaving the lock held. 32-bit D3D9 games through DXVK hung when
+they switched to full screen on KosmicKrisp.
+
+The external memory host branch below already uses the KHR alias.
+---
+ dlls/win32u/vulkan.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 9497c6a69cc..de45d48c43e 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -1075,7 +1075,7 @@ static VkResult init_physical_device( struct vulkan_physical_device *physical_de
+             VkPhysicalDeviceMapMemoryPlacedPropertiesEXT map_placed_props = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_PROPERTIES_EXT};
+             VkPhysicalDeviceProperties2 props = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,.pNext = &map_placed_props};
+ 
+-            instance->p_vkGetPhysicalDeviceProperties2( host_physical_device, &props );
++            instance->p_vkGetPhysicalDeviceProperties2KHR( host_physical_device, &props );
+             physical_device->map_placed_align = map_placed_props.minPlacedMemoryMapAlignment;
+             TRACE( "Using placed map with alignment %u\n", physical_device->map_placed_align );
+         }
+-- 
+2.56.0
+
