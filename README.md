@@ -141,7 +141,11 @@ veröffentlicht sie per `gh` als GitHub-Release.
 ## Lizenzen und Quellcode
 
 MacProton steht wie Proton unter mehreren Lizenzen, siehe
-[LICENSE](LICENSE) und [LICENSE.proton](LICENSE.proton). Die App enthält
+[LICENSE](LICENSE). Valves Proton-Code steht unter der BSD-Lizenz in
+[LICENSE.proton](LICENSE.proton), MacProtons eigener Code (App, Skripte und
+Doku in `macos/`) unter der BSD-Lizenz in
+[LICENSE.macproton](LICENSE.macproton). Die Patches in `macos/patches`
+stehen unter der Lizenz des Projekts, das sie ändern. Die App enthält
 Software Dritter, unter anderem Wine, vkd3d-proton, GnuTLS, GMP und Nettle
 (LGPL), Mesa (MIT), MoltenVK (Apache 2.0), DXVK und SDL2 (zlib) sowie
 FreeType (FreeType License). Eine Übersicht mit Versionen und Quellen und

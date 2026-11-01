@@ -12,6 +12,7 @@ to them; macos/build.sh fetches, patches and builds them.
 
 | Component | License | Version | Source |
 |---|---|---|---|
+| MacProton (app, scripts) | BSD 3-clause | this repository | this repository |
 | Proton, lsteamclient, steam.exe (Valve) | BSD 3-clause; lsteamclient also Steamworks SDK license | this repository | https://github.com/ValveSoftware/Proton |
 | Wine (Valve's fork) | LGPL 2.1 or later; bundled libraries see wine-libs | 674d3cddcbef8a2c5b9f579ab5f499ca007ac331 | https://github.com/ValveSoftware/wine |
 | DXVK | zlib | 0cfe0898289fb11e3d8d0e1c62cd344b825b7d57 | https://github.com/doitsujin/dxvk |

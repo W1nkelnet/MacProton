@@ -10,3 +10,9 @@ level contents of the Proton project.
 Proton uses a variety of other software, each of which is governed
 by its own license.  Those licenses are contained in a file named
 LICENSE or COPYING in each directory.
+
+MacProton's own additions, the macOS app and scripts in macos/ and the
+documentation of the port, are governed by the license in LICENSE.macproton.
+The patches in macos/patches change other projects and are governed by the
+license of the project they change. The licenses of the software MacProton
+ships are collected in macos/licenses.

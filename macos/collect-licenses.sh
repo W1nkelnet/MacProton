@@ -31,6 +31,7 @@ copy() {
     done
 }
 
+copy macproton "$proton/LICENSE.macproton"
 copy proton "$proton/LICENSE.proton"
 copy lsteamclient "$proton/lsteamclient/LICENSE"
 copy wine "$proton/wine/LICENSE" "$proton/wine/COPYING.LIB" "$proton/wine/AUTHORS"
@@ -72,6 +73,7 @@ to them; macos/build.sh fetches, patches and builds them.
 
 | Component | License | Version | Source |
 |---|---|---|---|
+| MacProton (app, scripts) | BSD 3-clause | this repository | this repository |
 | Proton, lsteamclient, steam.exe (Valve) | BSD 3-clause; lsteamclient also Steamworks SDK license | this repository | https://github.com/ValveSoftware/Proton |
 | Wine (Valve's fork) | LGPL 2.1 or later; bundled libraries see wine-libs | $(rev wine) | https://github.com/ValveSoftware/wine |
 | DXVK | zlib | $(rev dxvk) | https://github.com/doitsujin/dxvk |
