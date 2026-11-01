@@ -1,0 +1,217 @@
+From 1b50dc25a4fb05ee033f7d799774485a8c432dce Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 05:45:02 +0100
+Subject: [PATCH] kk: Do not wait for Metal when destroying a shader
+
+Destroying a shader whose Metal build was running on the compile queue
+waited for the build. Horizon Zero Dawn destroys pipelines while it
+loads, and the thread doing so spent nearly all its time waiting on
+builds that take seconds while the queue works through a backlog of
+thousands; its loading screen ran at 0.1 fps.
+
+The queued build now holds a reference to the shader. Destroying it no
+longer waits: a build that has not started is abandoned and the shader
+drops its MSL right away, and the last reference, the destroying thread
+or the build's cleanup, frees the shader. Destroying the device waits
+for the outstanding builds first, which skip their work then.
+util_queue_finish cannot be used for that, since it needs every thread
+the queue may create to join a barrier.
+
+Horizon Zero Dawn's first start: the loading screen runs at about 50
+instead of 0.1 fps and the game reaches its world.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_device.c |  9 ++++
+ src/kosmickrisp/vulkan/kk_device.h |  4 ++
+ src/kosmickrisp/vulkan/kk_shader.c | 77 ++++++++++++++++++++++++++++--
+ src/kosmickrisp/vulkan/kk_shader.h | 17 +++++++
+ 4 files changed, 102 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index 8bf7a8e..92ca26f 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -32,6 +32,8 @@
+ #include <time.h>
+ #include <unistd.h>
+ 
++#include "util/u_atomic.h"
++
+ struct kk_mtl_compiler {
+    mtl_compiler *handle;
+    uint32_t refcount;
+@@ -411,6 +413,13 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+       mtl_stop_gpu_capture();
+    }
+ 
++   /* Let the queue free the shaders destroyed while their builds waited,
++    * while the device's resources are still there; builds still queued are
++    * skipped */
++   p_atomic_set(&dev->compile_queue_closing, true);
++   while (p_atomic_read(&dev->compile_jobs))
++      usleep(1000);
++
+    /* Meta first since it may destroy Vulkan objects */
+    kk_device_finish_meta(dev);
+    kk_device_finish_lib(dev);
+diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
+index 6a146b8..055adb1 100644
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -85,6 +85,10 @@ struct kk_device {
+    mtl_compiler *mtl_compiler_handle;
+    /* Builds the Metal pipelines of new shaders, see kk_shader */
+    struct util_queue compile_queue;
++   /* Set while the device is destroyed: queued builds are skipped */
++   bool compile_queue_closing;
++   /* Builds queued and not yet cleaned up */
++   uint32_t compile_jobs;
+ 
+    /* Dispatch table exposed to the user. Required since we need to record all
+     * commands due to Metal limitations */
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 7db2b72..4c24816 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -980,20 +980,61 @@ kk_shader_alloc(struct kk_device *dev, mesa_shader_stage stage,
+ 
+    util_queue_fence_init(&shader->compile_fence);
+    simple_mtx_init(&shader->compile_lock, mtx_plain);
++   shader->refs = 1;
+    return shader;
+ }
+ 
++static void kk_shader_free(struct vk_device *vk_dev, struct kk_shader *shader,
++                           const VkAllocationCallbacks *pAllocator);
++
++static void
++kk_msl_data_free_code(struct msl_compile_data *data)
++{
++   ralloc_free((void *)data->code);
++   free(data->packed);
++   data->code = NULL;
++   data->packed = NULL;
++}
++
++/* The MSL is most of a shader's memory */
++static void
++kk_shader_free_msl(struct kk_shader *shader)
++{
++   for (unsigned i = 0; i < ARRAY_SIZE(shader->msl_data); i++)
++      kk_msl_data_free_code(&shader->msl_data[i]);
++   kk_msl_data_free_code(&shader->gs_main);
++   kk_msl_data_free_code(&shader->gs_count);
++   kk_msl_data_free_code(&shader->gs_pre);
++}
++
+ static void
+ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+                   const VkAllocationCallbacks *pAllocator)
++{
++   if (pAllocator) {
++      shader->destroy_alloc = *pAllocator;
++      shader->has_destroy_alloc = true;
++   }
++   p_atomic_set(&shader->destroyed, true);
++
++   /* A build that has not started will not touch the MSL anymore; the queue
++    * may take a while to get to it, so do not keep the MSL around until then */
++   if (p_atomic_cmpxchg(&shader->build_state, KK_BUILD_PENDING,
++                        KK_BUILD_ABANDONED) == KK_BUILD_PENDING)
++      kk_shader_free_msl(shader);
++
++   if (p_atomic_dec_zero(&shader->refs))
++      kk_shader_free(vk_dev, shader, pAllocator);
++}
++
++static void
++kk_shader_free(struct vk_device *vk_dev, struct kk_shader *shader,
++               const VkAllocationCallbacks *pAllocator)
+ {
+    struct kk_device *dev = container_of(vk_dev, struct kk_device, vk);
+ 
+    struct kk_pipeline_handles *pipe = &shader->pipeline;
+ 
+-   /* Drops the compile if it has not started, else waits for it */
+-   util_queue_drop_job(&dev->compile_queue, &shader->compile_fence);
+-
+    if (shader->xfb_gs)
+       kk_shader_destroy(vk_dev, shader->xfb_gs, pAllocator);
+ 
+@@ -1935,7 +1976,31 @@ kk_shader_wait_compiled(struct kk_shader *shader)
+ static void
+ kk_shader_compile_job(void *job, UNUSED void *gdata, UNUSED int thread_index)
+ {
+-   kk_shader_wait_compiled(job);
++   struct kk_shader *shader = job;
++   struct kk_device *dev =
++      container_of(shader->vk.base.device, struct kk_device, vk);
++
++   if (p_atomic_cmpxchg(&shader->build_state, KK_BUILD_PENDING,
++                        KK_BUILD_STARTED) != KK_BUILD_PENDING ||
++       p_atomic_read(&dev->compile_queue_closing))
++      return;
++
++   kk_shader_wait_compiled(shader);
++}
++
++static void
++kk_shader_compile_cleanup(void *job, UNUSED void *gdata,
++                          UNUSED int thread_index)
++{
++   struct kk_shader *shader = job;
++   struct kk_device *dev =
++      container_of(shader->vk.base.device, struct kk_device, vk);
++
++   if (p_atomic_dec_zero(&shader->refs))
++      kk_shader_free(&dev->vk, shader,
++                     shader->has_destroy_alloc ? &shader->destroy_alloc
++                                               : NULL);
++   p_atomic_dec(&dev->compile_jobs);
+ }
+ 
+ /* The MSL must not change anymore: kk_shader_serialize reads it while the
+@@ -1947,8 +2012,10 @@ kk_shader_queue_compile(struct kk_device *dev, struct kk_shader *shader)
+        shader->info.stage != MESA_SHADER_VERTEX)
+       return;
+ 
++   p_atomic_inc(&shader->refs);
++   p_atomic_inc(&dev->compile_jobs);
+    util_queue_add_job(&dev->compile_queue, shader, &shader->compile_fence,
+-                      kk_shader_compile_job, NULL, 0);
++                      kk_shader_compile_job, kk_shader_compile_cleanup, 0);
+ }
+ 
+ static bool
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index 95f2b54..9eb33ed 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -192,6 +192,23 @@ struct kk_shader {
+    struct util_queue_fence compile_fence;
+    simple_mtx_t compile_lock;
+    bool compiled;
++
++   /* The queued build holds a reference, so destroying the shader does not
++    * wait for Metal: the build is skipped if it has not run yet, and the last
++    * reference frees the shader with the allocator it was destroyed with. */
++   uint32_t refs;
++   bool destroyed;
++   /* KK_BUILD_*: a queued build that was abandoned before it started lets
++    * the shader drop its MSL right away */
++   uint32_t build_state;
++   bool has_destroy_alloc;
++   VkAllocationCallbacks destroy_alloc;
++};
++
++enum {
++   KK_BUILD_PENDING = 0,
++   KK_BUILD_STARTED = 1,
++   KK_BUILD_ABANDONED = 2,
+ };
+ 
+ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
+-- 
+2.56.0
+
