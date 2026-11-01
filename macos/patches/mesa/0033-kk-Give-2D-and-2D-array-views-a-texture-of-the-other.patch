@@ -1,0 +1,167 @@
+From 6663f5be1677a89e6b282304c6215b445f907555 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 17:40:53 +0100
+Subject: [PATCH 33/33] kk: Give 2D and 2D array views a texture of the other
+ type
+
+D3D12 applications bind 2D array views to Texture2D declarations and the
+other way round. Unreal Engine 5 writes its TSR output to a one-layer 2D
+array and reads it as a 2D texture for bloom and tonemapping. Other APIs
+read such a view as its first layer. Metal reads garbage from a texture
+whose type differs from the argument's declared type: every coordinate
+returned the same texel, so with Direct3D 12 the whole screen was one
+colour.
+
+Sampled 2D and 2D array views now also create a Metal view of the other
+type, a 2D view of the first layer for 2D arrays. Sampled image
+descriptors carry the 2D texture in image_gpu_resource_id and the 2D
+array texture in a new image_array_gpu_resource_id, taken from padding,
+and texture2d_array declarations load the latter.
+
+Town To City (Unreal Engine 5.7) with Direct3D 12 renders its world
+instead of a flat colour.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_descriptor_set.c    |  4 +++
+ src/kosmickrisp/vulkan/kk_descriptor_types.h  |  8 ++++-
+ src/kosmickrisp/vulkan/kk_image_view.c        | 34 +++++++++++++++++++
+ src/kosmickrisp/vulkan/kk_image_view.h        |  5 +++
+ .../vulkan/kk_nir_lower_descriptors.c         |  7 +++-
+ 5 files changed, 56 insertions(+), 2 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_descriptor_set.c b/src/kosmickrisp/vulkan/kk_descriptor_set.c
+index cd05f54..6429afb 100644
+--- a/src/kosmickrisp/vulkan/kk_descriptor_set.c
++++ b/src/kosmickrisp/vulkan/kk_descriptor_set.c
+@@ -71,10 +71,14 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
+             assert(view->planes[plane].input_gpu_resource_id);
+             desc[plane].image_gpu_resource_id =
+                view->planes[plane].input_gpu_resource_id;
++            desc[plane].image_array_gpu_resource_id =
++               view->planes[plane].input_gpu_resource_id;
+          } else {
+             assert(view->planes[plane].sampled_gpu_resource_id);
+             desc[plane].image_gpu_resource_id =
+                view->planes[plane].sampled_gpu_resource_id;
++            desc[plane].image_array_gpu_resource_id =
++               view->planes[plane].sampled_array_gpu_resource_id;
+          }
+ 
+          float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
+diff --git a/src/kosmickrisp/vulkan/kk_descriptor_types.h b/src/kosmickrisp/vulkan/kk_descriptor_types.h
+index 7516899..67da9ca 100644
+--- a/src/kosmickrisp/vulkan/kk_descriptor_types.h
++++ b/src/kosmickrisp/vulkan/kk_descriptor_types.h
+@@ -28,7 +28,13 @@ struct kk_sampled_image_descriptor {
+ 
+    uint16_t pad_to_64_bits;
+    uint32_t border[4];
+-   uint64_t pad_to_power_2[3];
++
++   /* image_gpu_resource_id as a 2D array texture for 2D and 2D array views,
++    * which Metal needs for texture2d_array declarations. image_gpu_resource_id
++    * then holds a 2D texture of the first layer, for texture2d declarations.
++    */
++   uint64_t image_array_gpu_resource_id;
++   uint64_t pad_to_power_2[2];
+ };
+ 
+ static_assert(sizeof(struct kk_sampled_image_descriptor) == 64,
+diff --git a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
+index 8b02902..b7c08d7 100644
+--- a/src/kosmickrisp/vulkan/kk_image_view.c
++++ b/src/kosmickrisp/vulkan/kk_image_view.c
+@@ -190,6 +190,37 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
+          view->planes[view_plane].sampled_gpu_resource_id =
+             mtl_texture_get_gpu_resource_id(
+                view->planes[view_plane].mtl_handle_sampled);
++         view->planes[view_plane].sampled_array_gpu_resource_id =
++            view->planes[view_plane].sampled_gpu_resource_id;
++
++         /* D3D12 applications bind 2D array views to Texture2D declarations
++          * and the other way round, e.g. Unreal Engine 5's TSR output, which
++          * its bloom and tonemapping read as a 2D texture. Other APIs read
++          * such a view as its first layer, Metal reads garbage from a texture
++          * whose type differs from the declaration. Keep a view of the other
++          * type for the shader to pick by its declaration.
++          */
++         if (view_layout.sample_count_sa <= 1 &&
++             (view_layout.view_type == VK_IMAGE_VIEW_TYPE_2D ||
++              view_layout.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
++            struct kk_view_layout other_layout = view_layout;
++            bool is_array = view_layout.view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY;
++            other_layout.view_type =
++               is_array ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
++            if (is_array)
++               other_layout.array_len = 1u;
++            mtl_texture *other = mtl_new_texture_view_with(mtl_handle, &other_layout);
++            view->planes[view_plane].mtl_handle_sampled_2d_other = other;
++            if (is_array) {
++               view->planes[view_plane].sampled_array_gpu_resource_id =
++                  view->planes[view_plane].sampled_gpu_resource_id;
++               view->planes[view_plane].sampled_gpu_resource_id =
++                  mtl_texture_get_gpu_resource_id(other);
++            } else {
++               view->planes[view_plane].sampled_array_gpu_resource_id =
++                  mtl_texture_get_gpu_resource_id(other);
++            }
++         }
+       }
+ 
+       if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+@@ -259,6 +290,9 @@ kk_image_view_finish(struct kk_device *dev, struct kk_image_view *view)
+       if (view->planes[plane].mtl_handle_sampled)
+          mtl_release(view->planes[plane].mtl_handle_sampled);
+ 
++      if (view->planes[plane].mtl_handle_sampled_2d_other)
++         mtl_release(view->planes[plane].mtl_handle_sampled_2d_other);
++
+       if (view->planes[plane].mtl_handle_storage)
+          mtl_release(view->planes[plane].mtl_handle_storage);
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_image_view.h b/src/kosmickrisp/vulkan/kk_image_view.h
+index 16ef404..1623ecb 100644
+--- a/src/kosmickrisp/vulkan/kk_image_view.h
++++ b/src/kosmickrisp/vulkan/kk_image_view.h
+@@ -28,6 +28,9 @@ struct kk_image_view {
+       enum pipe_format format;
+ 
+       mtl_texture *mtl_handle_sampled;
++      /* mtl_handle_sampled as the other one of 2D and 2D array, see
++       * kk_sampled_image_descriptor::image_array_gpu_resource_id */
++      mtl_texture *mtl_handle_sampled_2d_other;
+       mtl_texture
+          *mtl_handle_storage; // TODO_KOSMICKRISP We can probably get rid of
+                               // this once we lower 2D cubes and 3D to 2D array?
+@@ -45,6 +48,8 @@ struct kk_image_view {
+       mtl_texture *mtl_handle_subres;
+ 
+       uint64_t sampled_gpu_resource_id;
++      /* 2D array texture for 2D and 2D array views, else the sampled one */
++      uint64_t sampled_array_gpu_resource_id;
+       uint64_t storage_gpu_resource_id;
+       uint64_t input_gpu_resource_id;
+    } planes[3];
+diff --git a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c b/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
+index 0b16a67..aea6b33 100644
+--- a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
++++ b/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
+@@ -548,8 +548,13 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
+    }
+ 
+    {
++      /* See kk_sampled_image_descriptor::image_array_gpu_resource_id */
+       unsigned offs =
+-         offsetof(struct kk_sampled_image_descriptor, image_gpu_resource_id);
++         tex->sampler_dim == GLSL_SAMPLER_DIM_2D && tex->is_array
++            ? offsetof(struct kk_sampled_image_descriptor,
++                       image_array_gpu_resource_id)
++            : offsetof(struct kk_sampled_image_descriptor,
++                       image_gpu_resource_id);
+ 
+       nir_def *resource_addr = load_resource_addr(
+          b, 1, 64, nir_src_as_deref(nir_src_for_ssa(texture)),
+-- 
+2.56.0
+

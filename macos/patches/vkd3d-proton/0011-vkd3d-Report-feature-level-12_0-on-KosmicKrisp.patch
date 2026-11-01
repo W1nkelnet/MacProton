@@ -1,0 +1,38 @@
+From 517c9283b3f482e4e904671beaf72ba4d42dcbfe Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 17:40:44 +0100
+Subject: [PATCH] vkd3d: Report feature level 12_0 on KosmicKrisp.
+
+Like MoltenVK, KosmicKrisp has neither sparse residency nor logic ops,
+which held it at feature level 11_1 although it meets the rest of 12_0.
+Unreal Engine 5 refuses Direct3D 12 below 12_0 and asked to run without
+-dx12. Extend the portability exception for MoltenVK to it.
+---
+ libs/vkd3d/device.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 598706e..17c6acf 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -9774,11 +9774,13 @@ static void d3d12_device_caps_init_feature_level(struct d3d12_device *device)
+             caps->options.TypedUAVLoadAdditionalFormats)
+         caps->max_feature_level = D3D_FEATURE_LEVEL_12_0;
+ 
+-    /* MoltenVK has neither sparse residency nor logic ops, which would hold portability devices at 11_0
+-     * although they meet the rest of 12_0. Report 12_0 with the real tiled resources tier and logic op
+-     * support, so that games requiring 12_0 start and those checking the caps avoid what is missing. */
++    /* MoltenVK and KosmicKrisp have neither sparse residency nor logic ops, which would hold portability
++     * devices at 11_0 although they meet the rest of 12_0. Report 12_0 with the real tiled resources tier
++     * and logic op support, so that games requiring 12_0 start and those checking the caps avoid what is
++     * missing. */
+     if (caps->max_feature_level < D3D_FEATURE_LEVEL_12_0 &&
+-            device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MOLTENVK &&
++            (device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MOLTENVK ||
++            device->device_info.vulkan_1_2_properties.driverID == (VkDriverId)28 /* KosmicKrisp */) &&
+             features->vertexPipelineStoresAndAtomics &&
+             caps->options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_2 &&
+             caps->options.TypedUAVLoadAdditionalFormats)
+-- 
+2.56.0
+

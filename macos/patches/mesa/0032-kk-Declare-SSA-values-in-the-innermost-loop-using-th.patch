@@ -1,0 +1,211 @@
+From 8087fe2cb45b7aa29a686069042aebb05b264d1f Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Sun, 1 Nov 2026 17:40:53 +0100
+Subject: [PATCH 32/33] kk: Declare SSA values in the innermost loop using them
+
+Metal's compiler mishandles simdgroup functions on values held in
+variables declared outside the loop that computes them. In a waterfall
+loop such as
+
+   while (true) {
+      first = simd_broadcast_first(v);
+      if (v == first) { r = simd_sum(v); break; }
+   }
+
+it runs the breaking branch with every thread of the simdgroup active,
+as if after the loop, so the sum covers all of them. The same code with
+first declared inside the loop works. nir_to_msl declared every SSA value
+at the top of the function, so every such loop hit this.
+
+Declare each SSA value at the top of the innermost loop that holds all
+its uses, or of the function if there is none. vkd3d-proton's
+test_shader_waveop_maximal_convergence now passes, as do its other 927
+wave operation tests.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/compiler/nir_to_msl.c | 147 +++++++++++++++++++-------
+ 1 file changed, 110 insertions(+), 37 deletions(-)
+
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index 1a925b3..62b83b6 100644
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -2375,6 +2375,9 @@ instr_to_msl(struct nir_to_msl_ctx *ctx, nir_instr *instr)
+    }
+ }
+ 
++static void declare_ssa_values(struct nir_to_msl_ctx *ctx, nir_cf_node *node,
++                               nir_loop *loop);
++
+ static void
+ cf_node_to_metal(struct nir_to_msl_ctx *ctx, nir_cf_node *node)
+ {
+@@ -2420,6 +2423,7 @@ cf_node_to_metal(struct nir_to_msl_ctx *ctx, nir_cf_node *node)
+                UINT64_MAX);
+       }
+       ctx->indentlevel++;
++      declare_ssa_values(ctx, &loop->cf_node, loop);
+       foreach_list_typed(nir_cf_node, node, node, &loop->body) {
+          cf_node_to_metal(ctx, node);
+       }
+@@ -2673,50 +2677,119 @@ msl_gather_info(struct nir_to_msl_ctx *ctx, struct nir_to_msl_options *options)
+    }
+ }
+ 
+-static void
+-predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
++static nir_def *
++ssa_value_to_declare(struct nir_to_msl_ctx *ctx, nir_instr *instr)
+ {
+-   nir_foreach_block(block, impl) {
+-      nir_foreach_instr(instr, block) {
+-         nir_def *def;
+-         switch (instr->type) {
+-         case nir_instr_type_alu: {
+-            nir_alu_instr *alu = nir_instr_as_alu(instr);
+-            def = &alu->def;
+-            break;
+-         }
+-         case nir_instr_type_intrinsic: {
+-            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+-            if (!instrinsic_needs_dest_type(intr))
+-               continue;
+-            def = &intr->def;
+-            break;
+-         }
+-         case nir_instr_type_tex: {
+-            nir_tex_instr *tex = nir_instr_as_tex(instr);
+-            def = &tex->def;
++   switch (instr->type) {
++   case nir_instr_type_alu:
++      return &nir_instr_as_alu(instr)->def;
++   case nir_instr_type_intrinsic: {
++      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++      return instrinsic_needs_dest_type(intr) ? &intr->def : NULL;
++   }
++   case nir_instr_type_tex:
++      return &nir_instr_as_tex(instr)->def;
++   default:
++      return NULL;
++   }
++}
++
++static nir_loop *
++enclosing_loop(nir_cf_node *node)
++{
++   for (node = node->parent; node; node = node->parent) {
++      if (node->type == nir_cf_node_loop)
++         return nir_cf_node_as_loop(node);
++   }
++   return NULL;
++}
++
++static bool
++cf_node_is_inside(nir_cf_node *node, nir_loop *loop)
++{
++   for (; node; node = node->parent) {
++      if (node == &loop->cf_node)
++         return true;
++   }
++   return false;
++}
++
++/* The innermost loop that holds every use of def, or NULL for none.
++ *
++ * Metal's compiler mishandles simdgroup functions on values that live in
++ * variables declared outside the loop computing them: in a waterfall loop
++ * such as
++ *
++ *    while (true) {
++ *       first = simd_broadcast_first(v);
++ *       if (v == first) { r = simd_sum(v); break; }
++ *    }
++ *
++ * it runs the breaking branch with every thread active, as if after the
++ * loop, so the sum covers the whole simdgroup. Declared inside the loop the
++ * same code works, so SSA values are declared in the innermost loop that
++ * holds all their uses. */
++static nir_loop *
++ssa_value_scope(nir_def *def)
++{
++   nir_loop *loop = enclosing_loop(&nir_def_instr(def)->block->cf_node);
++   while (loop) {
++      bool inside = true;
++      nir_foreach_use_including_if(src, def) {
++         nir_cf_node *node =
++            nir_src_is_if(src) ? &nir_src_use_if(src)->cf_node
++                               : &nir_src_use_instr(src)->block->cf_node;
++         if (!cf_node_is_inside(node, loop)) {
++            inside = false;
+             break;
+          }
+-         default:
+-            continue;
+-         }
+-         if (msl_def_is_texture(ctx, def)) {
+-            P_INDENT(ctx);
+-            msl_emit_texture_type(ctx, nir_instr_as_intrinsic(instr));
+-            P(ctx, " t%u;\n", def->index);
+-         } else {
+-            /* No initializer: every SSA value is written before it is read,
+-             * and zeroing thousands of them costs Metal's compiler about a
+-             * tenth of its time, a third on the largest shaders. */
+-            const char *type = msl_type_for_def(ctx->types, def);
+-            if (!type)
+-               continue;
+-            P_IND(ctx, "%s t%u;\n", type, def->index);
+-         }
++      }
++      if (inside)
++         return loop;
++      loop = enclosing_loop(&loop->cf_node);
++   }
++   return NULL;
++}
++
++static void
++declare_ssa_value(struct nir_to_msl_ctx *ctx, nir_instr *instr, nir_def *def)
++{
++   if (msl_def_is_texture(ctx, def)) {
++      P_INDENT(ctx);
++      msl_emit_texture_type(ctx, nir_instr_as_intrinsic(instr));
++      P(ctx, " t%u;\n", def->index);
++   } else {
++      /* No initializer: every SSA value is written before it is read,
++       * and zeroing thousands of them costs Metal's compiler about a
++       * tenth of its time, a third on the largest shaders. */
++      const char *type = msl_type_for_def(ctx->types, def);
++      if (!type)
++         return;
++      P_IND(ctx, "%s t%u;\n", type, def->index);
++   }
++}
++
++/* Declares the SSA values whose scope is loop, or the function for NULL */
++static void
++declare_ssa_values(struct nir_to_msl_ctx *ctx, nir_cf_node *node,
++                   nir_loop *loop)
++{
++   nir_foreach_block_in_cf_node(block, node) {
++      nir_foreach_instr(instr, block) {
++         nir_def *def = ssa_value_to_declare(ctx, instr);
++         if (def && ssa_value_scope(def) == loop)
++            declare_ssa_value(ctx, instr, def);
+       }
+    }
+ }
+ 
++static void
++predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
++{
++   foreach_list_typed(nir_cf_node, node, node, &impl->body)
++      declare_ssa_values(ctx, node, NULL);
++}
++
+ /* Emitted as uint words rather than individual bytes to keep the
+  * generated source small.
+  */
+-- 
+2.56.0
+
