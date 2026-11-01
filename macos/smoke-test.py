@@ -275,31 +275,31 @@ def test_game(game, runtime, seconds, out, tool):
 
 def verdict(r):
     if r["crash"] or r["dumps"] or not r["window"]:
-        return "Absturz" if (r["crash"] or r["dumps"]) else "kein Fenster"
+        return "crash" if (r["crash"] or r["dumps"]) else "no window"
     if r["device_lost"]:
-        return "Gerät verloren"
+        return "device lost"
     if not r["running"]:
-        return "beendet"
+        return "exited"
     if r["brightness"] is not None and r["brightness"] < 4:
-        return "schwarzes Bild"
+        return "black image"
     # An error message or a launcher rather than the game, check the picture
     if r.get("window_area", 0) < 600 * 400:
-        return "Meldung oder Launcher"
+        return "message or launcher"
     if r["pipelines"] or r["shaders_failed"]:
-        return "läuft, Shader-Fehler"
-    return "läuft"
+        return "runs, shader errors"
+    return "runs"
 
 
 def write_report(results, out, runtime):
-    lines = [f"# Starttest {os.path.basename(out)}", "", f"Laufzeit: `{runtime}`", "",
-             "| Spiel | API | Ergebnis | Pipelines gescheitert | Shader abgelehnt | Gerät verloren | Bild |",
+    lines = [f"# Smoke test {os.path.basename(out)}", "", f"Runtime: `{runtime}`", "",
+             "| Game | API | Result | Pipelines failed | Shaders rejected | Device lost | Image |",
              "|---|---|---|---|---|---|---|"]
     for r in results:
-        shot = f"[Bild]({os.path.basename(r['screenshot'])})" if r["screenshot"] else "–"
+        shot = f"[image]({os.path.basename(r['screenshot'])})" if r["screenshot"] else "–"
         lines.append(f"| {r['name']} | {r['api']} | {verdict(r)} | {r['pipelines']} | "
-                     f"{r['shaders_failed']} von {r['shaders']} | {r['device_lost']} | {shot} |")
+                     f"{r['shaders_failed']} of {r['shaders']} | {r['device_lost']} | {shot} |")
     for r in results:
-        details = [f"- {e}" for e in r["shader_errors"]] + [f"- Crash-Dump: `{d}`" for d in r["dumps"]]
+        details = [f"- {e}" for e in r["shader_errors"]] + [f"- crash dump: `{d}`" for d in r["dumps"]]
         if details:
             lines += ["", f"## {r['name']}", ""] + details
     with open(os.path.join(out, "report.md"), "w") as f:
@@ -321,9 +321,9 @@ def main():
                  and os.path.isfile(os.path.join(g["installDir"], g["executable"]))]
     games = [g for g in installed if not opts.appids or g["appID"] in opts.appids]
     if not games:
-        sys.exit("Keine passenden installierten Spiele.")
+        sys.exit("No matching installed games.")
     if not steam_running():
-        sys.exit("Steam läuft nicht, erst starten und anmelden.")
+        sys.exit("Steam is not running; start it and sign in first.")
 
     out = opts.o or os.path.join(SUPPORT, "smoke-tests", datetime.datetime.now().strftime("%Y-%m-%d-%H%M"))
     os.makedirs(out, exist_ok=True)
@@ -334,7 +334,7 @@ def main():
     results = []
     for game in games:
         while windows_game_running() or steamcmd_running():
-            print("Warte, es läuft ein Spiel oder steamcmd …", flush=True)
+            print("Waiting, a game or steamcmd is running …", flush=True)
             time.sleep(60)
         print(f"{game['name']} …", flush=True)
         r = test_game(game, opts.r, opts.t, out, tool)

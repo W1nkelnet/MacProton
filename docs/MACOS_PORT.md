@@ -1,323 +1,323 @@
-# Proton auf macOS – Portierungs-Roadmap
+# Proton on macOS – porting roadmap
 
-Branch: `macos-port` (abgezweigt von `proton_11.0`, seit Ende Oktober 2026 auf Protons `bleeding-edge`)
+Branch: `macos-port` (branched from `proton_11.0`, on Proton's `bleeding-edge` since late October 2026)
 
-Stand der Komponenten:
+State of the components:
 
-| Komponente | Version |
+| Component | Version |
 |---|---|
 | Wine | 11.0, Proton `bleeding-edge` (674d3cdd) |
-| DXVK | `master` (0cfe089, meldet 3.1.1), dxbc-spirv 687a301 |
+| DXVK | `master` (0cfe089, reports 3.1.1), dxbc-spirv 687a301 |
 | vkd3d-proton | 3.1 (4522cc1) |
-| MoltenVK | `main` nach 1.4.2 (5189f8de), SPIRV-Cross aa217aeb |
+| MoltenVK | `main` after 1.4.2 (5189f8de), SPIRV-Cross aa217aeb |
 
-Khronos hat MoltenVK im Oktober 2026 abgekündigt und empfiehlt auf Apple
-Silicon KosmicKrisp, einen Vulkan-Treiber aus Mesa auf Metal 4 (macOS 26+).
-MacProton baut beide (`build.sh`-Schritt `kosmickrisp`, Mesa daa925c3 mit
-`macos/patches/mesa`) und nimmt ab macOS 26 KosmicKrisp als Standard;
-MoltenVK bleibt wählbar in den Einstellungen und pro Spiel in den
-Startoptionen (`MACPROTON_VULKAN_DRIVER` in `run.sh`).
+Khronos deprecated MoltenVK in October 2026 and recommends KosmicKrisp on
+Apple silicon, a Vulkan driver from Mesa on Metal 4 (macOS 26+). MacProton
+builds both (`build.sh` step `kosmickrisp`, Mesa daa925c3 with
+`macos/patches/mesa`) and uses KosmicKrisp as the default from macOS 26 on;
+MoltenVK stays selectable in Settings and per game in its launch options
+(`MACPROTON_VULKAN_DRIVER` in `run.sh`).
 
-KosmicKrisp für MacProton:
-- Gebaut werden die Werkzeuge `mesa_clc` und `kk_clc` nativ (Homebrew-LLVM, libclc, SPIRV-LLVM-Translator), der Treiber dann für x86_64 ohne LLVM, weil Wine unter Rosetta läuft
-- Wine lädt `libMoltenVK.dylib` direkt und ruft `vkGetInstanceProcAddr`; KosmicKrisp ist ein Loader-ICD. `macos/kosmickrisp/shim.c` heißt deshalb `libMoltenVK.dylib`, verhandelt die ICD-Schnittstelle und reicht weiter, dazu `vkGetDeviceProcAddr` und `vkCreateMetalSurfaceEXT`, an dem Wine `VK_EXT_metal_surface` erkennt
-- Mesa-Patch 0001: `fillModeNonSolid` (Metal zeichnet Dreieckskanten als Linien, Punkte nicht), ohne das lehnt DXVK das Gerät ab; Timestamp-Pools über 4096 Einträge auf mehrere Metal-Counter-Heaps verteilt (Unreal mit D3D12 legt 8192 an, sonst „Out of video memory“)
-- vkd3d-Patch 0008: vkd3d behandelt KosmicKrisp wie MoltenVK als Portability-Gerät und startet auch ohne die Funktionen, die beiden fehlen
-- Mesa-Patches 0002 und 0003: Transform Feedback (`VK_EXT_transform_feedback`), also Stream Output für D3D11 und D3D12 und die Grundlage für OpenGL über Zink. Mesas `poly`-Bibliothek, mit der KosmicKrisp Geometry Shader nachbildet, schreibt die Vertices schon aus dem Raster-Shader des GS; der Treiber behält jetzt ihre Zähl- und Pre-GS-Programme, führt sie bei aktivem Transform Feedback vor dem GS aus und hat Puffer-Bindungen, Zähler und `vkCmdDrawIndirectByteCountEXT`. Fängt der Vertex- oder Tessellation-Shader ab (vkd3d, Zink), hängt der Treiber `poly`s Durchreich-GS an. Mehrere Streams und Puffer gehen, ebenso Transform-Feedback-Queries (Mesa-Patch 0004, dazu Pipeline-Statistik-Pools, die DXVK ungeprüft anlegt; sie melden Nullen). Behoben in `poly`: Ein GS-Aufruf ohne Ausgabe erzeugt bei Seiteneffekten ein Ersatz-Primitiv, dessen Vertices sonst die des nächsten Aufrufs überschrieben. Test: `macos/tests/kosmickrisp-xfb/run.sh` (statische und dynamische Vertexzahl, indirekt, Instanzen, zwei Streams, Überlauf, Fortsetzen über den Zähler, VS und TES, Pipeline-Cache)
-- Mesa-Patch 0007: MetalFX-Hochskalierung auch auf KosmicKrisp. Mit `MESA_WSI_METAL_UPSCALING=metalfx` (run.sh setzt es aus `MVK_CONFIG_UPSCALING`) bekommen die Drawables die Pixelgröße des Fensters auf dem Bildschirm, beim Präsentieren skaliert `MTL4FXSpatialScaler` in eine private Textur, die ins Drawable kopiert wird, Alpha auf 1. Patch 0006: `MESA_WSI_METAL_FILTER=nearest` für „Pixelgenau“. Test: `macos/tests/kosmickrisp-present/run.sh`; Forager 1280×720 → 2560×1440
-- Mesa-Patch 0005: `MESA_KK_LIGHT_BARRIERS` (Experiment, aus): Render-Encoder enden ohne Barriere, Barrieren der Anwendung warten am nächsten Encoder
-- Mesa-Patch 0008: `vkWaitForPresent` kehrt zurück, sobald das Bild auf der GPU im Drawable ist, wie bei MoltenVK. Das Warten auf den `presentedHandler` kostete einen Vsync: vkd3d begrenzt seine Frame-Latenz mit Present-Waits, Medieval Dynasty lief mit 30 statt 60 fps bei halb leerer GPU. `MESA_WSI_METAL_PRESENT_WAIT=displayed` stellt das alte Verhalten her
-- Mesa-Patch 0009 und `MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION=1` in run.sh: Metal übersetzt sonst nur wenige Shader gleichzeitig. Devolverland Expo blieb auf KosmicKrisp hängen, weil `dxvk-cs` beim Pipeline-Bau hinter DXVKs Hintergrund-Übersetzungen wartete, bis Unreal nach 120 s aufgab
-- Getestet: alle zehn Spiele, die unter MoltenVK laufen, laufen auch auf KosmicKrisp bis ins Menü (Starttests `start-12`, `start-13`). GPU-Zeit im Hauptmenü nach 100 s, gemessen mit `macos/gpu-trace.py`:
+KosmicKrisp for MacProton:
+- The tools `mesa_clc` and `kk_clc` are built natively (Homebrew LLVM, libclc, SPIRV-LLVM-Translator), the driver then for x86_64 without LLVM, because Wine runs under Rosetta
+- Wine loads `libMoltenVK.dylib` directly and calls `vkGetInstanceProcAddr`; KosmicKrisp is a loader ICD. `macos/kosmickrisp/shim.c` is therefore called `libMoltenVK.dylib`, negotiates the ICD interface and passes calls on, plus `vkGetDeviceProcAddr` and `vkCreateMetalSurfaceEXT`, by which Wine recognizes `VK_EXT_metal_surface`
+- Mesa patch 0001: `fillModeNonSolid` (Metal draws triangle edges as lines, points not); without it DXVK rejects the device. Timestamp pools over 4096 entries are spread over several Metal counter heaps (Unreal with D3D12 creates 8192, otherwise “Out of video memory”)
+- vkd3d patch 0008: vkd3d treats KosmicKrisp like MoltenVK as a portability device and starts without the features both lack
+- Mesa patches 0002 and 0003: transform feedback (`VK_EXT_transform_feedback`), that is stream output for D3D11 and D3D12 and the base for OpenGL through Zink. Mesa's `poly` library, with which KosmicKrisp emulates geometry shaders, already writes the vertices from the GS's raster shader; the driver now keeps its count and pre-GS programs, runs them before the GS while transform feedback is active, and has buffer bindings, counters and `vkCmdDrawIndirectByteCountEXT`. If the vertex or tessellation shader captures (vkd3d, Zink), the driver appends `poly`'s pass-through GS. Multiple streams and buffers work, as do transform feedback queries (Mesa patch 0004, plus pipeline statistics pools, which DXVK creates unchecked; they report zeros). Fixed in `poly`: a GS invocation without output creates a stand-in primitive on side effects, whose vertices otherwise overwrote those of the next invocation. Test: `macos/tests/kosmickrisp-xfb/run.sh` (static and dynamic vertex count, indirect, instances, two streams, overflow, resuming through the counter, VS and TES, pipeline cache)
+- Mesa patch 0007: MetalFX upscaling on KosmicKrisp too. With `MESA_WSI_METAL_UPSCALING=metalfx` (run.sh sets it from `MVK_CONFIG_UPSCALING`) the drawables get the pixel size of the window on screen; on present, `MTL4FXSpatialScaler` scales into a private texture that is copied into the drawable, alpha set to 1. Patch 0006: `MESA_WSI_METAL_FILTER=nearest` for “Pixel-exact”. Test: `macos/tests/kosmickrisp-present/run.sh`; Forager 1280×720 → 2560×1440
+- Mesa patch 0005: `MESA_KK_LIGHT_BARRIERS` (experiment, off): render encoders end without a barrier, the application's barriers wait at the next encoder
+- Mesa patch 0008: `vkWaitForPresent` returns as soon as the image is in the drawable on the GPU, as with MoltenVK. Waiting for the `presentedHandler` cost a vsync: vkd3d limits its frame latency with present waits, and Medieval Dynasty ran at 30 instead of 60 fps with a half-idle GPU. `MESA_WSI_METAL_PRESENT_WAIT=displayed` restores the old behavior
+- Mesa patch 0009 and `MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION=1` in run.sh: otherwise Metal compiles only a few shaders at once. Devolverland Expo hung on KosmicKrisp because `dxvk-cs` waited behind DXVK's background compiles while building pipelines until Unreal gave up after 120 s
+- Tested: all ten games that run under MoltenVK also run on KosmicKrisp up to their menu (smoke tests `start-12`, `start-13`). GPU time in the main menu after 100 s, measured with `macos/gpu-trace.py`:
 
-  | Spiel | MoltenVK | KosmicKrisp | mit `MESA_KK_LIGHT_BARRIERS` |
+  | Game | MoltenVK | KosmicKrisp | with `MESA_KK_LIGHT_BARRIERS` |
   |---|---|---|---|
-  | Medieval Dynasty (D3D12) | 13,0 ms/Bild, 59 fps | 12,4 ms/Bild, 59 fps (mit Patch 0008) | 17,3 ms/Bild vor Patch 0008 statt 21,1 |
-  | Horizon Zero Dawn (D3D12) | 6,45 ms/Bild | 6,83 ms/Bild | 6,35 ms/Bild |
-  | Green Hell (D3D11) | 53 ms/Bild, 18 fps | 9,4 ms/Bild, 34 fps | 10,9 ms/Bild |
-  | Raft (D3D11), GPU-Last | 761 ms/s | 390 ms/s | – |
-  | Kebab Chefs (D3D11), GPU-Last | 795 ms/s | 474 ms/s | 554 ms/s |
+  | Medieval Dynasty (D3D12) | 13.0 ms/frame, 59 fps | 12.4 ms/frame, 59 fps (with patch 0008) | 17.3 ms/frame before patch 0008 instead of 21.1 |
+  | Horizon Zero Dawn (D3D12) | 6.45 ms/frame | 6.83 ms/frame | 6.35 ms/frame |
+  | Green Hell (D3D11) | 53 ms/frame, 18 fps | 9.4 ms/frame, 34 fps | 10.9 ms/frame |
+  | Raft (D3D11), GPU load | 761 ms/s | 390 ms/s | – |
+  | Kebab Chefs (D3D11), GPU load | 795 ms/s | 474 ms/s | 554 ms/s |
 
-  Bei Raft und Kebab Chefs fehlen im Trace unter KosmicKrisp die Bildnummern, dort zählt nur die GPU-Last pro Sekunde
-- Mesa-Patch 0010: Presents laufen über eine eigene Metal-Queue. Metal-4-Queues warten auf der GPU, bis das Display ein Drawable freigibt; auf der Haupt-Queue hielt das alle Arbeit dahinter auf, auch das nächste Bild, und die GPU lag halb still. `MESA_KK_PRESENT_QUEUE=0` stellt das alte Verhalten her
-- Mesa-Patch 0011: Die Swapchain gilt erst als suboptimal, wenn sich die Größe der Ebene ändert, wie bei MoltenVK. Vorher meldete jedes Present `VK_SUBOPTIMAL_KHR`, sobald ein Spiel kleiner als das Fenster rendert, und vkd3d legte die Swapchain in Medieval Dynasty rund 10.000-mal in zwei Minuten neu an
-- Mesa-Patch 0012: `MESA_WSI_METAL_FPS=1` schreibt jede Sekunde die Bilder pro Sekunde nach stderr. Die Metal-Anzeige zählt auch, kostet aber Zeit pro Encoder auf dem Thread, der sie anlegt, unter KosmicKrisp also auf DXVKs CS-Thread, und verzerrt den Vergleich der Treiber (Kebab Chefs, Menü: KosmicKrisp 20,4 und MoltenVK 33,1 fps mit Anzeige, 19,7 und 22,0 ohne)
-- Mesa-Patches 0013 und 0016: KosmicKrisp legt Mesas Shader-Cache auf der Platte an, `run.sh` unter `~/Library/Caches/MacProton/mesa_shader_cache` mit bis zu 4 GB. Ohne ihn übersetzte jeder Start alle Shader neu nach MSL, rund 15 ms CPU pro Pipeline unter Rosetta; Metal cacht die daraus übersetzten Bibliotheken selbst. Dem Gerät fehlte dafür ein Speicher-Cache, und der Name des Caches las 16 Bytes hinter der Build-ID mit, die sich von Start zu Start unterschieden. Horizon Zero Dawn übersetzt im Hauptmenü rund 23.000 Pipelines vor: Beim ersten Start schafft KosmicKrisp etwa 200 pro Minute, beim zweiten kommen die bekannten 5.800 in unter einer Minute aus den Caches
-- Mesa-Patch 0014: `MESA_KK_COMPILE_STATS=1` schreibt alle zwei Sekunden, wie viele Pipelines übersetzt und wie viele aus dem Cache kamen, und wie lange MSL-Erzeugung, Metal-Bibliotheken und Metal-Pipelines dauerten, summiert über alle Threads
-- Mesa-Patch 0015: Das MSL fertiger Pipelines bleibt mit LZFSE komprimiert im Speicher (Apples libcompression, 6,5-fach kleiner, 1 ms pro 225 KB unter Rosetta) und wird nur zum Serialisieren entpackt. Horizon Zero Dawn belegte mit 23.000 Pipelines rund 18 GB und lagerte auf 16 GB aus; jetzt bleibt es nach 9.500 Pipelines bei 4,2 GB, etwa 32 statt 420 KB pro Pipeline
-- Mesa-Patch 0017 (durch 0020 ersetzt): `MESA_KK_NULL_IMAGE_SELECT=1` liest Bilder und Texturen auch über leere Descriptoren und wählt dann null, statt jeden Zugriff in eine Verzweigung zu packen. Horizon Zero Dawns größter Compute-Shader (4.126 Texturzugriffe) braucht im Metal-Frontend 8,6 statt 14,4 s; der M3 liest über eine leere Ressourcen-ID ohne Fehler. Aus, weil die Verzweigung die Zugriffe überspringt und vkd3d viele leere Descriptoren bindet: Medieval Dynasty lief mit 15–20 statt 22 fps
-- Mesa-Patch 0018: Das MSL deklariert seine SSA-Werte ohne Null-Initialisierung; jeder wird vor dem Lesen geschrieben. Die Nullen machten ein Zehntel des Texts aus: 40 Shader aus Horizon Zero Dawn übersetzt Metal 9 % schneller, den größten in 17,2 statt 24,9 s
-- Mesa-Patch 0020: Lesezugriffe über leere Descriptoren lesen eine genullte 1×1-Textur gleichen Typs (je Dimension für float, int und uint), deren Ressourcen-IDs in der Root-Tabelle stehen, statt jeden Zugriff zu verzweigen. Ersetzt 0017. Größenabfragen, Schreibzugriffe, Atomics, Tiefenvergleiche, Sparse und Multisample verzweigen weiter; anders als ein leerer Descriptor liefert die Textur nur dort etwas, wo der Sampler seine Randfarbe liefert. Rise of the Tomb Raider (DX12, Hoch, 1710×1107, warme Caches): 24,2 statt 18,6 fps im Mittel der drei Benchmark-Szenen. `MESA_KK_NULL_TEXTURES=0` verzweigt wie vorher
-- Mesa-Patches 0019 und 0021: Texel-Buffer im Format R32G32B32, die D3D12 für typisierte Buffer-SRVs voraussetzt und Metal nicht kennt, sind R32-Texel-Buffer dreifacher Breite; ihr Descriptor (für Texel-Buffer jetzt 16 Byte) markiert sie, und Lesezugriffe holen die drei Komponenten einzeln. Vorher stürzte Rise of the Tomb Raiders Benchmark in `vkCreateBufferView` ab, auf MoltenVK tut er es weiterhin; 0019 lässt Buffer-Views unbekannter Formate scheitern statt abzustürzen
-- Mesa-Patch 0022: Ein Festplatten-Cache für den ganzen Prozess, der bis zu dessen Ende lebt. Rise of the Tomb Raiders Launcher hing gelegentlich in `vkDestroyInstance`, weil der Abbau des Caches auf seine Schreib-Threads wartete, die nie aufwachten
-- Mesa-Patches 0023 und 0025: `MESA_KK_COMPILE_STATS=1` nennt Shader, deren Absenkung oder Übersetzung länger als eine Sekunde dauert, und die CPU-Zeit der MSL-Erzeugung (über `thread_info`; `CLOCK_THREAD_CPUTIME_ID` meldet unter Rosetta fast nichts). Rise of the Tomb Raiders Tessellation-Control-Shader brauchen je 12 s, vor allem wartend, während Metals Compiler-Prozesse alle Kerne belegen; die CPU-Zeit der MSL-Erzeugung liegt bei rund 6 ms pro Pipeline
-- Mesa-Patch 0024: MSL ohne `vsnprintf` für `%d`, `%i`, `%u`, `%s` und `%c`, das unter Rosetta die Hälfte von `nir_to_msl` ausmachte. Bis ins Hauptmenü von Rise of the Tomb Raider (2.007 Pipelines) 12,3 statt 13,6 s CPU, Byte für Byte dasselbe MSL
-- Mesa-Patch 0026: `MESA_KK_CACHE_BUILD_ID` benennt die Shader-Caches für die Entwicklung selbst, damit Builds, die den Shader-Compiler nicht ändern, die Caches eines früheren weiter nutzen. Sonst beginnt jeder Build mit leeren Caches, und Rise of the Tomb Raider braucht zehn Minuten zum Aufwärmen
-- Mesa-Patch 0027: Die Tessellations-Nachbildung füllt die SIMD-Gruppen. Der Tessellator lief mit einem Patch pro Threadgroup, der TCS mit einem Patch pro Threadgroup seiner Ausgabe-Vertices, also mit 1–4 von 32 Lanes; jetzt 64 Patches pro Gruppe im Tessellator und so viele Patches im TCS, wie in 32 Lanes passen. Indirekte Draws starteten VS und TCS mit 64- bzw. n-mal zu vielen Threads, die TCS-Threads lasen und schrieben dabei hinter den Patches. Berggipfel (tesselliert den Schnee), warme Caches, abwechselnd mit Abkühlpausen: 30,6/30,8 statt 29,2/28,9 fps; ohne die Tessellation des Spiels 38 fps
-- Mesa-Patch 0028: Große Allokationen der Command Buffer (über 128 KB, Tessellation und Geometry Shader nehmen sie bei jedem Draw) behält der Command Pool in Zweierpotenz-Größen bis 64 MB zur Wiederverwendung; vorher wurde jede ein neuer Metal-Heap im Residency-Set, was in den tessellierten Szenen ein Sechstel eines Render-Threads kostete. Außerdem initialisierte der Pool seinen Zähler freier kleiner Puffer nicht. Berggipfel: 32,3/32,1 statt 31,0/30,7 fps
-- Erster Start von Horizon Zero Dawn mit leeren Caches nach den Patches 0018–0028: 8.288 statt 5.159 Pipelines in 25 Minuten, Metals Compiler 0,9 statt 1,3 s pro Pipeline, Speicher konstant bei 4,1 GB. Das MSL ist im Median 65 statt 81 KB groß, der größte Shader 1,9 statt 4,0 MB
-- Mesa-Patch 0029: Metal baut die Pipelines auf einer Compile-Queue des Geräts mit einem Thread pro Kern. Vorher wartete `vkCreate*Pipelines` auf Metal, ein Spiel übersetzte also höchstens so viele Pipelines gleichzeitig, wie es Threads dafür hat; Horizon Zero Dawn hat sechs. Das MSL entsteht weiter beim Anlegen, Bibliotheken und Pipeline-States danach im Hintergrund. Wer einen Shader bindet, wartet auf ihn oder baut ihn selbst, wenn die Queue ihn noch nicht angefangen hat; Draws und Dispatches mit einer Pipeline, die Metal nicht bauen konnte, entfallen. Erster Start von Horizon Zero Dawn mit leeren Caches, 15 Minuten: Metal baute 8.644 statt 4.240 Pipelines, sein Compiler belegte 6,4 statt 3,3 Kerne, der Speicher stieg mit den dreimal so vielen angelegten Pipelines auf 5,3 GB. Rise of the Tomb Raider mit warmen Caches unverändert bei 27,1 fps
-- Mesa-Patch 0031: Ein Shader wartet beim Zerstören nicht mehr auf seinen Metal-Build. Horizon Zero Dawn zerstört beim Laden Pipelines, deren Builds in der Queue hinter Tausenden anderen standen; der Ladebildschirm lief deshalb mit 0,1 fps. Jetzt hält der Build eine Referenz, ein noch nicht begonnener Build wird aufgegeben und das MSL sofort freigegeben, die letzte Referenz gibt den Shader frei. `util_queue_finish` taugt beim Zerstören des Geräts nicht dafür, weil es alle Threads, die die Queue anlegen könnte, an einer Barriere erwartet; das Gerät zählt seine offenen Builds selbst. Erster Start von Horizon: Ladebildschirm mit rund 50 statt 0,1 fps, das Spiel kommt in die Welt und stellt sie richtig dar. Der Speicher wächst mit den fertig gebauten Pipelines (rund 0,55 MB je Pipeline-State, 9,2 GB bei 15.800), solange Metal den Rückstand abarbeitet, läuft das Spiel mit etwa 10 fps
-- Mesa-Patch 0032: SSA-Werte werden in der innersten Schleife deklariert, die alle ihre Verwendungen enthält, statt am Funktionsanfang. Metals Compiler führt sonst in einer Waterfall-Schleife (`simd_broadcast_first`, dann `if (v == first) { simd_sum; break; }`) den abbrechenden Zweig mit allen Threads der SIMD-Gruppe aus, sobald `first` außerhalb der Schleife deklariert ist. Alle 928 Wave-Tests von vkd3d-proton bestehen, vorher scheiterte `test_shader_waveop_maximal_convergence`
-- Mesa-Patch 0033: 2D- und 2D-Array-Views bekommen zusätzlich eine Metal-View des jeweils anderen Typs (für Arrays die erste Schicht), der Deskriptor trägt beide IDs (die Array-ID im bisherigen Padding), `texture2d_array`-Deklarationen laden die Array-ID. D3D12-Spiele binden Array-Views an Texture2D und umgekehrt, andere APIs lesen dann die erste Schicht, Metal liest Unsinn. Behebt Unreal Engine 5 mit D3D12 (siehe unten)
-- Im Spiel, gleicher Spielstand und Blickwinkel, M3 mit 16 GB, Fenster 1710×1107 Punkte, ohne Metal-Anzeige. Bilder pro Sekunde über 30 s aus `MESA_WSI_METAL_FPS=1` bzw. `MVK_CONFIG_PERFORMANCE_TRACKING=1` (ausgewertet mit `macos/fps.py`), GPU-Last aus dem Metal System Trace:
+  For Raft and Kebab Chefs the trace lacks frame numbers under KosmicKrisp, so only the GPU load per second counts there
+- Mesa patch 0010: presents go through a Metal queue of their own. Metal 4 queues wait on the GPU until the display releases a drawable; on the main queue this held up all work behind it, including the next frame, and the GPU sat half idle. `MESA_KK_PRESENT_QUEUE=0` restores the old behavior
+- Mesa patch 0011: the swapchain counts as suboptimal only when the layer's size changes, as with MoltenVK. Before, every present returned `VK_SUBOPTIMAL_KHR` as soon as a game rendered smaller than its window, and vkd3d recreated the swapchain about 10,000 times in two minutes in Medieval Dynasty
+- Mesa patch 0012: `MESA_WSI_METAL_FPS=1` writes the frames per second to stderr every second. The Metal HUD counts too, but costs time per encoder on the thread creating it, under KosmicKrisp that is DXVK's CS thread, and skews the comparison of the drivers (Kebab Chefs, menu: KosmicKrisp 20.4 and MoltenVK 33.1 fps with the HUD, 19.7 and 22.0 without)
+- Mesa patches 0013 and 0016: KosmicKrisp creates Mesa's shader cache on disk, `run.sh` puts it in `~/Library/Caches/MacProton/mesa_shader_cache` with up to 4 GB. Without it every start compiled all shaders to MSL again, about 15 ms CPU per pipeline under Rosetta; Metal caches the libraries compiled from it itself. The device lacked a memory cache for this, and the cache's name read 16 bytes past the build ID, which differed from start to start. Horizon Zero Dawn precompiles about 23,000 pipelines in its main menu: on the first start KosmicKrisp manages about 200 per minute, on the second the known 5,800 come from the caches in under a minute
+- Mesa patch 0014: `MESA_KK_COMPILE_STATS=1` writes every two seconds how many pipelines were compiled and how many came from the cache, and how long MSL generation, Metal libraries and Metal pipelines took, summed over all threads
+- Mesa patch 0015: the MSL of finished pipelines stays compressed in memory with LZFSE (Apple's libcompression, 6.5 times smaller, 1 ms per 225 KB under Rosetta) and is decompressed only for serializing. Horizon Zero Dawn took about 18 GB with 23,000 pipelines and swapped on 16 GB; now it stays at 4.2 GB after 9,500 pipelines, about 32 instead of 420 KB per pipeline
+- Mesa patch 0017 (replaced by 0020): `MESA_KK_NULL_IMAGE_SELECT=1` reads images and textures through empty descriptors too and then selects zero, instead of wrapping every access in a branch. Horizon Zero Dawn's largest compute shader (4,126 texture accesses) takes 8.6 instead of 14.4 s in Metal's front end; the M3 reads through an empty resource ID without faulting. Off, because the branch skips the accesses and vkd3d binds many empty descriptors: Medieval Dynasty ran at 15–20 instead of 22 fps
+- Mesa patch 0018: the MSL declares its SSA values without zero initialization; each is written before it is read. The zeros made up a tenth of the text: Metal compiles 40 shaders from Horizon Zero Dawn 9 % faster, the largest in 17.2 instead of 24.9 s
+- Mesa patch 0020: reads through empty descriptors read a zeroed 1×1 texture of the same type (per dimension for float, int and uint), whose resource IDs are in the root table, instead of branching on every access. Replaces 0017. Size queries, writes, atomics, depth comparisons, sparse and multisample still branch; unlike an empty descriptor, the texture returns something only where the sampler returns its border color. Rise of the Tomb Raider (DX12, High, 1710×1107, warm caches): 24.2 instead of 18.6 fps on average over the three benchmark scenes. `MESA_KK_NULL_TEXTURES=0` branches as before
+- Mesa patches 0019 and 0021: texel buffers in the format R32G32B32, which D3D12 requires for typed buffer SRVs and Metal does not know, are R32 texel buffers of three times the width; their descriptor (now 16 bytes for texel buffers) marks them, and reads fetch the three components one by one. Before, Rise of the Tomb Raider's benchmark crashed in `vkCreateBufferView`, and on MoltenVK it still does; 0019 makes buffer views of unknown formats fail instead of crashing
+- Mesa patch 0022: one disk cache for the whole process, living until its end. Rise of the Tomb Raider's launcher hung now and then in `vkDestroyInstance`, because tearing down the cache waited for its writer threads, which never woke up
+- Mesa patches 0023 and 0025: `MESA_KK_COMPILE_STATS=1` names shaders whose lowering or compiling takes longer than a second, and the CPU time of MSL generation (through `thread_info`; `CLOCK_THREAD_CPUTIME_ID` reports almost nothing under Rosetta). Rise of the Tomb Raider's tessellation control shaders take 12 s each, mostly waiting while Metal's compiler processes occupy all cores; the CPU time of MSL generation is about 6 ms per pipeline
+- Mesa patch 0024: MSL without `vsnprintf` for `%d`, `%i`, `%u`, `%s` and `%c`, which made up half of `nir_to_msl` under Rosetta. Up to the main menu of Rise of the Tomb Raider (2,007 pipelines) 12.3 instead of 13.6 s CPU, byte for byte the same MSL
+- Mesa patch 0026: `MESA_KK_CACHE_BUILD_ID` names the shader caches for development, so that builds which do not change the shader compiler keep using the caches of an earlier one. Otherwise every build starts with empty caches, and Rise of the Tomb Raider needs ten minutes to warm up
+- Mesa patch 0027: the tessellation emulation fills the SIMD groups. The tessellator ran with one patch per threadgroup, the TCS with one patch per threadgroup of its output vertices, that is with 1–4 of 32 lanes; now 64 patches per group in the tessellator and as many patches in the TCS as fit into 32 lanes. Indirect draws started VS and TCS with 64 or n times too many threads, and the TCS threads read and wrote past the patches. Mountain peak (tessellates the snow), warm caches, alternating with cool-down pauses: 30.6/30.8 instead of 29.2/28.9 fps; without the game's tessellation 38 fps
+- Mesa patch 0028: the command pool keeps large command buffer allocations (over 128 KB, which tessellation and geometry shaders take on every draw) in power-of-two sizes up to 64 MB for reuse; before, each became a new Metal heap in the residency set, which cost a sixth of a render thread in the tessellated scenes. Also, the pool did not initialize its counter of free small buffers. Mountain peak: 32.3/32.1 instead of 31.0/30.7 fps
+- First start of Horizon Zero Dawn with empty caches after patches 0018–0028: 8,288 instead of 5,159 pipelines in 25 minutes, Metal's compiler 0.9 instead of 1.3 s per pipeline, memory constant at 4.1 GB. The MSL has a median size of 65 instead of 81 KB, the largest shader 1.9 instead of 4.0 MB
+- Mesa patch 0029: Metal builds the pipelines on a compile queue of the device with one thread per core. Before, `vkCreate*Pipelines` waited for Metal, so a game compiled at most as many pipelines at once as it has threads for it; Horizon Zero Dawn has six. The MSL is still generated on creation, libraries and pipeline states afterwards in the background. Binding a shader waits for it, or builds it itself if the queue has not started it yet; draws and dispatches with a pipeline Metal could not build are skipped. First start of Horizon Zero Dawn with empty caches, 15 minutes: Metal built 8,644 instead of 4,240 pipelines, its compiler occupied 6.4 instead of 3.3 cores, and memory rose to 5.3 GB with three times as many pipelines created. Rise of the Tomb Raider with warm caches unchanged at 27.1 fps
+- Mesa patch 0031: destroying a shader no longer waits for its Metal build. Horizon Zero Dawn destroys pipelines while loading whose builds were queued behind thousands of others; its loading screen therefore ran at 0.1 fps. Now the build holds a reference, a build not started yet is abandoned and its MSL freed right away, and the last reference frees the shader. `util_queue_finish` cannot be used for this when destroying the device, because it expects every thread the queue may create at a barrier; the device counts its open builds itself. First start of Horizon: loading screen at about 50 instead of 0.1 fps, the game reaches its world and renders it correctly. Memory grows with the finished pipelines (about 0.55 MB per pipeline state, 9.2 GB at 15,800); while Metal works through the backlog, the game runs at about 10 fps
+- Mesa patch 0032: SSA values are declared in the innermost loop that holds all their uses instead of at the top of the function. Otherwise Metal's compiler runs the breaking branch of a waterfall loop (`simd_broadcast_first`, then `if (v == first) { simd_sum; break; }`) with every thread of the SIMD group as soon as `first` is declared outside the loop. All 928 wave tests of vkd3d-proton pass; before, `test_shader_waveop_maximal_convergence` failed
+- Mesa patch 0033: 2D and 2D array views also get a Metal view of the other type (the first layer for arrays), the descriptor carries both IDs (the array ID in former padding), and `texture2d_array` declarations load the array ID. D3D12 games bind array views to Texture2D and the other way round; other APIs then read the first layer, Metal reads garbage. Fixes Unreal Engine 5 with D3D12 (see below)
+- In game, same save and view, M3 with 16 GB, window 1710×1107 points, without the Metal HUD. Frames per second over 30 s from `MESA_WSI_METAL_FPS=1` or `MVK_CONFIG_PERFORMANCE_TRACKING=1` (evaluated with `macos/fps.py`), GPU load from the Metal System Trace:
 
-  | Spiel | MoltenVK | KosmicKrisp ohne Patch 0010 | KosmicKrisp |
+  | Game | MoltenVK | KosmicKrisp without patch 0010 | KosmicKrisp |
   |---|---|---|---|
-  | Medieval Dynasty (D3D12), Dorf | 22,7 fps, GPU 75 % | 14,5 fps, GPU 50 % | 22,1 fps, GPU 64 % |
-  | Green Hell (D3D11), Dschungel | 16,5 fps, GPU 97 % | – | 23,1 fps, GPU 64 % |
-  | Green Hell, Hauptmenü (mit Anzeige) | 12 fps | 21 fps | 29 fps |
-  | Kebab Chefs (D3D11), Menü, Present-Anfragen im Trace | 22,0 fps | – | 19,7 fps |
+  | Medieval Dynasty (D3D12), village | 22.7 fps, GPU 75 % | 14.5 fps, GPU 50 % | 22.1 fps, GPU 64 % |
+  | Green Hell (D3D11), jungle | 16.5 fps, GPU 97 % | – | 23.1 fps, GPU 64 % |
+  | Green Hell, main menu (with HUD) | 12 fps | 21 fps | 29 fps |
+  | Kebab Chefs (D3D11), menu, present requests in the trace | 22.0 fps | – | 19.7 fps |
 
-  Unter KosmicKrisp bleibt die GPU zu einem Drittel leer: KosmicKrisp übersetzt Befehle schon beim Aufzeichnen nach Metal, auf DXVKs CS-Thread, MoltenVK erst beim Abschicken auf dem Submit-Thread. In Kebab Chefs ist `dxvk-cs` dadurch zu knapp 90 % belegt. Raft wechselt zwischen Tag und Nacht und taugt nicht zum Vergleich. Der Benchmark von Horizon Zero Dawn lädt auf 16 GB mit keinem der beiden Treiber: Das Spiel legt beim Laden rund 23.000 Pipelines an, KosmicKrisp hält dafür etwa 9 GB Shader-Quelltext im Speicher und der Mac lagert aus
+  Under KosmicKrisp a third of the GPU stays idle: KosmicKrisp translates commands to Metal already while recording, on DXVK's CS thread, MoltenVK only on submit, on the submit thread. In Kebab Chefs `dxvk-cs` is therefore almost 90 % busy. Raft switches between day and night and is no good for comparisons. Horizon Zero Dawn's benchmark loads on 16 GB with neither driver: the game creates about 23,000 pipelines while loading, KosmicKrisp holds about 9 GB of shader source for them in memory, and the Mac swaps
 
-UE5 mit `-dx12`: Für Shader Model 6.6 verlangt vkd3d 64-Bit-Puffer-Atomics mit allen Operationen und Compute-Shader-Ableitungen. Metal kennt bei 64 Bit nur `atomic_min`/`atomic_max` (Puffer und Texturen, auf dem M3 getestet), kein `add` oder Compare-and-Swap, und keine Ableitungen in Compute-Shadern; SM 6.2 scheitert schon an der Denormal-Steuerung. Vorgaukeln würde nur die Shader scheitern lassen, die es nutzen.
+UE5 with `-dx12`: for shader model 6.6, vkd3d requires 64-bit buffer atomics with all operations and compute shader derivatives. At 64 bits Metal only has `atomic_min`/`atomic_max` (buffers and textures, tested on the M3), no `add` or compare-and-swap, and no derivatives in compute shaders; SM 6.2 already fails on the denormal control. Mesa patch 0030 emulates the missing 64-bit atomics, vkd3d patches 0009–0011 report SM 6.6 and feature level 12_0 on KosmicKrisp, and with Mesa patches 0032 and 0033 UE5 renders with D3D12 (see the open items below).
 
-## Zielbild
+## Goal
 
-Windows-Spiele aus Steam auf Apple-Silicon-Macs starten, mit derselben
-Struktur wie Proton unter Linux: Wine + Übersetzungsschichten für DirectX +
-Brücke zum nativen Steam-Client + `proton`-Startskript.
+Start Windows games from Steam on Apple silicon Macs, with the same structure
+as Proton on Linux: Wine + translation layers for DirectX + a bridge to the
+native Steam client + the `proton` launch script.
 
-## Architekturentscheidungen
+## Architecture decisions
 
-| Thema | Entscheidung | Begründung |
+| Topic | Decision | Reason |
 |---|---|---|
-| CPU-Architektur | Wine als **x86_64**, läuft unter **Rosetta 2**; 32-Bit über **WoW64** (`--enable-archs=i386,x86_64`) | Windows-Spiele sind x86-Code. Natives arm64-Wine auf macOS wird upstream nicht unterstützt (16K-Seiten, ABI). So machen es auch CrossOver und GPTK. |
-| Emulator | FEX entfällt | Rosetta 2 übernimmt die Rolle. |
-| Fenster/Eingabe | `winemac.drv` statt `winex11.drv`/`winewayland.drv` | Ist im Wine-Baum bereits vorhanden. |
-| D3D9–11 | DXVK über **MoltenVK** | Einzige quelloffene Option. Lücken: Transform Feedback, einige Formate; Geometry Shader bildet MoltenVK mit Compute nach. |
-| D3D12 | vkd3d-proton, erste Schritte (siehe Phase 4) | Läuft auf MoltenVK mit Abstrichen, mit Spielen noch ungetestet. |
-| Sync-Primitive | fsync über `os_sync_wait_on_address` (macOS 14.4+, Wine-Patch 0006), sonst wineserver-Sync; ntsync aus | fsync basiert unter Linux auf `futex_waitv`, ntsync auf einem Linux-Kernelmodul. |
-| Build | nativer Build auf macOS statt Docker/Steam-Runtime-Container | Der Linux-Container erzeugt keine Mach-O-Binärdateien. |
+| CPU architecture | Wine as **x86_64**, running under **Rosetta 2**; 32-bit through **WoW64** (`--enable-archs=i386,x86_64`) | Windows games are x86 code. Native arm64 Wine on macOS is not supported upstream (16K pages, ABI). CrossOver and GPTK do the same. |
+| Emulator | No FEX | Rosetta 2 takes that role. |
+| Windows/input | `winemac.drv` instead of `winex11.drv`/`winewayland.drv` | Already exists in the Wine tree. |
+| D3D9–11 | DXVK on **MoltenVK** | The only open-source option. Gaps: transform feedback, some formats; MoltenVK emulates geometry shaders with compute. |
+| D3D12 | vkd3d-proton, first steps (see phase 4) | Runs on MoltenVK with compromises, untested with games so far. |
+| Sync primitives | fsync through `os_sync_wait_on_address` (macOS 14.4+, Wine patch 0006), otherwise wineserver sync; ntsync off | On Linux fsync is based on `futex_waitv`, ntsync on a Linux kernel module. |
+| Build | native build on macOS instead of Docker/Steam Runtime containers | The Linux container produces no Mach-O binaries. |
 
-## Phasen
+## Phases
 
-### Phase 1 – Wine baut und läuft (in Arbeit)
-- [x] Kern-Submodule geholt (`wine`, `dxvk`, `vkd3d-proton`, `vkd3d`, Header, `glslang`)
-- [x] Generierte Quellen (`make_vulkan`, `make_specfiles`) und `configure` erzeugt
-- [x] Protons Wine konfiguriert sich für macOS x86_64 + WoW64 (minimale Abhängigkeiten)
-- [x] Wine kompiliert vollständig (x86_64-Unix + i386/x86_64-PE, ~22 min auf Apple Silicon)
-- [x] Prefix anlegen, 64-Bit- und 32-Bit-(WoW64-)Programme laufen unter Rosetta, `notepad` öffnet über `winemac.drv`
-- [ ] `WINEDLLOVERRIDES="mscoree,mshtml="` ist Pflicht beim Anlegen des Prefix, sonst hängt `wineboot` am Mono/Gecko-Dialog → ins `proton`-Skript übernehmen (macht Proton unter Linux ebenso)
+### Phase 1 – Wine builds and runs (in progress)
+- [x] Core submodules fetched (`wine`, `dxvk`, `vkd3d-proton`, `vkd3d`, headers, `glslang`)
+- [x] Generated sources (`make_vulkan`, `make_specfiles`) and `configure` created
+- [x] Proton's Wine configures for macOS x86_64 + WoW64 (minimal dependencies)
+- [x] Wine compiles completely (x86_64 Unix + i386/x86_64 PE, ~22 min on Apple silicon)
+- [x] Creating a prefix; 64-bit and 32-bit (WoW64) programs run under Rosetta, `notepad` opens through `winemac.drv`
+- [ ] `WINEDLLOVERRIDES="mscoree,mshtml="` is required when creating the prefix, otherwise `wineboot` hangs at the Mono/Gecko dialog → move into the `proton` script (Proton does the same on Linux)
 
-Bisherige Wine-Anpassungen für macOS (alle per `#ifdef` bzw. configure, Linux-Verhalten unverändert):
+Wine changes for macOS so far (all through `#ifdef` or configure, Linux behavior unchanged):
 
-| Datei | Änderung |
+| File | Change |
 |---|---|
-| `server/fsync.c`, `dlls/ntdll/unix/fsync.c` | Futex-Syscalls nur unter Linux; auf macOS `os_sync_wait_on_address` (Wine-Patch 0006) |
-| `server/inproc_sync.c`, `dlls/ntdll/unix/sync.c` | `ntsync_tmp.h` nur unter Linux → vorhandener Fallback greift |
-| `dlls/ntdll/unix/loader.c` | `malloc.h`/`mallopt(M_PERTURB)` nur mit glibc |
-| `dlls/ntdll/unix/signal_x86_64.c` | `set_thread_teb` nur unter Linux (macOS setzt %gs in `init_syscall_frame`); `jmp *%rcx` statt `jmp %rcx` |
-| `dlls/ntdll/unix/system.c` | sysfs-Helfer für `WINE_CPU_TOPOLOGY` außerhalb Linux als Stubs |
-| `dlls/amd_ags_x64/unixlib.c` | libdrm/amdgpu optional, sonst `STATUS_NOT_SUPPORTED` |
-| `dlls/win32u/opengl.c` | fshack-Framebuffer-Surfaces ohne EGL als inaktive Stubs |
-| `dlls/winegstreamer/media-converter/media-converter.h` | fehlendes `#include <pthread.h>` |
-| `configure.ac` | `loader64` auf Darwin deaktiviert |
-| `server/token.c` | Benutzer-SID aus Hardware-UUID (`gethostuuid`) statt `/etc/machine-id` |
-| `include/wine/server_protocol.h` u. a. | per `tools/make_requests` neu erzeugt |
-- [x] x86_64-Abhängigkeiten selbst gebaut (Homebrew bietet keine Intel-Bottles mehr): MoltenVK, FreeType, GMP, nettle, GnuTLS – alle in `macos/build.sh`, Tarballs gegen feste SHA-256-Summen geprüft
-- [x] GnuTLS: ohne es scheitern in Wine die Signaturprüfung von Zertifikaten (`bcrypt: key_asymmetric_create no encryption support`) und HTTPS über schannel. Folge im Spiel war `Curl error 60: Cert verify failed` (UnityTls nutzt den Windows-Zertifikatsspeicher und dessen Prüfung). Test: `docs/macos/tls-check.c`
-- [x] SDL2 (Controller)
+| `server/fsync.c`, `dlls/ntdll/unix/fsync.c` | futex syscalls only on Linux; on macOS `os_sync_wait_on_address` (Wine patch 0006) |
+| `server/inproc_sync.c`, `dlls/ntdll/unix/sync.c` | `ntsync_tmp.h` only on Linux → the existing fallback applies |
+| `dlls/ntdll/unix/loader.c` | `malloc.h`/`mallopt(M_PERTURB)` only with glibc |
+| `dlls/ntdll/unix/signal_x86_64.c` | `set_thread_teb` only on Linux (macOS sets %gs in `init_syscall_frame`); `jmp *%rcx` instead of `jmp %rcx` |
+| `dlls/ntdll/unix/system.c` | sysfs helpers for `WINE_CPU_TOPOLOGY` as stubs outside Linux |
+| `dlls/amd_ags_x64/unixlib.c` | libdrm/amdgpu optional, otherwise `STATUS_NOT_SUPPORTED` |
+| `dlls/win32u/opengl.c` | fshack framebuffer surfaces without EGL as inactive stubs |
+| `dlls/winegstreamer/media-converter/media-converter.h` | missing `#include <pthread.h>` |
+| `configure.ac` | `loader64` disabled on Darwin |
+| `server/token.c` | user SID from the hardware UUID (`gethostuuid`) instead of `/etc/machine-id` |
+| `include/wine/server_protocol.h` and others | regenerated with `tools/make_requests` |
+- [x] x86_64 dependencies built ourselves (Homebrew no longer offers Intel bottles): MoltenVK, FreeType, GMP, nettle, GnuTLS – all in `macos/build.sh`, tarballs checked against fixed SHA-256 sums
+- [x] GnuTLS: without it, certificate signature checks fail in Wine (`bcrypt: key_asymmetric_create no encryption support`), and so does HTTPS through schannel. In games this showed as `Curl error 60: Cert verify failed` (UnityTls uses the Windows certificate store and its verification). Test: `docs/macos/tls-check.c`
+- [x] SDL2 (controllers)
 
-Hinweis zum Testen: `DYLD_*`-Variablen überleben den Start SIP-geschützter Programme nicht (`/bin/sh`, `/usr/bin/timeout`, `/usr/bin/env`). Sie müssen nach solchen Programmen gesetzt werden – `run.sh` tut das selbst.
+Note on testing: `DYLD_*` variables do not survive starting SIP-protected programs (`/bin/sh`, `/usr/bin/timeout`, `/usr/bin/env`). They have to be set after such programs – `run.sh` does that itself.
 
-### Phase 2 – Build-System
-- [ ] `configure.sh` / `Makefile.in`: Ziel `darwin` ergänzen, Docker-Pfad umgehen
-- [ ] Komponenten, die nur unter Linux Sinn ergeben, abschaltbar machen (FEX, gstreamer-Teile, kaldi/vosk/piper, wineopenxr, vrclient)
-- [ ] `install_name_tool`/rpath-Behandlung statt `LD_LIBRARY_PATH`
-- [ ] Ausgabe als portabler Ordner bzw. `.app`-Bundle
+### Phase 2 – Build system
+- [ ] `configure.sh` / `Makefile.in`: add a `darwin` target, bypass the Docker path
+- [ ] Make components that only make sense on Linux optional (FEX, parts of gstreamer, kaldi/vosk/piper, wineopenxr, vrclient)
+- [ ] `install_name_tool`/rpath handling instead of `LD_LIBRARY_PATH`
+- [ ] Output as a portable folder or `.app` bundle
 
-### Phase 3 – Grafik D3D9–11
+### Phase 3 – Graphics D3D9–11
 
-Gemessen (Apple M3, MoltenVK 1.4.2, Vulkan 1.3.357): MoltenVK erfüllt
-Vulkan 1.3 fast vollständig, für **DXVK 2.7.1** fehlen aber Pflicht-Features –
-DXVK lehnt das Gerät damit komplett ab:
+Measured (Apple M3, MoltenVK 1.4.2, Vulkan 1.3.357): MoltenVK covers Vulkan 1.3
+almost completely, but required features for **DXVK 2.7.1** are missing – DXVK
+rejects the device entirely:
 
-| Fehlt in MoltenVK | Verwendung in DXVK | Pflicht ab |
+| Missing in MoltenVK | Use in DXVK | Required from |
 |---|---|---|
-| `geometryShader` | Geometry Shader | D3D9-Baseline |
-| `shaderCullDistance` | Cull Distances | D3D9-Baseline |
-| `nullDescriptor`, `robustBufferAccess2` | ungebundene Ressourcen | D3D9-Baseline |
-| `VK_EXT_depth_clip_enable` | Depth Clipping | alle |
-| `transformFeedback` | Stream Output | D3D11 |
+| `geometryShader` | geometry shaders | D3D9 baseline |
+| `shaderCullDistance` | cull distances | D3D9 baseline |
+| `nullDescriptor`, `robustBufferAccess2` | unbound resources | D3D9 baseline |
+| `VK_EXT_depth_clip_enable` | depth clipping | all |
+| `transformFeedback` | stream output | D3D11 |
 
-Prüfprogramme: `docs/macos/mvkcheck.c` (Features), `docs/macos/d3d11-nulltest.c` (ungebundene Ressourcen, Swapchain), `docs/macos/d3d11-blendtest.c` (Blending, Texturen, Sampler, Constant Buffer), `docs/macos/d3d11-geomtest.c` (Vertex-/Index-Buffer, Reversed-Z auf D16/D24S8/D32/D32S8).
+Test programs: `docs/macos/mvkcheck.c` (features), `docs/macos/d3d11-nulltest.c` (unbound resources, swapchain), `docs/macos/d3d11-blendtest.c` (blending, textures, samplers, constant buffers), `docs/macos/d3d11-geomtest.c` (vertex/index buffers, reversed Z on D16/D24S8/D32/D32S8).
 
-**DXVK-Anpassungen** (aktiv nur auf Portability-Geräten: `VK_KHR_portability_subset`
-oder Treiber-ID `VK_DRIVER_ID_MOLTENVK` – Wine reicht die Erweiterung nicht an
-Windows-Programme durch; auf Linux bleibt DXVK unverändert streng):
+**DXVK changes** (active only on portability devices: `VK_KHR_portability_subset`
+or driver ID `VK_DRIVER_ID_MOLTENVK` – Wine does not pass the extension on to
+Windows programs; on Linux DXVK stays as strict as before):
 
-| Feature | Ersatzlösung |
+| Feature | Workaround |
 |---|---|
-| `geometryShader`, `shaderCullDistance` | optional; nur Shader, die sie nutzen, schlagen fehl |
-| `depthClipEnable` | Näherung über `depthClampEnable = !depthClip` (wie DXVK 1.x) |
-| `nullDescriptor`, `robustBufferAccess2` | `DxvkNullResources`: null-initialisierte Platzhalter (Puffer, Texel-Views, 1D/2D/3D/Cube-Bilder) pro Kontext, initialisiert im Init-Kommandopuffer |
-| `transformFeedback` | war in D3D11 schon optional |
+| `geometryShader`, `shaderCullDistance` | optional; only shaders that use them fail |
+| `depthClipEnable` | approximated with `depthClampEnable = !depthClip` (as in DXVK 1.x) |
+| `nullDescriptor`, `robustBufferAccess2` | `DxvkNullResources`: zero-initialized placeholders (buffers, texel views, 1D/2D/3D/cube images) per context, initialized in the init command buffer |
+| `transformFeedback` | was already optional in D3D11 |
 
-Ergebnis (Apple M3): DXVK erzeugt ein D3D11-Gerät mit **Feature Level 11_0**
-(11_1 scheitert an `logicOp`, das Metal nicht hat). Testprogramm
-`docs/macos/d3d11-nulltest.c`: ungebundene Textur/Constant Buffer lesen exakt 0,
-120 Frames über die Swapchain – alles bestanden.
+Result (Apple M3): DXVK creates a D3D11 device with **feature level 11_0**
+(11_1 fails on `logicOp`, which Metal does not have). Test program
+`docs/macos/d3d11-nulltest.c`: unbound textures/constant buffers read exactly 0,
+120 frames through the swapchain – all passed.
 
-**wined3d** (Wines eigene D3D-Übersetzung über Apples OpenGL 4.1):
-D3D9-Visual-Tests 211.215 Prüfungen mit 47 (64 Bit) bzw. 48 (32 Bit) Fehlern,
-D3D11-Tests 4.006 Prüfungen mit 15 Fehlern. **Feature Level 11_0 erreicht
-wined3d auf macOS nicht** – für D3D11-Spiele ist DXVK nötig.
+**wined3d** (Wine's own D3D translation on Apple's OpenGL 4.1):
+D3D9 visual tests 211,215 checks with 47 (64-bit) and 48 (32-bit) failures,
+D3D11 tests 4,006 checks with 15 failures. **wined3d does not reach feature
+level 11_0 on macOS** – D3D11 games need DXVK.
 
-Wines eigene D3D11-Testsuite ist für DXVK nicht aussagekräftig: Sie stürzt im
-D3D10-Interop-Pfad (`ID3D10Texture3D_GetDevice`) ab – unabhängig von MoltenVK.
+Wine's own D3D11 test suite says little about DXVK: it crashes in the D3D10
+interop path (`ID3D10Texture3D_GetDevice`) – independently of MoltenVK.
 
-- [ ] winevulkan → MoltenVK (x86_64-Build von MoltenVK nötig)
-- [ ] DXVK mit MinGW für macOS bauen, MoltenVK-Fehlstellen per Konfiguration abfangen
-- [ ] Testspiele aus DX9, DX10, DX11 festlegen und Kompatibilität protokollieren
+- [ ] winevulkan → MoltenVK (needs an x86_64 build of MoltenVK)
+- [ ] Build DXVK with MinGW for macOS, catch MoltenVK's gaps through configuration
+- [ ] Pick test games for DX9, DX10, DX11 and record compatibility
 
 ### Phase 4 – D3D12
-Gewählt ist vkd3d-proton auf MoltenVK (Patches in `macos/patches/vkd3d-proton`, Werte aus `docs/macos/vkd3dcheck.c`):
-- [x] Gerät entsteht trotz fehlendem robustness2, nullDescriptor, Transform Feedback und Texel-Buffer-Ausrichtung; diese Fälle warnen nur
-- [x] Leere Deskriptoren schreibt MoltenVK als `nil`, Metal liest Null. Leere Vertex-Buffer bekommen einen genullten Ersatz-Buffer, weil MoltenVK jeden übergebenen Buffer dereferenziert
-- [x] Feature Level 12_0 auf MoltenVK, obwohl Sparse-Ressourcen (Tiled Resources Tier 0) und Logic Ops fehlen; diese Caps bleiben ehrlich
-- [x] `docs/macos/d3d12-test.c`: Clear, Dreieck, Dreieck mit leerem Vertex-Buffer, Gerät mit Mindest-Feature-Level 12_0, Present über eine DXGI-Swapchain
-- [x] Unreal Engine 5 mit D3D12 (Town To City, UE 5.7, `-dx12` oder ohne Schalter, da UE5 D3D12 dann selbst wählt): rendert auf KosmicKrisp. Nötig waren Feature Level 12_0 (vkd3d-Patch 0011), SM 6.6 mit 64-Bit-Atomics (Mesa-Patch 0030, vkd3d-Patch 0009) und vor allem Mesa-Patch 0033: Vorher zeichnete das Spiel Tiefe, GBuffer, Beleuchtung und TSR korrekt, aber Bloom und Tonemapper lasen die TSR-Ausgabe, ein 2D-Array mit einer Schicht, über eine `texture2d`-Deklaration, und Metal lieferte dann für jede Koordinate denselben Texel; das Bild war eine Fläche in Nebelfarbe. Gefunden mit einer vorübergehenden Spur in KosmicKrisp und vkd3d (Render-Targets, UAVs und SRVs je Pass ausgelesen, MSL einzelner Shader ersetzt); Kompression, Barrieren, Sampler, LOD und Deskriptor-Index waren es nicht. Nanite nutzt das Spiel nicht. Niedrige Einstellungen 22 fps im Spiel (1710×1107)
-- [x] Mesa-Patch 0030: 64-Bit-Atomics auf KosmicKrisp ab Apple9 (M3). Metal kennt nur 64-Bit-`max`/`min` ohne Rückgabewert, auf Buffern und auf RG32Uint-Texturen, die der Shader als `ulong` liest; genau das braucht Nanites Visibility-Buffer. Add, And, Or und Xor auf Buffern laufen als zwei 32-Bit-Atomics (richtiger Wert im Speicher, der zurückgegebene alte Wert kann zerrissen sein), alles andere liest und schreibt nacheinander Lane für Lane einer SIMD-Gruppe, also nur zwischen SIMD-Gruppen nicht atomar. R64_UINT/R64_SINT sind Storage-Images auf RG32Uint. Getestet mit vkd3d-protons Testsuite (`test_shader_sm66_64bit_atomics`: Root-Deskriptor, Raw- und Typed-Tabellen, 96 Prüfungen bestanden); 64-Bit-Atomics auf Groupshared fehlen weiter
-- [x] vkd3d-Patch 0009: vkd3d meldet auf KosmicKrisp SM 6.6. Es fehlten nur Float Controls (Apple-GPUs setzen FP32-Denormals auf null, das ist DXILs Standard) und die Erweiterung für Ableitungen in Compute-Shadern, die KosmicKrisp trotzdem kann; vkd3d macht dieselbe Ausnahme schon für ältere NVIDIA-Treiber. Alle SM-6.x-Tests der Suite bestehen bis auf `test_shader_sm62_denorm` (Denormals werden auch dann auf null gesetzt, wenn der Shader sie behalten will) und `test_shader_sm66_is_helper_lane`. Gebaut als Windows-Programm mit `meson setup … -Denable_tests=true` und `ninja tests/d3d12.exe`, gestartet mit `run.sh --exec`; `VKD3D_TEST_FILTER` wählt Tests aus
-- [x] vkd3d-Patch 0010: Native 16-Bit-Shader-Operationen auf KosmicKrisp. Apple-GPUs behalten FP16-Denormals (gemessen, im schnellen wie im genauen Mathe-Modus von Metal) und rechnen FP16 doppelt so schnell wie FP32. Die 16-Bit- und SM-6.x-Tests laufen damit statt übersprungen zu werden, rund 37 Millionen Prüfungen, und scheitern nur dort, wo sie es vorher schon taten
-- [x] vkd3d-Patch 0011: Feature Level 12_0 auf KosmicKrisp wie auf MoltenVK, obwohl Sparse Residency und Logic Ops fehlen; Unreal Engine 5 verlangt für D3D12 mindestens 12_0
-- Vergleich der ganzen Testsuite vor und nach Mesa-Patch 0030 und vkd3d-Patch 0009 (jeder Test, der 180 s hängt, wird ausgeschlossen): dieselben fünf Tests hängen in beiden Fällen (Fence-Waits mit doppelt registrierten Events und geteilten Fences, DirectStorage-Dekompression, ein sehr großer Texel-Buffer, Destruction Notifier). Neue Fehler nur in Tests, die vorher übersprungen wurden: Denormals, `IsHelperLane`, Sampler Feedback (meldet vkd3d, sobald es 64-Bit-Image-Atomics gibt; je eine Prüfung von dreien scheitert) und eine Prüfung auf undefiniertes Verhalten bei falschen Deskriptortypen
-- [x] SPIRV-Cross (in MoltenVK) castet Alias-Deskriptoren per C-Cast (`macos/patches/spirv-cross`): Ist der erste Buffer-Typ `Restrict`, verlor `reinterpret_cast` das `__restrict`, und Metal lehnte den Compute-Shader ab („casts away qualifiers“). `build.sh` übergibt MoltenVK dafür eine eigene SPIRV-Cross-Kopie (`--spirv-cross-root`), weil `fetchDependencies` die eigene zurücksetzt
-- [x] Absturz in `vkQueueSubmit2` (0xc0000005) und „Invalid Resource“: MoltenVK reichte alle Buffer mit Device-Adresse erst beim nächsten Draw an `useResources` weiter; gab ein anderer Thread einen davon dazwischen frei, war der Zeiger ungültig. Mit Residency-Set entfällt die Liste (MoltenVK-Patch 0002). Gefunden mit einem Debug-ntdll, der bei Fehlern in Unix-Code die Frame-Pointer-Kette ausgibt
-- [x] Leere Deskriptoren: MoltenVK bindet statt `nil` genullte Ersatz-Ressourcen (64-KiB-Buffer, 1×1-Textur, Sampler), auch für leere Vertex-Buffer (MoltenVK-Patch 0003)
-- [x] vkd3d schaltet auf MoltenVK dxil-spirvs erweiterte Robustheit ein (lokale Arrays, Konstanten-Tabellen). Für Threadgroup-Speicher begrenzt dxil-spirv den Index auf das letzte Element (`macos/patches/dxil-spirv`), weil Spiele knapp hinter das Ende lesen und Apple-GPUs dabei abbrechen
-- [x] SPIRV-Cross schrieb Stores über eine Zeigerkopie (`OpCopyObject` einer Access Chain) als `*_33[i] = x`, was Metal ablehnt (SPIRV-Cross-Patch 0002). Horizon Zero Dawn bekam dadurch für zwei Compute-Shader kein Pipeline-Objekt und stürzte in der Eröffnungsszene ab. Seitdem laufen Eröffnungsszene, Hauptmenü und ein neues Spiel bis in die Spielwelt
-- [x] Horizon Zero Dawn: Haut und Haare der Figuren erschienen weiß. dxil-spirv tastet bindless Farbtextur-Arrays auch mit `SampleCmp`/`GatherCmp` ab (Vulkan ignoriert den Depth-Operand von `OpTypeImage`), und SPIRV-Cross deklarierte daraufhin das ganze Array als `depth2d`: Jeder normale Zugriff im selben Shader las nur noch den Rot-Kanal. Betraf 198 von rund 8.000 Shadern in Horizon. Ein eigener Patch behielt die Farbdeklaration; seit d6b093e0 macht SPIRV-Cross das selbst (`spvDepthCast` an den Vergleichsstellen), der Patch entfällt
-- [x] Geometry Shader: MoltenVK bildet sie jetzt mit Compute-Stufen nach wie die Tessellation (MoltenVK-Patch 0007, `docs/macos/geometry-shaders.md`). Der Vertex-Shader läuft als Kernel und schreibt seine Ausgaben gepackt in einen Puffer, der Geometry Shader läuft als Kernel mit einem Thread pro Primitiv und Invocation und schreibt Vertices und Strip-Indizes, ein Vertex-Shader zeichnet sie danach. Direkte, indizierte und indirekte Draws, Instanzen, Invocations, Strip-Neustarts und Punkt-Ausgabe; Test in `macos/tests/geometry/run.sh`. Nicht nachgebildet: Geometry Shader zusammen mit Tessellation, mehrere Streams und Transform Feedback
-- [x] Ratchet & Clank: Rift Apart beendete sich bei einer `ApiInformation`-Abfrage (Wine-Patch 0003) und meldete danach „keine Grafikkarte“: MoltenVK gab Apple-GPUs eine andere Geräte-ID als Wines Registry-Eintrag fürs Anzeigegerät (MoltenVK-Patch 0004). Jetzt startet der Launcher
-- [x] Tessellation-Pipelines scheiterten, weil SPIRV-Cross `Component`-Decorations in MSL-Tessellation-Stufen nicht kann. vkd3d spreizt in Pipelines mit Tessellation auf MoltenVK jede Komponente auf eine eigene Location (`64·Komponente + Zeile`), vom Vertex-Shader bis zum Pixel-Shader (vkd3d-Patch 0007)
-- [x] Tessellations-Vertex-Shader schrieben gepackte Ausgaben über einen `device`-Zeiger, obwohl sie lokal liegen (SPIRV-Cross-Patch 0003)
-- [x] Pixel-Shader, die `float4` auf ein Integer-Renderziel schreiben (D3D erlaubt das mit undefiniertem Ergebnis), ließen Metal die ganze Pipeline ablehnen. MoltenVK lässt solche Ausgaben jetzt weg (MoltenVK-Patch 0005)
-- [ ] Ratchet & Clank: Nach „Play“ entstehen alle Pipelines, dann hängen alle Threads an Wines `vectored_handlers_section` („blocked by 0000“, der Lock hat keinen Besitzer mehr). `crs-client.dll` (Crash-Reporter) ist Pflicht-Import und lässt sich nicht abschalten
+The choice is vkd3d-proton on MoltenVK (patches in `macos/patches/vkd3d-proton`, values from `docs/macos/vkd3dcheck.c`):
+- [x] The device is created despite missing robustness2, nullDescriptor, transform feedback and texel buffer alignment; these cases only warn
+- [x] MoltenVK writes empty descriptors as `nil`, and Metal reads zero. Empty vertex buffers get a zeroed stand-in buffer, because MoltenVK dereferences every buffer passed
+- [x] Feature level 12_0 on MoltenVK, although sparse resources (tiled resources tier 0) and logic ops are missing; these caps stay honest
+- [x] `docs/macos/d3d12-test.c`: clear, triangle, triangle with an empty vertex buffer, device with minimum feature level 12_0, present through a DXGI swapchain
+- [x] Unreal Engine 5 with D3D12 (Town To City, UE 5.7, `-dx12` or no switch, since UE5 then picks D3D12 by itself): renders on KosmicKrisp. It needed feature level 12_0 (vkd3d patch 0011), SM 6.6 with 64-bit atomics (Mesa patch 0030, vkd3d patch 0009) and above all Mesa patch 0033: before, the game drew depth, GBuffer, lighting and TSR correctly, but bloom and the tonemapper read the TSR output, a 2D array with one layer, through a `texture2d` declaration, and Metal then returned the same texel for every coordinate; the image was a surface in fog color. Found with a temporary trace in KosmicKrisp and vkd3d (render targets, UAVs and SRVs read back per pass, MSL of single shaders replaced); compression, barriers, samplers, LOD and the descriptor index were ruled out. The game does not use Nanite. Low settings 22 fps in game (1710×1107)
+- [x] Mesa patch 0030: 64-bit atomics on KosmicKrisp from Apple9 (M3) on. Metal only has 64-bit `max`/`min` without a return value, on buffers and on RG32Uint textures the shader reads as `ulong`; that is exactly what Nanite's visibility buffer needs. Add, and, or and xor on buffers run as two 32-bit atomics (correct value in memory, the returned old value can be torn), everything else reads and writes lane by lane of a SIMD group one after another, so it is non-atomic only between SIMD groups. R64_UINT/R64_SINT are storage images on RG32Uint. Tested with vkd3d-proton's test suite (`test_shader_sm66_64bit_atomics`: root descriptor, raw and typed tables, 96 checks passed); 64-bit atomics on groupshared memory are still missing
+- [x] vkd3d patch 0009: vkd3d reports SM 6.6 on KosmicKrisp. Only float controls were missing (Apple GPUs flush FP32 denormals to zero, which is DXIL's default) and the extension for derivatives in compute shaders, which KosmicKrisp can do anyway; vkd3d already makes the same exception for older NVIDIA drivers. All SM 6.x tests of the suite pass except `test_shader_sm62_denorm` (denormals are flushed even when the shader wants to keep them) and `test_shader_sm66_is_helper_lane`. Built as a Windows program with `meson setup … -Denable_tests=true` and `ninja tests/d3d12.exe`, started with `run.sh --exec`; `VKD3D_TEST_FILTER` selects tests
+- [x] vkd3d patch 0010: native 16-bit shader operations on KosmicKrisp. Apple GPUs keep FP16 denormals (measured, in both Metal's fast and precise math modes) and compute FP16 twice as fast as FP32. With this the 16-bit and SM 6.x tests run instead of being skipped, about 37 million checks, and fail only where they failed before
+- [x] vkd3d patch 0011: feature level 12_0 on KosmicKrisp as on MoltenVK, although sparse residency and logic ops are missing; Unreal Engine 5 requires at least 12_0 for D3D12
+- Comparison of the whole test suite before and after Mesa patch 0030 and vkd3d patch 0009 (every test that hangs for 180 s is excluded): the same five tests hang in both cases (fence waits with events registered twice and shared fences, DirectStorage decompression, a very large texel buffer, destruction notifier). New failures only in tests that were skipped before: denormals, `IsHelperLane`, sampler feedback (vkd3d reports it as soon as there are 64-bit image atomics; one check of three fails in each) and a check of undefined behavior with wrong descriptor types
+- [x] SPIRV-Cross (in MoltenVK) casts alias descriptors with a C cast (`macos/patches/spirv-cross`): if the first buffer type is `Restrict`, `reinterpret_cast` lost the `__restrict`, and Metal rejected the compute shader (“casts away qualifiers”). `build.sh` passes MoltenVK its own SPIRV-Cross copy for this (`--spirv-cross-root`), because `fetchDependencies` resets MoltenVK's own
+- [x] Crash in `vkQueueSubmit2` (0xc0000005) and “Invalid Resource”: MoltenVK passed all buffers with a device address to `useResources` only at the next draw; if another thread freed one of them in between, the pointer was invalid. With a residency set the list is gone (MoltenVK patch 0002). Found with a debug ntdll that prints the frame pointer chain on faults in Unix code
+- [x] Empty descriptors: instead of `nil`, MoltenVK binds zeroed stand-in resources (64 KiB buffer, 1×1 texture, sampler), also for empty vertex buffers (MoltenVK patch 0003)
+- [x] On MoltenVK, vkd3d turns on dxil-spirv's extended robustness (local arrays, constant tables). For threadgroup memory dxil-spirv clamps the index to the last element (`macos/patches/dxil-spirv`), because games read just past the end and Apple GPUs abort on that
+- [x] SPIRV-Cross wrote stores through a pointer copy (`OpCopyObject` of an access chain) as `*_33[i] = x`, which Metal rejects (SPIRV-Cross patch 0002). Because of this Horizon Zero Dawn got no pipeline object for two compute shaders and crashed in the opening scene. Since then the opening scene, the main menu and a new game run into the game world
+- [x] Horizon Zero Dawn: the characters' skin and hair appeared white. dxil-spirv also samples bindless color texture arrays with `SampleCmp`/`GatherCmp` (Vulkan ignores the depth operand of `OpTypeImage`), and SPIRV-Cross then declared the whole array as `depth2d`: every normal access in the same shader read only the red channel. Affected 198 of about 8,000 shaders in Horizon. A patch of our own kept the color declaration; since d6b093e0 SPIRV-Cross does this itself (`spvDepthCast` at the comparisons), and the patch is gone
+- [x] Geometry shaders: MoltenVK now emulates them with compute stages like tessellation (MoltenVK patch 0007, `docs/macos/geometry-shaders.md`). The vertex shader runs as a kernel and writes its outputs packed into a buffer, the geometry shader runs as a kernel with one thread per primitive and invocation and writes vertices and strip indices, and a vertex shader then draws them. Direct, indexed and indirect draws, instances, invocations, strip restarts and point output; test in `macos/tests/geometry/run.sh`. Not emulated: geometry shaders together with tessellation, multiple streams and transform feedback
+- [x] Ratchet & Clank: Rift Apart quit on an `ApiInformation` query (Wine patch 0003) and then reported “no graphics card”: MoltenVK gave Apple GPUs a different device ID than Wine's registry entry for the display device (MoltenVK patch 0004). Now the launcher starts
+- [x] Tessellation pipelines failed because SPIRV-Cross cannot handle `Component` decorations in MSL tessellation stages. In pipelines with tessellation on MoltenVK, vkd3d spreads every component to a location of its own (`64·component + row`), from the vertex shader to the pixel shader (vkd3d patch 0007)
+- [x] Tessellation vertex shaders wrote packed outputs through a `device` pointer although they are local (SPIRV-Cross patch 0003)
+- [x] Pixel shaders that write `float4` to an integer render target (D3D allows this with an undefined result) made Metal reject the whole pipeline. MoltenVK now leaves such outputs out (MoltenVK patch 0005)
+- [ ] Ratchet & Clank: after “Play” all pipelines are created, then all threads hang on Wine's `vectored_handlers_section` (“blocked by 0000”, the lock has no owner anymore). `crs-client.dll` (crash reporter) is a required import and cannot be turned off
 
-### Weitere Spiele aus dem Starttest
-- [x] Foundation verlangt OpenGL 4.3, macOS hat höchstens 4.1: läuft jetzt mit OpenGL 4.6 über Zink auf KosmicKrisp (Mesa als Windows-`opengl32.dll`, 64 und 32 Bit; Zink auf MoltenVK geht nicht, es fehlt `nullDescriptor`). Die App schaltet Zink für Foundation von selbst ein. Für 4.x fehlte Zink nur `GL_ARB_texture_buffer_object_rgb32` (keine RGB32-Texelpuffer in Metal), run.sh meldet die Erweiterung per `MESA_EXTENSION_OVERRIDE`
-- [x] Spiele auf exFAT-Platten: macOS legt neben jede von steamcmd geschriebene Datei eine `._`-Datei für Dateiattribute, tausende pro Spiel. Foundation las sie als Lokalisierung und stürzte ab. Der Runner löscht sie vor jedem Start (Millisekunden)
-- [ ] Rogue Tower (Unity, 32 Bit) stürzt beim Start in Wines Ausnahmebehandlung ab („Exception frame is not in stack limits“). Ursache ist ein Zugriffsfehler davor, jedes Mal an derselben Stelle: Ein 32-Bit-Thread führt Wines 64-Bit-Einstieg aus wow64cpu (`syscall_32to64` bzw. `unix_call_32to64`, erreicht über den Fernsprung `ljmp` der Systemaufrufe) im 32-Bit-Modus aus und liest dort `cs32_sel(%rip)` als absolute Adresse `0x5ecd`. Nicht die Ursache: Suspend-Signale (keine während des Absturzes), Wettläufe beim Anhalten und Fortsetzen (Stresstest mit 200.000 Zyklen besteht), Monos JIT (Test mit frisch geschriebenem Code besteht). Mit `GC_DONT_GC=1` kommt Unity weiter, stürzt aber später gleich ab. Unmittelbar davor setzt wow64 den 32-Bit-Kontext für Fenster-Callbacks (`NtSetInformationThread`, Klasse 29 `ThreadWow64Context`, zweimal ohne Abfrage dazwischen); dort liegt die nächste Spur. Die Rücksprungadresse auf dem Stack zeigt in den 32-Bit-Stub von `NtQueryPerformanceCounter`, der Sprung kommt also über den normalen Weg `__wine_syscall` → BOP-Thunk; der Thunk ist im Absturz intakt (`ljmp *[…]`, Fernzeiger `syscall_32to64:0x2b`), Rosetta wechselt bei diesem Fernsprung aber nicht in den 64-Bit-Modus. Ein Stresstest mit 22 Millionen Systemaufrufen bei ständig neuen Threads (je ein LDT-Eintrag) und einer mit 256 MB frisch ausgeführtem Code reproduzieren das nicht. Kandidat für einen Fehlerbericht an Apple (Rosetta)
-- Startet man Spiele aus einer anderen App heraus als MacProton (etwa aus einem Terminal oder Claude Code), fragt macOS beim ersten Zugriff auf ein Aufnahmegerät nach dem Mikrofon für diese App. Spiele, die beim Start Aufnahmegeräte abfragen (FMOD wie in Dead Island, Unreal wie in Devolverland Expo), hängen, bis jemand antwortet. MacProton selbst deklariert kein Mikrofon, macOS lehnt dort ohne Nachfrage ab, und die Spiele laufen weiter
-- [x] `macos/check-shaders.sh`: übersetzt alle Shader, die MoltenVK während eines Spiels gedumpt hat (`MVK_CONFIG_SHADER_DUMP_DIR`), mit dem Metal-Compiler und listet, was Metal ablehnt. So fallen Übersetzungsfehler für alle Shader eines Spiels auf, ohne jeden Effekt im Spiel zu erreichen
-- [x] `macos/smoke-test.py`: startet installierte Spiele aus der MacProton-Bibliothek nacheinander unbeaufsichtigt, richtet Prefix und Install-Skripte wie die App ein und hält in `report.md` fest, ob ein Fenster und ein Bild kommen, ob das Spiel abstürzt, das Gerät verliert, Pipelines scheitern oder Metal Shader ablehnt (mit `check-shaders.sh`). Klickt nicht durch Menüs; als Regressionstest nach Änderungen an der Laufzeit
-- [x] Schwarze Spielwelt in Unreal-4-Spielen (Medieval Dynasty mit D3D11): Unreal rendert die Farbkorrektur-LUT des Tonemappers mit einem Geometry Shader, der jedes Dreieck in eine Scheibe einer 3D-Textur lenkt. MoltenVK ließ ihn weg, alles landete in Scheibe 0, und das Bild wurde nach dem Tonemapping schwarz. Reicht ein Geometry Shader Dreiecke nur durch und nimmt den Layer aus einer Eingabe, schreibt MoltenVK den Layer jetzt im Vertex-Shader (MoltenVK-Patch 0006)
-- [x] Medieval Dynasty mit D3D12 verlor ein, zwei Minuten nach dem Laden der Spielwelt das Gerät („Internal Error“ 0x10d, ohne Encoder-Angabe). Eingegrenzt über Unreal-Konsolenvariablen auf `r.DFShadowScatterTileCulling`: Die Distance-Field-Schatten verteilen Objekte mit Draws ohne Render-Target auf Licht-Kacheln. vkd3d beginnt solche Passes mit dem größten Renderbereich und 2048 Ebenen (`maxFramebufferLayers`), MoltenVK gab Metal diese Ebenenzahl weiter, und die GPU bricht den Pass ab. Ohne Attachments setzt MoltenVK keine Ebenen mehr (MoltenVK-Patch 0008); `docs/macos/d3d12-uavcount.c` stellt den Fall nach. Medieval Dynasty läuft jetzt auch mit D3D12 in die Spielwelt
-- [x] Typisierte Puffer außerhalb der View: vkd3d macht solche Indizes zu `0xFFFFFFFF` und verlässt sich darauf, dass Vulkan den Zugriff verwirft. Metal tut das nicht; SPIRV-Cross prüft jetzt die Grenzen von Texel-Buffer-Lesezugriffen, Schreibzugriffen und Atomics (SPIRV-Cross-Patch 0004)
-- Geprüft und verworfen: Eine Ersatztextur je Texturtyp für leere Deskriptoren (Shader lesen denselben Heap-Platz als 2D, 3D, Cube und Texel-Buffer) änderte am Geräteverlust nichts
-- [ ] Spiele mit reinem D3D12 testen; ausstehend sind Stream Output und Sparse-Ressourcen, die MoltenVK fehlen. `vkCmdDrawIndirectCount` und `VK_EXT_depth_clip_enable` hat MoltenVK `main` inzwischen; die Geometry-Shader-Nachbildung liest den Count-Puffer mit
+### More games from the smoke test
+- [x] Foundation requires OpenGL 4.3, macOS has at most 4.1: it now runs with OpenGL 4.6 through Zink on KosmicKrisp (Mesa as the Windows `opengl32.dll`, 64 and 32 bit; Zink on MoltenVK does not work, `nullDescriptor` is missing). The app turns Zink on for Foundation by itself. For 4.x, Zink lacked only `GL_ARB_texture_buffer_object_rgb32` (no RGB32 texel buffers in Metal); run.sh reports the extension through `MESA_EXTENSION_OVERRIDE`
+- [x] Games on exFAT drives: macOS puts a `._` file for file attributes next to every file steamcmd writes, thousands per game. Foundation read them as localization and crashed. The runner deletes them before every start (milliseconds)
+- [ ] Rogue Tower (Unity, 32-bit) crashes on start in Wine's exception handling (“Exception frame is not in stack limits”). The cause is an access violation before that, every time at the same place: a 32-bit thread executes Wine's 64-bit entry from wow64cpu (`syscall_32to64` or `unix_call_32to64`, reached through the far jump `ljmp` of the syscalls) in 32-bit mode and reads `cs32_sel(%rip)` there as the absolute address `0x5ecd`. Not the cause: suspend signals (none during the crash), races when suspending and resuming (a stress test with 200,000 cycles passes), Mono's JIT (a test with freshly written code passes). With `GC_DONT_GC=1` Unity gets further but later crashes the same way. Right before, wow64 sets the 32-bit context for window callbacks (`NtSetInformationThread`, class 29 `ThreadWow64Context`, twice without a query in between); that is the next lead. The return address on the stack points into the 32-bit stub of `NtQueryPerformanceCounter`, so the jump comes the normal way `__wine_syscall` → BOP thunk; the thunk is intact at the crash (`ljmp *[…]`, far pointer `syscall_32to64:0x2b`), but Rosetta does not switch to 64-bit mode on this far jump. A stress test with 22 million syscalls with constantly new threads (one LDT entry each) and one with 256 MB of freshly executed code do not reproduce it. A candidate for a bug report to Apple (Rosetta)
+- If games are started from an app other than MacProton (for example from a terminal or Claude Code), macOS asks on the first access to a recording device for microphone access for that app. Games that query recording devices at start (FMOD as in Dead Island, Unreal as in Devolverland Expo) hang until someone answers. MacProton itself declares no microphone use, macOS refuses there without asking, and the games keep running
+- [x] `macos/check-shaders.sh`: compiles all shaders MoltenVK dumped during a game (`MVK_CONFIG_SHADER_DUMP_DIR`) with the Metal compiler and lists what Metal rejects. This way translation errors show for all shaders of a game without reaching every effect in the game
+- [x] `macos/smoke-test.py`: starts installed games from the MacProton library one after another unattended, sets up the prefix and install scripts like the app, and records in `report.md` whether a window and an image appear, whether the game crashes, loses the device, pipelines fail or Metal rejects shaders (with `check-shaders.sh`). Does not click through menus; a regression test after runtime changes
+- [x] Black game world in Unreal 4 games (Medieval Dynasty with D3D11): Unreal renders the tonemapper's color grading LUT with a geometry shader that routes every triangle into a slice of a 3D texture. MoltenVK left it out, everything ended up in slice 0, and the image turned black after tonemapping. If a geometry shader only passes triangles through and takes the layer from an input, MoltenVK now writes the layer in the vertex shader (MoltenVK patch 0006)
+- [x] Medieval Dynasty with D3D12 lost the device a minute or two after loading the game world (“Internal Error” 0x10d, without an encoder). Narrowed down through Unreal console variables to `r.DFShadowScatterTileCulling`: the distance field shadows distribute objects onto light tiles with draws without a render target. vkd3d begins such passes with the largest render area and 2048 layers (`maxFramebufferLayers`), MoltenVK passed this layer count to Metal, and the GPU aborts the pass. Without attachments MoltenVK no longer sets layers (MoltenVK patch 0008); `docs/macos/d3d12-uavcount.c` reproduces the case. Medieval Dynasty now also runs into the game world with D3D12
+- [x] Typed buffers outside the view: vkd3d turns such indices into `0xFFFFFFFF` and relies on Vulkan discarding the access. Metal does not; SPIRV-Cross now checks the bounds of texel buffer reads, writes and atomics (SPIRV-Cross patch 0004)
+- Checked and dropped: a stand-in texture per texture type for empty descriptors (shaders read the same heap slot as 2D, 3D, cube and texel buffer) changed nothing about the device loss
+- [ ] Test games with pure D3D12; still missing on MoltenVK are stream output and sparse resources. MoltenVK `main` has `vkCmdDrawIndirectCount` and `VK_EXT_depth_clip_enable` by now; the geometry shader emulation reads the count buffer too
 
-### Anzeige
-- [x] **Hochskalierung** (Einstellung in MacProton, „Anzeige“): Ohne Retina-Modus sind Fenster und Swapchain in Punkten groß, macOS verdoppelt jedes Bild bilinear. Mit `MVK_CONFIG_UPSCALING=metalfx` rendert das Spiel weiter in seine Bilder, MoltenVK rechnet sie beim Present mit MetalFX Spatial auf die Pixel des Displays hoch (MoltenVK-Patch 0009). MetalFX wird erst zur Laufzeit geladen. „Pixelgenau“ setzt `MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST`. MetalFX Temporal bräuchte Tiefe und Bewegungsvektoren vom Spiel und ist deshalb nicht wählbar
+### Display
+- [x] **Upscaling** (setting in MacProton, “Display”): without Retina mode, windows and swapchains are sized in points, and macOS doubles every frame bilinearly. With `MVK_CONFIG_UPSCALING=metalfx` the game keeps rendering into its images, and MoltenVK upscales them to the display's pixels with MetalFX Spatial on present (MoltenVK patch 0009). MetalFX is loaded only at runtime. “Pixel-exact” sets `MVK_CONFIG_SWAPCHAIN_MIN_MAG_FILTER_USE_NEAREST`. MetalFX Temporal would need depth and motion vectors from the game and is therefore not offered
 
-### Alte Spiele (32 Bit, D3D9)
-- [x] Wine-Patch 0007: 32-Bit-D3D9-Spiele über DXVK hingen auf KosmicKrisp beim Wechsel in den Vollbildmodus. In WoW64-Prozessen fragt win32u bei Treibern mit `VK_EXT_map_memory_placed` (KosmicKrisp ja, MoltenVK nein) dessen Eigenschaften über den Kernnamen `vkGetPhysicalDeviceProperties2` ab. Die eigene Instanz für D3DKMT ist aber eine Vulkan-1.0-Instanz, in der Mesa nur den `KHR`-Namen liefert: Der Aufruf landete auf NULL, mitten in `D3DKMTOpenAdapterFromLuid`, und ließ dessen `pthread_once` unvollendet. Beim nächsten Moduswechsel nahm win32u die Display-Sperre, lief in dasselbe `pthread_once`, macOS brach die Rekursion ab, und die Sperre blieb für immer gehalten. Jetzt benutzt win32u wie im Zweig darunter den `KHR`-Namen. Prüfprogramm `docs/macos/d3d9-fullscreen.c` (Vollbild-Gerät mit 640×480 wie bei alten Spielen); gefunden über Wines D3D9-Visual-Tests in 32 Bit, die dort hängen blieben
-- Wines D3D9-Visual-Tests (32 Bit) über DXVK: auf KosmicKrisp 209.676 Prüfungen mit 779 Fehlern, vor allem bei Nebel (`fog_with_shader_test` mit Vertex-Shadern, die kein `oFog` schreiben, und `test_fog`), Texturtransformationen, Formatumwandlungen, Punktgrößen und ATIs Fetch4; auf MoltenVK bricht DXVK früh mit einer Assertion ab (Metal kann Primitive Restart nicht abschalten). Für alte D3D9-Spiele ist KosmicKrisp damit der bessere Treiber
-- Tessellation in Rise of the Tomb Raider: KosmicKrisp beendet für jeden tessellierten Draw den Render-Encoder (die Compute-Stufen VS, TCS, Zählen, Präfixsumme und Tessellator laufen in einem Compute-Encoder) und lädt danach alle Render-Targets neu. Gemessen 85–105 Render-Encoder pro Bild, davon 5–14 durch Tessellation. Abhilfe wäre, die Tessellations-Stufen im Render-Encoder laufen zu lassen (Tile-Shader) oder das Kodieren eines Render-Passes aufzuschieben; beides ist ein größerer Umbau
+### Old games (32-bit, D3D9)
+- [x] Wine patch 0007: 32-bit D3D9 games through DXVK hung on KosmicKrisp when switching to full screen. In WoW64 processes, for drivers with `VK_EXT_map_memory_placed` (KosmicKrisp yes, MoltenVK no) win32u queries its properties through the core name `vkGetPhysicalDeviceProperties2`. But its own instance for D3DKMT is a Vulkan 1.0 instance, in which Mesa only provides the `KHR` name: the call landed on NULL, in the middle of `D3DKMTOpenAdapterFromLuid`, and left its `pthread_once` unfinished. On the next mode change win32u took the display lock, ran into the same `pthread_once`, macOS aborted the recursion, and the lock stayed held forever. Now win32u uses the `KHR` name, as the branch below does. Test program `docs/macos/d3d9-fullscreen.c` (full-screen device at 640×480 as old games use); found through Wine's 32-bit D3D9 visual tests, which hung there
+- Wine's D3D9 visual tests (32-bit) through DXVK: on KosmicKrisp 209,676 checks with 779 failures, mostly with fog (`fog_with_shader_test` with vertex shaders that write no `oFog`, and `test_fog`), texture transforms, format conversions, point sizes and ATI's Fetch4; on MoltenVK DXVK aborts early with an assertion (Metal cannot turn off primitive restart). For old D3D9 games KosmicKrisp is therefore the better driver
+- Tessellation in Rise of the Tomb Raider: KosmicKrisp ends the render encoder for every tessellated draw (the compute stages VS, TCS, counting, prefix sum and tessellator run in a compute encoder) and reloads all render targets afterwards. Measured 85–105 render encoders per frame, 5–14 of them because of tessellation. A remedy would be running the tessellation stages in the render encoder (tile shaders) or deferring the encoding of a render pass; both are larger rewrites
 
-### Synchronisation
-- [x] **fsync auf macOS** (Wine-Patch 0006): Threads warten in gemeinsamem Speicher statt über Anfragen an den wineserver. macOS 14.4 kann mit `os_sync_wait_on_address(_with_timeout)` und dem Flag `SHARED` prozessübergreifend auf eine Adresse warten; das reicht für ein Objekt. Für `futex_waitv` (mehrere Objekte) schläft ein Thread auf einer von 48 Sequenznummern in den reservierten ersten Slots, gewählt nach Thread-ID (`tid >> 2`, Thread-IDs sind Vielfache von 4). Die Slots sind dafür 32 statt 16 Byte groß; die letzten 8 Byte zählen solche Warter (untere 16 Bit) und markieren ihre Sequenznummern, `futex_wake` erhöht die markierten und weckt sie. `run.sh` setzt `WINEFSYNC=1`, `WINEFSYNC=0` schaltet zurück
-- Gemessen: Event-Ping-Pong zwischen Threads 6 statt 20 µs, über Prozessgrenzen 8 µs. Green Hell (KosmicKrisp) rund 10 % schneller, Rise of the Tomb Raider gleich schnell
-- Ein schlafender Thread verpasst unter macOS ab und zu seinen Weckruf oder kommt sekundenlang nicht dran; Rise of the Tomb Raider hing dadurch mit fsync etwa in jedem zweiten Benchmark 0,5 bis 4 s. Kein Warten schläft deshalb länger als 250 ms am Stück, danach prüft der Aufrufer seine Objekte neu wie nach einem unechten Aufwachen. Danach in 14 Läufen kein Bild über 100 ms außer dem Kaltstart-Muster im Geothermalen Tal (vier Bilder um 500 ms im ersten Lauf nach einer Pause), das es ohne fsync genauso gibt. Synthetische Tests (Semaphoren-Last, Timer, Weckrufe vom Server unter Volllast) verlieren keinen Weckruf; die Ursache ist offen
-- `docs/macos/synctest.c` prüft die Sync-Objekte mit und ohne fsync: Ping-Pong, Semaphoren, Mutexe, Wait-Any/All, APCs, Timeouts, verlassene Mutexe, `SignalObjectAndWait`, Waits länger als 250 ms und Prozessgrenzen
+### Synchronization
+- [x] **fsync on macOS** (Wine patch 0006): threads wait in shared memory instead of through requests to the wineserver. macOS 14.4 can wait on an address across processes with `os_sync_wait_on_address(_with_timeout)` and the flag `SHARED`; that suffices for one object. For `futex_waitv` (several objects) a thread sleeps on one of 48 sequence numbers in the reserved first slots, picked by thread ID (`tid >> 2`, thread IDs are multiples of 4). For this the slots are 32 instead of 16 bytes; the last 8 bytes count such waiters (lower 16 bits) and mark their sequence numbers, and `futex_wake` increments the marked ones and wakes them. `run.sh` sets `WINEFSYNC=1`, `WINEFSYNC=0` switches back
+- Measured: event ping-pong between threads 6 instead of 20 µs, across processes 8 µs. Green Hell (KosmicKrisp) about 10 % faster, Rise of the Tomb Raider equally fast
+- A sleeping thread on macOS now and then misses its wake-up or does not get to run for seconds; with fsync, Rise of the Tomb Raider therefore hung for 0.5 to 4 s in about every second benchmark. So no wait sleeps longer than 250 ms at a time; after that the caller checks its objects again as after a spurious wake-up. Since then no frame over 100 ms in 14 runs except the cold start pattern in the Geothermal Valley (four frames around 500 ms in the first run after a pause), which also occurs without fsync. Synthetic tests (semaphore load, timers, wake-ups from the server under full load) lose no wake-up; the cause is open
+- `docs/macos/synctest.c` checks the sync objects with and without fsync: ping-pong, semaphores, mutexes, wait-any/all, APCs, timeouts, abandoned mutexes, `SignalObjectAndWait`, waits longer than 250 ms and process boundaries
 
-### Ladezeiten
-- [x] **MSL-Cache** (MoltenVK-Patch 0010): MoltenVK übersetzte jeden Shader bei jedem Start neu von SPIR-V nach MSL. Das läuft unter Rosetta und kostete Horizon Zero Dawn beim Laden rund 50.000 Übersetzungen mit je 17 bis 45 ms auf sieben Threads. Den Metal-Teil cacht macOS selbst (`$(getconf DARWIN_USER_CACHE_DIR)org.winehq.wine/com.apple.metal`). Mit `MVK_CONFIG_SHADER_CACHE_DIR` hängt MoltenVK jede Übersetzung an eine Datei an, Schlüssel sind der SPIR-V-Code und die serialisierte Konfiguration, die die Pipeline anfordert. Spätere Starts und spätere Pipelines im selben Start nehmen das MSL aus der Datei. `run.sh` legt den Cache in `$WINEPREFIX/moltenvk-cache` an; die Datei gilt nur für denselben MoltenVK-Build (Mach-O-UUID) und dasselbe Gerät, Dateien anderer Builds löscht MoltenVK. Leer gesetzt schaltet die Variable den Cache ab
-- Gemessen mit Horizon Zero Dawn (Apple M3, „Fortfahren“ bis zur Spielwelt): nach einem Update von vkd3d-proton und MoltenVK (alle Caches ungültig) rund 27 Minuten für 24.000 Pipelines; mit warmem Metal-Cache, aber ohne MSL-Cache 140 s; mit MSL-Cache 35 s. Der MSL-Cache belegt 144 MB
-- [ ] Der erste Start nach einem Update der Laufzeit bleibt lang: Horizon baut dann alle Pipelines des Spiels neu, und der Metal-Compiler lastet alle Kerne aus
+### Loading times
+- [x] **MSL cache** (MoltenVK patch 0010): MoltenVK translated every shader from SPIR-V to MSL again on every start. That runs under Rosetta and cost Horizon Zero Dawn about 50,000 translations of 17 to 45 ms each on seven threads while loading. macOS caches the Metal part itself (`$(getconf DARWIN_USER_CACHE_DIR)org.winehq.wine/com.apple.metal`). With `MVK_CONFIG_SHADER_CACHE_DIR`, MoltenVK appends every translation to a file, keyed by the SPIR-V code and the serialized configuration the pipeline requests. Later starts and later pipelines in the same start take the MSL from the file. `run.sh` puts the cache in `$WINEPREFIX/moltenvk-cache`; the file is valid only for the same MoltenVK build (Mach-O UUID) and the same device, and MoltenVK deletes files of other builds. Set empty, the variable turns the cache off
+- Measured with Horizon Zero Dawn (Apple M3, “Continue” up to the game world): after an update of vkd3d-proton and MoltenVK (all caches invalid) about 27 minutes for 24,000 pipelines; with a warm Metal cache but without the MSL cache 140 s; with the MSL cache 35 s. The MSL cache takes 144 MB
+- [ ] The first start after a runtime update stays long: Horizon then builds all of the game's pipelines again, and the Metal compiler occupies all cores
 
-- [x] **Game Mode**: macOS schaltet ihn nur für Prozesse ein, deren App-Bundle in der Kategorie „Games“ steht (`LSApplicationCategoryType`), und nur solange das Spielfenster vorne ist; GamePolicyAgent sucht dafür den Bundle-Eintrag des Prozesses (`bundleRecordForAuditToken`). Die in Wines Loader eingebettete Info.plist zählt nicht. `build.sh` legt deshalb `lib/wine/x86_64-unix/Wine.app` an (Loader-Kopie und Wines Info.plist, jetzt mit Kategorie „Games“ und `GCSupportsGameMode`), ntdll startet Windows-Programme aus diesem Bundle, und dessen Loader findet `ntdll.so` drei Ordner höher (Wine-Patch 0005). `LSUIElement` bleibt, damit Hintergrundprozesse kein Dock-Symbol bekommen
+- [x] **Game Mode**: macOS turns it on only for processes whose app bundle is in the “Games” category (`LSApplicationCategoryType`), and only while the game window is in front; GamePolicyAgent looks up the process's bundle record for this (`bundleRecordForAuditToken`). The Info.plist embedded in Wine's loader does not count. `build.sh` therefore creates `lib/wine/x86_64-unix/Wine.app` (a copy of the loader and Wine's Info.plist, now with the category “Games” and `GCSupportsGameMode`), ntdll starts Windows programs from this bundle, and its loader finds `ntdll.so` three folders up (Wine patch 0005). `LSUIElement` stays, so background processes get no Dock icon
 
-### Phase 5 – Steam-Integration
-- [x] `lsteamclient`: Es gibt schon einen `__APPLE__`-Zweig in `lsteamclient/unixlib.cpp`, der `steamclient.dylib` lädt. Geprüft: Der macOS-Steam-Client liefert `steamclient.dylib` als Universal Binary (x86_64 + arm64), der Rosetta-Wineprozess kann sie also laden.
-- [x] `Steam_IsKnownInterface` und `Steam_NotifyMissingInterface` fehlen in der macOS-dylib → auf macOS optional geladen (Fallback: `false` bzw. nichts tun), damit `steamclient_init` nicht abbricht
-- [x] lsteamclient und steam_helper (`steam.exe`) für macOS bauen – `macos/makedep-module.py` ersetzt die GNU-sed-basierten Makedep-Regeln
-- [x] `steamclient64.dll`/`steamclient.dll` im Prefix sind Stub-DLLs (`macos/steamclient-stub.py`), die nur die Namen aus `lsteamclient.spec` exportieren: Mac-Steam liefert keine Windows-Versionen, Wines Loader biegt die Exporte per Trampolin auf lsteamclient um. Kopien von `lsteamclient.dll` funktionieren nicht zuverlässig – Wine hält die Kopie dann selbst für lsteamclient und leitet auf sich selbst um (Endlosschleife in `CreateInterface`)
-- [x] **Cult of the Lamb** (Unity, D3D11) läuft mit Steamworks über den laufenden Mac-Steam-Client bis ins Hauptmenü, 60 FPS (Apple M3) – Start über `macos/run.sh`, auch mit frischem Prefix aus `macos/build.sh`
+### Phase 5 – Steam integration
+- [x] `lsteamclient`: there already is an `__APPLE__` branch in `lsteamclient/unixlib.cpp` that loads `steamclient.dylib`. Checked: the macOS Steam client ships `steamclient.dylib` as a universal binary (x86_64 + arm64), so the Rosetta Wine process can load it.
+- [x] `Steam_IsKnownInterface` and `Steam_NotifyMissingInterface` are missing in the macOS dylib → loaded optionally on macOS (fallback: `false` or do nothing), so `steamclient_init` does not abort
+- [x] Build lsteamclient and steam_helper (`steam.exe`) for macOS – `macos/makedep-module.py` replaces the GNU-sed-based makedep rules
+- [x] `steamclient64.dll`/`steamclient.dll` in the prefix are stub DLLs (`macos/steamclient-stub.py`) that only export the names from `lsteamclient.spec`: Mac Steam ships no Windows versions, and Wine's loader redirects the exports to lsteamclient with trampolines. Copies of `lsteamclient.dll` do not work reliably – Wine then takes the copy for lsteamclient itself and redirects to itself (endless loop in `CreateInterface`)
+- [x] **Cult of the Lamb** (Unity, D3D11) runs with Steamworks through the running Mac Steam client up to its main menu, 60 FPS (Apple M3) – started through `macos/run.sh`, also with a fresh prefix from `macos/build.sh`
 
-Anpassungen dafür:
+Changes for this:
 
-| Datei | Änderung |
+| File | Change |
 |---|---|
-| `lsteamclient/unix_private.h` | `stdlib.h`/`wchar.h` vor `winbase.h`, das `wcsncpy` & Co. mit `__WINESRC__` sperrt (macOS-SDK lädt `wchar.h` später als glibc) |
-| `lsteamclient/unixlib.cpp` | `(std::max)` gegen Wines `max()`-Makro |
-| `lsteamclient/unix_steam_input_manual.cpp` | VK→macOS-Tastencodes (`kVK_*`) für ISteamHTMLSurface |
-| `dxvk/src/dxvk/dxvk_presenter.cpp` | MoltenVK: `VK_PRESENT_SCALING_STRETCH` anfordern, sonst `VK_SUBOPTIMAL_KHR` bei jedem Present und Swapchain-Neuerzeugung in Dauerschleife (Flackern) |
-| `wine/dlls/win32u/{vulkan,opengl}.c` | Protons Fullscreen-Hack auf macOS standardmäßig aus (`WINE_DISABLE_FULLSCREEN_HACK=0` schaltet ihn ein): mit ihm erreicht das Bild das Fenster nicht, sichtbar war nur die Hintergrundfarbe |
-- [ ] Steam für macOS bietet keine Kompatibilitätstools an → Starten über eigenes Startprogramm oder Windows-Steam im Prefix als Notlösung
-- [ ] `vrclient_x64`, `wineopenxr`: auf macOS weglassen
+| `lsteamclient/unix_private.h` | `stdlib.h`/`wchar.h` before `winbase.h`, which blocks `wcsncpy` and co. with `__WINESRC__` (the macOS SDK loads `wchar.h` later than glibc) |
+| `lsteamclient/unixlib.cpp` | `(std::max)` against Wine's `max()` macro |
+| `lsteamclient/unix_steam_input_manual.cpp` | VK → macOS key codes (`kVK_*`) for ISteamHTMLSurface |
+| `dxvk/src/dxvk/dxvk_presenter.cpp` | MoltenVK: request `VK_PRESENT_SCALING_STRETCH`, otherwise `VK_SUBOPTIMAL_KHR` on every present and swapchain recreation in an endless loop (flicker) |
+| `wine/dlls/win32u/{vulkan,opengl}.c` | Proton's full-screen hack off by default on macOS (`WINE_DISABLE_FULLSCREEN_HACK=0` turns it on): with it the image does not reach the window, only the background color was visible |
+- [ ] Steam for macOS offers no compatibility tools → start through a launcher of our own, or Windows Steam in the prefix as a stopgap
+- [ ] `vrclient_x64`, `wineopenxr`: leave out on macOS
 
-### Phase 6 – `proton`-Startskript
-Linux-Annahmen im Skript `proton`:
-- `LD_LIBRARY_PATH` (Zeile ~48) → `DYLD_FALLBACK_LIBRARY_PATH`
-- `libdl.so.2`, `libGLX_nvidia.so.0` (~415–460) → auf macOS überspringen
-- `/proc/modules`, `/proc/sys/vm/max_map_count` (~1421, ~2012) → überspringen
-- `WINEFSYNC`/ntsync-Logik (~1766–1784) → ntsync auf macOS aus; `run.sh` setzt `WINEFSYNC=1`
-- Steam-Runtime/pressure-vessel-Annahmen entfernen
+### Phase 6 – `proton` launch script
+Linux assumptions in the `proton` script:
+- `LD_LIBRARY_PATH` (line ~48) → `DYLD_FALLBACK_LIBRARY_PATH`
+- `libdl.so.2`, `libGLX_nvidia.so.0` (~415–460) → skip on macOS
+- `/proc/modules`, `/proc/sys/vm/max_map_count` (~1421, ~2012) → skip
+- `WINEFSYNC`/ntsync logic (~1766–1784) → ntsync off on macOS; `run.sh` sets `WINEFSYNC=1`
+- Remove Steam Runtime/pressure-vessel assumptions
 
-### Phase 7 – Verteilung über GitHub
-Ziel: Nutzer laden ein Release von GitHub herunter, entpacken es und starten
-– ohne Xcode, Homebrew oder eigenen Build.
+### Phase 7 – Distribution through GitHub
+Goal: users download a release from GitHub, unzip it and start it – without
+Xcode, Homebrew or a build of their own.
 
-- [ ] **GitHub Actions** auf macOS-Runnern (`macos-14`/Apple Silicon) bauen
-      das Paket reproduzierbar; Ergebnis als Asset an **GitHub Releases**
-- [ ] **Keine Laufzeit-Abhängigkeit von Homebrew**: alle x86_64-dylibs
-      (FreeType, GnuTLS, MoltenVK, SDL2 …) ins Paket legen, Pfade per
-      `install_name_tool` auf `@rpath`/`@loader_path` umbiegen
-- [ ] Ein einziges, selbsttragendes Paket (`.app` bzw. `.tar.xz` mit festem
-      Ordnerlayout), das dem Linux-Proton-Layout (`files/bin`, `files/lib`,
-      `files/share`) folgt
-- [ ] **Code-Signierung + Notarisierung** (Developer-ID); ohne das blockiert
-      Gatekeeper die heruntergeladenen Binärdateien. Fallback für unsignierte
-      Testbuilds: dokumentiertes `xattr -dr com.apple.quarantine`
-- [ ] Rosetta-Prüfung beim ersten Start (`softwareupdate --install-rosetta` vorschlagen)
-- [ ] Versionierung und Prüfsummen (`SHA256SUMS`) je Release
-- [ ] Lizenzen: Wine (LGPL), DXVK/vkd3d-proton (zlib/LGPL), MoltenVK
-      (Apache-2.0) beilegen. **D3DMetal darf nicht mitgeliefert werden** –
-      falls genutzt, nur als optionaler Import aus der lokalen GPTK-Installation
-- [ ] Installationsskript, das das Paket an einen festen Ort legt
-      (z. B. `~/Library/Application Support/MacProton/<version>`)
+- [x] Releases are built locally with `macos/release.sh` and published as
+      assets on **GitHub Releases**
+- [ ] **GitHub Actions** on macOS runners (`macos-14`/Apple silicon) to build
+      the package reproducibly
+- [x] **No runtime dependency on Homebrew**: all x86_64 dylibs (FreeType,
+      GnuTLS, MoltenVK, SDL2 …) are in the package, their paths rewritten to
+      `@rpath`/`@loader_path` with `install_name_tool`
+- [x] A single self-contained package (`MacProton.app` with the runtime in
+      the Proton layout `files/bin`, `files/lib`, `files/share`)
+- [ ] **Code signing + notarization** (Developer ID); without it Gatekeeper
+      blocks the downloaded binaries. For the unsigned builds the README
+      documents allowing the app once and `xattr -dr com.apple.quarantine`
+- [x] Rosetta check on the first start (the app offers `softwareupdate --install-rosetta`)
+- [x] Versioning and a checksum (`.zip.sha256`) per release
+- [x] Licenses: the license texts of everything shipped are in
+      `macos/licenses` and in the app (`macos/collect-licenses.sh`).
+      **D3DMetal must not be shipped** – if ever used, only as an optional
+      import from a local GPTK installation
 
-### Offene Punkte (To-do)
+### Open items (to-do)
 
-- [x] **Spielstand-Sync (Steam Cloud)**, in MacProton umgesetzt (vor dem Start, abschaltbar; Backups unter `~/Library/Application Support/MacProton/save-backups`). Offen: prüfen, dass Mac-Steam nach dem Spielende tatsächlich hochlädt. Ursprüngliche Analyse: Spiele mit Auto-Cloud haben pro Betriebssystem eigene Speicherpfade (`ufs/rootoverrides` in den App-Infos). Mac-Steam synchronisiert nur den Mac-Pfad (z. B. `~/Library/Application Support/Massive Monster/Cult Of The Lamb/saves`), die Windows-Version speichert im Prefix (`AppData/LocalLow/...`). Plan: Gibt es eine Windows- und eine MacOS-Regel, leitet MacProton den Prefix-Ordner auf den Mac-Pfad um – vorher Backup beider Seiten. Spiele mit ISteamRemoteStorage sollten bereits über lsteamclient synchronisieren (ungetestet). Reine Windows-Spiele mit Auto-Cloud: offen.
-- [x] **Steam-Cloud-Abgleich für Windows-Spiele** (MacProton): Steam für macOS listet die Auto-Cloud-Dateien von Spielen ohne Mac-Version (`platformstosync2` = Windows) und lädt sie nie herunter oder hoch, das betrifft etwa Raft, Horizon Zero Dawn und Medieval Dynasty. steamcmd hilft nicht: `app_run` gleicht vor dem Start nicht ab, und seine Kompatibilitätsschicht ist auf dem Mac abgeschaltet. Die Cloud-Methoden der Web-API (`ICloudService`) brauchen einen Publisher-OAuth-Zugang pro App. MacProton spricht deshalb Steams Client-Protokoll über WebSocket (`SteamConnection.swift`): Anmeldung per QR-Code mit der Steam-App (`IAuthenticationService`, Plattform „Steam-Client“), Logon mit dem Refresh-Token und eigener Login-ID, damit Mac-Steam angemeldet bleibt, dann `Cloud.GetAppFileChangelist`, `ClientFileDownload` und zum Hochladen `BeginAppUploadBatch`, `ClientBeginFileUpload`, HTTP-PUT, `ClientCommitFileUpload`, `CompleteAppUploadBatchBlocking`. Nie mit `ClientLogOff` trennen, das widerruft das Token. Steam prüft beim Hochladen die Auto-Cloud-Regeln (EResult 42) und überspringt bekannte Inhalte (EResult 29). `CloudSync.swift` vergleicht SHA-1 von Cloud, Prefix und letztem Abgleich: vor dem Start herunterladen, nach dem Ende (`wineserver -w`) hochladen, Konflikte entscheidet der Nutzer, Ersetztes landet in `save-backups/<AppID>/…-cloud-sync`. In der Cloud löscht MacProton nur, wenn der Abgleich vor dem Start geklappt hat. Getestet mit Raft: 17 Cloud-Dateien in den Prefix geladen; Hochladen und Löschen mit einer Testdatei
-- [x] **Controller-Unterstützung:** SDL2 2.32.10 als x86_64-Abhängigkeit, Wine mit SDL konfiguriert (winebus hat zusätzlich das IOKit-HID-Backend). Getestet mit Xbox Wireless Controller über Bluetooth: alle Tasten, Trigger, Steuerkreuz, beide Sticks und Stick-Klicks (LS/RS, auch gleichzeitig) kommen über XInput an (`docs/macos/xinput-check.c`). Offen: PlayStation-/Switch-Controller nicht getestet.
-- [x] **Bibliothek-Sync** (MacProton-App): `licenses_print` → abgekürzte Pakete per `package_info_print` → `app_info_print` je App in einer interaktiven steamcmd-Sitzung (über die Kommandozeile gereihte Abfragen liefert steamcmd asynchron und gibt nur die erste aus). Filter: Typ `game` mit Windows-Startdatei; Paket 0 (Steams Werkzeuge/Server) ausgenommen. Testkonto: 312 Apps → 70 Windows-Spiele, davon 28 auch nativ für Mac, ~26 s.
-- [x] Spiele mit Anti-Cheat (EasyAntiCheat, BattlEye) und Fremd-Launchern (Ubisoft Connect, EA App) erkennen und kennzeichnen (Startdateien, Steam-Deck-Prüfergebnisse, Spielordner nach Installation)
-- [x] **Steam-Overlay:** Steams Overlay für macOS-Spiele (`gameoverlayrenderer.dylib`, Universal Binary mit Metal- und AppKit-Hooks) funktioniert auch in Wine-Spielen. `run.sh` lädt es per `DYLD_INSERT_LIBRARIES` (SIP entfernt die Variable beim Start von `/bin/bash`, deshalb setzt das Skript sie selbst); Steam startet dann `gameoverlayui` für das Spiel, Umschalt+Tab öffnet es, und Shop- und Profilseiten der Spiele erscheinen darin. Abschaltbar in den Einstellungen (`MACPROTON_STEAM_OVERLAY=0`). Das Overlay schreibt in das Drawable, als hätte es 8 Bit pro Kanal; 10-Bit-Swapchains (Unreal mit D3D12) kopiert MoltenVK deshalb bei geladenem Overlay in ein BGRA8-Drawable (MoltenVK-Patch 0011)
+- [x] **Save sync (Steam Cloud)**, implemented in MacProton (before the start, can be turned off; backups under `~/Library/Application Support/MacProton/save-backups`). Open: check that Mac Steam really uploads after the game ends. Original analysis: games with Auto-Cloud have separate save paths per operating system (`ufs/rootoverrides` in the app info). Mac Steam syncs only the Mac path (for example `~/Library/Application Support/Massive Monster/Cult Of The Lamb/saves`), while the Windows version saves in the prefix (`AppData/LocalLow/...`). Plan: if there is a Windows and a macOS rule, MacProton redirects the prefix folder to the Mac path – after backing up both sides. Games with ISteamRemoteStorage should already sync through lsteamclient (untested). Pure Windows games with Auto-Cloud: open.
+- [x] **Steam Cloud sync for Windows games** (MacProton): Steam for macOS lists the Auto-Cloud files of games without a Mac version (`platformstosync2` = Windows) and never downloads or uploads them; this affects for example Raft, Horizon Zero Dawn and Medieval Dynasty. steamcmd does not help: `app_run` does not sync before the start, and its compatibility layer is disabled on the Mac. The cloud methods of the Web API (`ICloudService`) need a publisher OAuth access per app. MacProton therefore speaks Steam's client protocol over WebSocket (`SteamConnection.swift`): sign-in by QR code with the Steam app (`IAuthenticationService`, platform “Steam client”), logon with the refresh token and a login ID of its own so that Mac Steam stays signed in, then `Cloud.GetAppFileChangelist`, `ClientFileDownload` and for uploading `BeginAppUploadBatch`, `ClientBeginFileUpload`, HTTP PUT, `ClientCommitFileUpload`, `CompleteAppUploadBatchBlocking`. Never disconnect with `ClientLogOff`, that revokes the token. On upload Steam checks the Auto-Cloud rules (EResult 42) and skips known content (EResult 29). `CloudSync.swift` compares the SHA-1 of cloud, prefix and last sync: download before the start, upload after the end (`wineserver -w`), the user decides conflicts, and whatever is replaced lands in `save-backups/<AppID>/…-cloud-sync`. MacProton deletes in the cloud only if the sync before the start succeeded. Tested with Raft: 17 cloud files downloaded into the prefix; uploading and deleting with a test file
+- [x] **Controller support:** SDL2 2.32.10 as an x86_64 dependency, Wine configured with SDL (winebus also has the IOKit HID backend). Tested with an Xbox Wireless Controller over Bluetooth: all buttons, triggers, the d-pad, both sticks and stick clicks (LS/RS, also at once) arrive through XInput (`docs/macos/xinput-check.c`). Open: PlayStation/Switch controllers untested.
+- [x] **Library sync** (MacProton app): `licenses_print` → abbreviated packages through `package_info_print` → `app_info_print` per app in an interactive steamcmd session (queries chained on the command line are answered asynchronously by steamcmd, which prints only the first). Filter: type `game` with a Windows executable; package 0 (Steam's tools/servers) excluded. Test account: 312 apps → 70 Windows games, 28 of them also native for Mac, ~26 s.
+- [x] Detect and mark games with anti-cheat (EasyAntiCheat, BattlEye) and third-party launchers (Ubisoft Connect, EA app) (executables, Steam Deck test results, game folder after installation)
+- [x] **Steam overlay:** Steam's overlay for macOS games (`gameoverlayrenderer.dylib`, a universal binary with Metal and AppKit hooks) also works in Wine games. `run.sh` loads it through `DYLD_INSERT_LIBRARIES` (SIP removes the variable when `/bin/bash` starts, so the script sets it itself); Steam then starts `gameoverlayui` for the game, Shift+Tab opens it, and the games' store and profile pages appear in it. Can be turned off in Settings (`MACPROTON_STEAM_OVERLAY=0`). The overlay writes into the drawable as if it had 8 bits per channel; with the overlay loaded, MoltenVK therefore copies 10-bit swapchains (Unreal with D3D12) into a BGRA8 drawable (MoltenVK patch 0011)
 
-## Speicherplatz
+## Disk space
 
-Auf dem Entwicklungs-Mac sind nur rund 37 GB frei. Ein vollständiger
-Proton-Build (alle Submodule, alle Architekturen) braucht deutlich mehr. Bis
-mehr Platz da ist, werden nur die Kernkomponenten geholt und gebaut.
+The development Mac had only about 37 GB free at the start. A complete Proton
+build (all submodules, all architectures) needs much more, so only the core
+components are fetched and built.
 
-## Build und Start
+## Building and starting
 
 ```bash
-# einmalig
+# once
 brew install bison flex mingw-w64 autoconf automake meson ninja glslang cmake pkgconf
 
-# alles bauen (Wine, MoltenVK, FreeType, DXVK 64/32 Bit, lsteamclient, steam.exe)
+# build everything (Wine, MoltenVK, FreeType, DXVK 64/32-bit, lsteamclient, steam.exe)
 macos/build.sh ../build-macos
 
-# Spiel starten (Steam muss laufen und angemeldet sein)
-../build-macos/dist/run.sh 1313140 /pfad/zu/CultOfTheLamb "Cult Of The Lamb.exe"
+# start a game (Steam must be running and signed in)
+../build-macos/dist/run.sh 1313140 /path/to/CultOfTheLamb "Cult Of The Lamb.exe"
 ```
 
-`build.sh` überspringt fertige Schritte (Stempel in `BUILD_DIR/stamps`),
-`DEPS_SRC` verweist auf vorhandene MoltenVK-/FreeType-Klone. Ergebnis ist
-`BUILD_DIR/dist` mit `files/` im Proton-Layout und dem Starter `run.sh`, der
-pro App-ID einen Prefix unter `~/Library/Application Support/MacProton/prefixes`
-anlegt, DXVK und die `steamclient`-Kopien einrichtet und das Spiel über
-`steam.exe` startet.
+`build.sh` skips finished steps (stamps in `BUILD_DIR/stamps`), and
+`DEPS_SRC` points to existing MoltenVK/FreeType clones. The result is
+`BUILD_DIR/dist` with `files/` in the Proton layout and the launcher `run.sh`,
+which creates a prefix per app ID under
+`~/Library/Application Support/MacProton/prefixes`, sets up DXVK and the
+`steamclient` copies and starts the game through `steam.exe`.
 
-Fallstricke, die die Skripte abfangen:
-- `configure` braucht `--build/--host=x86_64-apple-darwin`, sonst erkennt es auf Apple Silicon `aarch64`
-- `make` nativ ausführen, nicht mit `arch -x86_64` (sonst laufen die Compiler unter Rosetta)
-- Wines generierte Dateien vorab erzeugen: `make_vulkan`, `make_specfiles`, `make_requests`, `autoreconf`
-- `pkg-config` auf die x86_64-Abhängigkeiten beschränken (`PKG_CONFIG_LIBDIR`), sonst findet es arm64-Homebrew-Bibliotheken
+Pitfalls the scripts handle:
+- `configure` needs `--build/--host=x86_64-apple-darwin`, otherwise it detects `aarch64` on Apple silicon
+- Run `make` natively, not with `arch -x86_64` (otherwise the compilers run under Rosetta)
+- Create Wine's generated files beforehand: `make_vulkan`, `make_specfiles`, `make_requests`, `autoreconf`
+- Restrict `pkg-config` to the x86_64 dependencies (`PKG_CONFIG_LIBDIR`), otherwise it finds arm64 Homebrew libraries

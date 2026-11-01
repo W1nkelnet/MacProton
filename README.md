@@ -1,114 +1,109 @@
 # MacProton
 
-Windows-Spiele aus deiner Steam-Bibliothek auf dem Mac spielen. MacProton
-ist eine Mac-App auf Basis von Valves [Proton](README.proton.md): Wine
-mit DXVK und vkd3d-proton, die Direct3D auf Vulkan umsetzen, und Mesas
-KosmicKrisp, das Vulkan auf Metal umsetzt. MoltenVK steht als Ausweich-Treiber
-bereit.
+Play the Windows games of your Steam library on the Mac. MacProton is a Mac
+app based on Valve's [Proton](README.proton.md): Wine with DXVK and
+vkd3d-proton, which translate Direct3D to Vulkan, and Mesa's KosmicKrisp,
+which translates Vulkan to Metal. MoltenVK is available as a fallback driver.
 
-MacProton ist ein unabhängiges Projekt. Es ist nicht mit der Valve
-Corporation verbunden und wird von ihr weder unterstützt noch gesponsert.
+MacProton is an independent project. It is not affiliated with, endorsed or
+sponsored by Valve Corporation.
 
-## Was MacProton kann
+## What MacProton does
 
-- **Bibliothek abgleichen:** Übernimmt die Spiele deines Steam-Kontos,
-  ohne dass du App-IDs eingeben musst.
-- **Mac-Versionen nativ:** Gibt es ein Spiel auch für macOS, installiert
-  und startet MacProton es über den Steam-Client, ganz ohne Wine.
-- **Windows-Spiele:** Lädt sie mit Valves steamcmd und startet sie mit
-  Wine. Unterstützt werden Direct3D 9, 10, 11 und 12, auch in
-  32-Bit-Spielen.
-- **Downloads:** Ein eigener Reiter zeigt die Warteschlange. Downloads
-  lassen sich pausieren und fortsetzen, auch nach einem Neustart.
-- **Speicherort:** Spiele können auf einer externen Festplatte liegen,
-  per Rechtsklick „Installieren in …“ oder als Standardordner in den
-  Einstellungen. „Verschieben …“ zieht installierte Spiele um.
-- **Steam-Funktionen im Spiel:** Die Spiele sprechen mit dem Steam-Client,
-  getestet mit Lobbys. Online-Funktionen mit TLS laufen ebenfalls.
-- **Spielstände über Steam Cloud:** Für Spiele, deren Windows- und
-  Mac-Version dieselben Spielstände nutzen. Vorher werden beide gesichert.
-- **Controller:** Über SDL2. Getestet ist ein Xbox Wireless Controller
-  per Bluetooth.
-- **Hinweise:** Markiert Spiele mit Anti-Cheat, fremden Launchern oder
-  Online-Pflicht.
-- **Deutsch und Englisch:** Die App folgt der Sprache von macOS. Beim
-  ersten Start und in den Einstellungen lässt sie sich umstellen.
+- **Library sync:** Imports the games of your Steam account without you
+  entering app IDs.
+- **Native Mac versions:** If a game also exists for macOS, MacProton
+  installs and starts it through the Steam client, without Wine.
+- **Windows games:** Downloads them with Valve's steamcmd and runs them with
+  Wine. Direct3D 9, 10, 11 and 12 are supported, in 32-bit games too.
+- **Downloads:** A tab of its own shows the queue. Downloads can be paused
+  and resumed, even after a restart.
+- **Location:** Games can live on an external drive, per game with a
+  right-click on “Install In …” or as the default folder in Settings.
+  “Move …” relocates installed games.
+- **Steam features in games:** Games talk to the Steam client, tested with
+  lobbies. Online features using TLS work as well.
+- **Saves through the Steam Cloud:** For games whose Windows and Mac
+  versions share their saves. Both are backed up first.
+- **Controllers:** Through SDL2. Tested with an Xbox Wireless Controller
+  over Bluetooth.
+- **Warnings:** Marks games with anti-cheat, third-party launchers or an
+  online requirement.
+- **English and German:** The app follows the language of macOS. It can be
+  changed on the first start and in Settings.
 
-## Voraussetzungen
+## Requirements
 
-- macOS 14 oder neuer auf einem Mac mit Apple-Chip (getestet auf M3).
-  Intel-Macs sind ungetestet.
-- Rosetta 2. Fehlt es, bietet MacProton die Installation an.
-- Steam für Mac, angemeldet und gestartet.
+- macOS 14 or later on a Mac with Apple silicon (tested on an M3). Intel
+  Macs are untested. KosmicKrisp, the default graphics driver and the one
+  Direct3D 12 needs, requires macOS 26; on older systems MacProton uses
+  MoltenVK.
+- Rosetta 2. If it is missing, MacProton offers to install it.
+- Steam for Mac, signed in and running.
 
 ## Installation
 
-1. Lade `MacProton-….zip` unter
-   [Releases](../../releases) herunter, entpacke es und zieh
-   `MacProton.app` in den Ordner „Programme“.
-2. **Einmal freigeben.** MacProton ist nicht von Apple notarisiert. Das
-   setzt ein kostenpflichtiges Apple-Entwicklerkonto voraus. macOS fragt
-   deshalb beim ersten Öffnen nach. Prüf zuerst, dass der Download
-   unverändert ist. Der Wert muss mit der Datei `MacProton-….zip.sha256`
-   aus dem Release übereinstimmen:
+1. Download `MacProton-….zip` from [Releases](../../releases), unzip it and
+   drag `MacProton.app` into the Applications folder.
+2. **Allow it once.** MacProton is not notarized by Apple, which requires a
+   paid Apple developer account, so macOS asks on the first start. First
+   check that the download is unchanged. The value must match the file
+   `MacProton-….zip.sha256` of the release:
 
    ```bash
    shasum -a 256 ~/Downloads/MacProton-*.zip
    ```
 
-   Erlaube dann das Öffnen im Dialog von macOS, notfalls unter
-   Systemeinstellungen → Datenschutz & Sicherheit → „Dennoch öffnen“.
-   Alternativ entfernst du die Markierung „aus dem Internet geladen“ für
-   diese App selbst:
+   Then allow opening it in the macOS dialog, if necessary under System
+   Settings → Privacy & Security → “Open Anyway”. Alternatively remove the
+   “downloaded from the internet” mark of this app yourself:
 
    ```bash
    xattr -dr com.apple.quarantine /Applications/MacProton.app
    ```
 
-   Mach das nur, wenn du der Quelle vertraust. Der Befehl betrifft
-   ausschließlich `MacProton.app`.
-3. Starte MacProton. Ein Willkommensbildschirm führt durch die
-   Einrichtung: Die App lädt Valves steamcmd von Valves Server, prüft
-   dessen Signatur und zeigt den Fortschritt an. steamcmd aktualisiert sich
-   danach einmal selbst.
-4. Melde dich über „Bei Steam anmelden“ an. Dein Passwort und der
-   Steam-Guard-Code gehen nur an steamcmd. steamcmd merkt sich danach ein
-   Anmelde-Token, das Passwort wird nicht gespeichert.
-5. Klick auf „Los geht's“. MacProton übernimmt dann deine Spiele aus Steam.
+   Only do this if you trust the source. The command affects only
+   `MacProton.app`.
+3. Start MacProton. A welcome screen guides you through the setup: the app
+   downloads Valve's steamcmd from Valve's servers, checks its signature and
+   shows the progress. steamcmd then updates itself once.
+4. Sign in with “Sign In to Steam”. Your password and the Steam Guard code
+   go only to steamcmd. steamcmd then remembers a sign-in token; the
+   password is not stored.
+5. Click “Let's Go”. MacProton then imports your games from Steam.
 
-## Gut zu wissen
+## Good to know
 
-- **Steam ist kurz offline:** Steam erlaubt pro Mac nur eine Sitzung je
-  Konto. Meldet sich steamcmd an, etwa für einen Download, verliert der
-  Steam-Client seine Verbindung. MacProton startet Steam danach automatisch
-  neu, damit Lobbys und Online-Funktionen wieder gehen.
-- **Windows-Version eines Mac-Spiels:** Startest du sie über das
-  Kontextmenü, hält Steam das Spiel bis zum nächsten Steam-Neustart für
-  installiert.
-- **Speicherorte:** Spiele, Wine-Prefixe, Protokolle und Sicherungen
-  liegen unter `~/Library/Application Support/MacProton`.
+- **Steam goes offline briefly:** Steam allows only one session per account
+  on a Mac. When steamcmd signs in, for example for a download, the Steam
+  client loses its connection. MacProton then restarts Steam automatically
+  so that lobbies and online features work again.
+- **Windows version of a Mac game:** If you start it from the context menu,
+  Steam considers the game installed until Steam restarts.
+- **Locations:** Games, Wine prefixes, logs and backups are in
+  `~/Library/Application Support/MacProton`.
 
-## Bekannte Einschränkungen
+## Known limitations
 
-- Einzelne 32-Bit-Spiele stürzen beim Start ab, etwa Rogue Tower (Unity).
-- Direct3D 12 läuft mit KosmicKrisp in Rise of the Tomb Raider, Horizon Zero
-  Dawn und Unreal-Engine-5-Spielen (getestet mit Town To City). Sparse-
-  Ressourcen, Raytracing und Mesh Shader fehlen; die Leistung ist auf
-  kleineren Macs oft knapp, und der erste Start dauert, bis die Shader
-  übersetzt sind.
-- Spiele, die OpenGL 4.2 oder neuer brauchen (etwa Foundation), starten
-  nicht. macOS bietet höchstens OpenGL 4.1.
-- Spiele mit Anti-Cheat (Easy Anti-Cheat, BattlEye) funktionieren online
-  meist nicht.
-- Fremde Launcher wie die EA-App oder Ubisoft Connect werden nicht
-  unterstützt.
-- Das Steam-Overlay fehlt.
-- Direct3D 11 steht bis Feature Level 11_0 zur Verfügung, weil Metal keine
-  logischen Blend-Operationen kennt.
+- Some 32-bit games crash on start, such as Rogue Tower (Unity).
+- Direct3D 12 runs with KosmicKrisp in Rise of the Tomb Raider, Horizon Zero
+  Dawn and Unreal Engine 5 games (tested with Town To City). Sparse
+  resources, ray tracing and mesh shaders are missing; performance is often
+  tight on smaller Macs, and the first start takes a while until the shaders
+  are compiled.
+- Games that need OpenGL 4.2 or later (such as Foundation) do not start
+  with macOS's own OpenGL, which stops at 4.1; Mesa's Zink, selectable in a
+  game's launch options, offers OpenGL 4.6 on KosmicKrisp.
+- Games with anti-cheat (Easy Anti-Cheat, BattlEye) mostly do not work
+  online.
+- Third-party launchers such as the EA app or Ubisoft Connect are not
+  supported.
+- Direct3D 11 is available up to feature level 11_0 on MoltenVK and 11_1 on
+  KosmicKrisp, because Metal has no logic blend operations.
 
-## Selbst bauen
+## Building
 
-Du brauchst Xcode und Homebrew:
+You need Xcode and Homebrew:
 
 ```bash
 brew install bison flex mingw-w64 autoconf automake meson ninja glslang pkgconf
@@ -122,54 +117,53 @@ macos/build.sh ~/macproton-build
 macos/app/build-app.sh ~/macproton-app ~/macproton-build/dist
 ```
 
-`build.sh` lädt die Abhängigkeiten (Mesa, MoltenVK, FreeType, GMP, Nettle,
-GnuTLS, SDL2) in festen Versionen aus ihren offiziellen Quellen und prüft
-die Prüfsummen. Die Änderungen an Wine, DXVK, vkd3d-proton, Mesa und
-MoltenVK liegen als Patches in `macos/patches`. Ändert sich eine
-Komponente oder ihre Version, sammelt `macos/collect-licenses.sh` die
-Lizenztexte neu nach `macos/licenses`, die `build-app.sh` in die App legt.
-Details zum Port stehen in [docs/MACOS_PORT.md](docs/MACOS_PORT.md).
+`build.sh` downloads the dependencies (Mesa, MoltenVK, FreeType, GMP,
+Nettle, GnuTLS, SDL2) in pinned versions from their official sources and
+checks their checksums. The changes to Wine, DXVK, vkd3d-proton, Mesa and
+MoltenVK are patches in `macos/patches`. When a component or its version
+changes, `macos/collect-licenses.sh` collects the license texts into
+`macos/licenses` again, which `build-app.sh` puts into the app. The app's
+texts are German; the English ones are in `macos/app/Localization/en.py`.
+Details of the port are in [docs/MACOS_PORT.md](docs/MACOS_PORT.md).
 
-Ein Release entsteht lokal: Commit mit `git tag -a vX.Y.Z` markieren,
-Release-Notes in `macos/release-notes/vX.Y.Z.md` ablegen und dann
+A release is made locally: tag the commit with `git tag -a vX.Y.Z`, put the
+release notes into `macos/release-notes/vX.Y.Z.md` and run
 
 ```bash
 macos/release.sh ~/macproton-build/dist
 ```
 
-ausführen. Das Skript baut die App, packt sie mit Prüfsumme und
-veröffentlicht sie per `gh` als GitHub-Release.
+The script builds the app, zips it with a checksum and publishes it as a
+GitHub release with `gh`.
 
-## Lizenzen und Quellcode
+## Licenses and source code
 
-MacProton steht wie Proton unter mehreren Lizenzen, siehe
-[LICENSE](LICENSE). Valves Proton-Code steht unter der BSD-Lizenz in
-[LICENSE.proton](LICENSE.proton), MacProtons eigener Code (App, Skripte und
-Doku in `macos/`) unter der BSD-Lizenz in
-[LICENSE.macproton](LICENSE.macproton). Die Patches in `macos/patches`
-stehen unter der Lizenz des Projekts, das sie ändern. Die App enthält
-Software Dritter, unter anderem Wine, vkd3d-proton, GnuTLS, GMP und Nettle
-(LGPL), Mesa (MIT), MoltenVK (Apache 2.0), DXVK und SDL2 (zlib) sowie
-FreeType (FreeType License). Eine Übersicht mit Versionen und Quellen und
-alle Lizenztexte liegen in [macos/licenses](macos/licenses/README.md); in der
-App öffnet sie der Menüpunkt MacProton › Lizenzen …
+Like Proton, MacProton is covered by several licenses, see
+[LICENSE](LICENSE). Valve's Proton code is under the BSD license in
+[LICENSE.proton](LICENSE.proton), MacProton's own code (app, scripts and
+documentation in `macos/`) under the BSD license in
+[LICENSE.macproton](LICENSE.macproton). The patches in `macos/patches` are
+under the license of the project they change. The app contains third-party
+software, among it Wine, vkd3d-proton, GnuTLS, GMP and Nettle (LGPL), Mesa
+(MIT), MoltenVK (Apache 2.0), DXVK and SDL2 (zlib) and FreeType (FreeType
+License). An overview with versions and sources and all license texts are in
+[macos/licenses](macos/licenses/README.md); in the app, the menu item
+MacProton › Licenses … opens them.
 
-Der vollständige Quellcode jeder Version ist dieses Repository am Tag des
-Release: Alle Komponenten sind auf feste Versionen festgelegt, jede
-Änderung an ihnen liegt als Patch in `macos/patches`, und `macos/build.sh`
-baut daraus genau die ausgelieferte Laufzeitumgebung. Die LGPL-Bibliotheken
-liegen als eigene Dateien in der App und lassen sich durch selbst gebaute
-ersetzen.
+The complete source code of every version is this repository at the
+release's tag: all components are pinned to fixed versions, every change to
+them is a patch in `macos/patches`, and `macos/build.sh` builds exactly the
+shipped runtime from them. The LGPL libraries are separate files in the app
+and can be replaced by ones you build yourself.
 
-## Haftung und Marken
+## Warranty and trademarks
 
-MacProton wird ohne jede Gewährleistung bereitgestellt, siehe die
-Lizenztexte. Die Nutzung erfolgt auf eigenes Risiko, auch für dein
-Steam-Konto und deine Spielstände; MacProton sichert Spielstände vor jedem
-Abgleich mit der Steam Cloud.
+MacProton is provided without any warranty, see the license texts. You use
+it at your own risk, including for your Steam account and your saves;
+MacProton backs up saves before every sync with the Steam Cloud.
 
-MacProton ist kein Produkt von Valve oder Apple und mit keinem der beiden
-verbunden. Steam, steamcmd und Proton sind Marken bzw. Software der Valve
-Corporation, Metal und macOS Marken von Apple Inc. MacProton lädt steamcmd
-und die Steamworks-Laufzeitbibliotheken bei Bedarf direkt von Valves
-Servern und liefert sie nicht selbst aus.
+MacProton is not a product of Valve or Apple and is affiliated with neither.
+Steam, steamcmd and Proton are trademarks or software of Valve Corporation,
+Metal and macOS are trademarks of Apple Inc. MacProton downloads steamcmd
+and the Steamworks runtime libraries directly from Valve's servers when
+needed and does not ship them itself.
