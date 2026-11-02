@@ -1,0 +1,62 @@
+From b1470d74aff1ca2e10f422bd93988b57743f0e45 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Mon, 2 Nov 2026 01:01:14 +0100
+Subject: [PATCH] kk: Clear color attachments only when remapping them
+
+Beginning a render pass reset all eight color attachments of the render
+pass descriptor it had just created, which has none, before filling the
+ones in use: about 40 Metal calls for every render pass. Only a
+descriptor whose attachments get remapped needs its old ones cleared.
+In Kebab Chefs' menu this took about 3 % of DXVK's CS thread.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_draw.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 746dfa1..66a7617 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -201,6 +201,18 @@ vk_clear_color_value_to_mtl_clear_color(union VkClearColorValue color,
+    return swizzled_color;
+ }
+ 
++/* A new render pass descriptor has no attachments, only one being remapped
++ * needs its old ones cleared */
++static void
++kk_clear_color_attachments(mtl_render_pass_descriptor *pass_descriptor)
++{
++   for (uint32_t i = 0; i < KK_MAX_RTS; i++) {
++      mtl_render_pass_attachment_descriptor *attachment_descriptor =
++         mtl_render_pass_descriptor_get_color_attachment(pass_descriptor, i);
++      kk_clear_common_attachment_description(attachment_descriptor);
++   }
++}
++
+ static void
+ kk_set_color_attachments(mtl_render_pass_descriptor *pass_descriptor,
+                          struct kk_rendering_state *render,
+@@ -208,11 +220,6 @@ kk_set_color_attachments(mtl_render_pass_descriptor *pass_descriptor,
+                          bool force_attachment_load,
+                          bool rendering_to_whole_framebuffer)
+ {
+-   for (uint32_t i = 0; i < ARRAY_SIZE(render->color_att); i++) {
+-      mtl_render_pass_attachment_descriptor *attachment_descriptor =
+-         mtl_render_pass_descriptor_get_color_attachment(pass_descriptor, i);
+-      kk_clear_common_attachment_description(attachment_descriptor);
+-   }
+    for (uint32_t i = 0; i < ARRAY_SIZE(render->color_att); i++) {
+       struct kk_attachment *color_att = &render->color_att[i];
+       const struct kk_image_view *iview = color_att->iview;
+@@ -951,6 +958,7 @@ kk_flush_render_pass(struct kk_cmd_buffer *cmd)
+          /* Apply the store ops before the new color map is stored. */
+          kk_apply_attachment_store_ops(cmd, true);
+ 
++         kk_clear_color_attachments(cmd->state.gfx.render_pass_descriptor);
+          kk_set_color_attachments(
+             cmd->state.gfx.render_pass_descriptor, render, dyn, true,
+             cmd->state.gfx.render.rendering_to_whole_framebuffer);
+-- 
+2.56.0
+
