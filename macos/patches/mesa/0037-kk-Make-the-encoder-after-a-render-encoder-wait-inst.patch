@@ -1,0 +1,109 @@
+From c6b16c34636c1ed250ce6fadf6df03d0da40c17f Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Mon, 2 Nov 2026 02:41:35 +0100
+Subject: [PATCH] kk: Make the encoder after a render encoder wait instead
+
+Every encoder ended with a barrier on all stages. At the end of a render
+encoder Metal implements that barrier with a compute pass of its own,
+which cost both the recording thread and the GPU: in Kebab Chefs' menu
+the GPU was busy 79 % of the time with it and 33 % without.
+
+Render encoders now end without the barrier, and the next encoder waits
+for all prior work at its start, as does the first encoder of every
+command buffer, so the work stays in the same order. This is
+MESA_KK_LIGHT_BARRIERS=2, the new default; 1 keeps the earlier light
+barriers, which only wait for the application's barriers and broke
+Wine's D3D9 tests and vkd3d-proton's depth-stencil copy tests, and 0
+restores the barrier at the end of every encoder. The meta resolve after
+a render pass and a render pass restarted for remapped attachments now
+wait for the pass before them in every mode.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c      | 8 ++++++++
+ src/kosmickrisp/vulkan/kk_cmd_draw.c        | 5 +++++
+ src/kosmickrisp/vulkan/kk_physical_device.c | 2 +-
+ src/kosmickrisp/vulkan/kk_physical_device.h | 5 +++--
+ 4 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index c58a74e..d85c97f 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -241,6 +241,11 @@ kk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
+    }
+    mtl_begin_command_buffer(cmd->metal.cmd_buf, cmd->metal.allocator);
+ 
++   /* The last render encoder of the previous command buffer may have ended
++    * without a barrier */
++   if (kk_device_physical(dev)->settings.light_barriers == 2)
++      cmd->pending_barrier = true;
++
+    return VK_SUCCESS;
+ 
+ fail_allocator:
+@@ -374,6 +379,9 @@ end_encoder(struct kk_cmd_buffer *cmd, mtl_command_encoder *encoder,
+    if (!render || !kk_light_barriers(cmd) ||
+        util_dynarray_num_elements(&cmd->ts_resolves, struct kk_ts_resolve))
+       mtl_barrier_after_stages(encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
++   else if (kk_device_physical(kk_cmd_buffer_device(cmd))
++               ->settings.light_barriers == 2)
++      cmd->pending_barrier = true;
+    mtl_end_encoding(encoder);
+    mtl_release(encoder);
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 66a7617..234f716 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -647,6 +647,9 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
+    memset(render, 0, sizeof(*render));
+ 
+    if (need_meta_resolve) {
++      /* The resolve reads what the render pass stored, and with light barriers
++       * the render encoder ended without a barrier */
++      cmd->pending_barrier = true;
+       kk_meta_resolve_rendering(cmd, &vk_render);
+    }
+ }
+@@ -978,6 +981,8 @@ kk_flush_render_pass(struct kk_cmd_buffer *cmd)
+       cs_end(cmd);
+       kk_cmd_buffer_dirty_all_gfx(cmd);
+       cmd->state.gfx.need_to_start_render_pass = true;
++      /* The restarted pass loads what this one stored */
++      cmd->pending_barrier = true;
+    }
+ }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 0217aa0..aaa4f1b 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -1136,7 +1136,7 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
+    settings->gpu_capture_enabled =
+       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
+    settings->light_barriers =
+-      debug_get_bool_option("MESA_KK_LIGHT_BARRIERS", false);
++      debug_get_num_option("MESA_KK_LIGHT_BARRIERS", 2);
+    settings->null_textures =
+       debug_get_bool_option("MESA_KK_NULL_TEXTURES", true);
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.h b/src/kosmickrisp/vulkan/kk_physical_device.h
+index 52ee5a5..d7b7f9e 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -54,8 +54,9 @@ struct kk_env_settings {
+    const char *gpu_capture_dir;
+    uint64_t disabled_workarounds;
+    /* MESA_KK_LIGHT_BARRIERS: render encoders end without a barrier, the
+-    * application's barriers wait at the start of the next encoder */
+-   bool light_barriers;
++    * application's barriers wait at the start of the next encoder. With 2,
++    * the next encoder always waits instead */
++   unsigned light_barriers;
+    /* Reads of images and textures through null descriptors read zeroed
+     * textures instead of branching around every access, see
+     * kk_nir_lower_null_images. MESA_KK_NULL_TEXTURES=0 branches. */
+-- 
+2.56.0
+
