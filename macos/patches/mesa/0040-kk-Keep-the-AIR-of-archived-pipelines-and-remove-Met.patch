@@ -1,0 +1,805 @@
+From 7fd8293816ca9028c79a1ca98bb439cfe272d523 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Tue, 3 Nov 2026 18:39:11 +0100
+Subject: [PATCH] kk: Keep the AIR of archived pipelines and remove Metal's
+ copies
+
+Pipelines from the archives still need their functions, which Metal
+compiles from MSL: Rise of the Tomb Raider's 28,000 libraries took
+33 s on the compile threads, more than the archived pipelines. And
+Metal's serializer leaves the working copy of each capture in the
+app's cache, which every Wine process shares, as large as the archive,
+and never removes it: 3.2 GB on the development Mac. Its metallib holds the
+AIR of every function captured and loads in no time.
+
+So each write moves the metallibs of the working copies that were
+incomplete before it and are complete after next to the archive, as
+NAME.K.air, and removes those copies; a new compiler removes the ones
+nothing changed for 10 minutes, unless MESA_KK_KEEP_STALE_COPIES is
+set. Entry points are named after a hash of the library's MSL, its
+options and the macOS build, and a library whose entry point is in a
+kept metallib comes from there instead of compiling.
+
+Pipelines a game keeps building are written after 60 s too, and the
+archives are written when the process exits, as Wine does when a game
+ends. Wine kills the other threads first, maybe in the middle of a
+build, so that write gives up after a second without the lock. A
+pipeline is now counted before a write can take it, which wrote it
+again. MESA_KK_COMPILE_STATS also prints the libraries from AIR and the
+pipelines from archives.
+
+Rise of the Tomb Raider with complete archives: libraries 1.8 instead
+of 33 s, mean 27.7-28.1 instead of 26.6 fps, Geothermal Valley 23.7-24.4
+instead of 21.7 fps, its 1 % low 17-18 instead of 14 fps.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/bridge/mtl_compiler.h       |   9 +
+ src/kosmickrisp/bridge/mtl_compiler.m       | 453 ++++++++++++++++++--
+ src/kosmickrisp/bridge/stubs/mtl_compiler.c |   6 +
+ src/kosmickrisp/vulkan/kk_shader.c          |   8 +-
+ 4 files changed, 446 insertions(+), 30 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.h b/src/kosmickrisp/bridge/mtl_compiler.h
+index 523900b..6f1fed8 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.h
++++ b/src/kosmickrisp/bridge/mtl_compiler.h
+@@ -25,6 +25,15 @@ void mtl_compiler_write_archive(mtl_compiler *compiler);
+ void mtl_compiler_begin_build(mtl_compiler *compiler);
+ void mtl_compiler_end_build(mtl_compiler *compiler);
+ 
++/* Pipelines of the process that came from archives and that Metal compiled,
++ * how long they took in all, and libraries that came from kept AIR */
++struct mtl_compiler_stats {
++   uint64_t archived, archived_ns;
++   uint64_t compiled, compiled_ns;
++   uint64_t air_libraries;
++};
++void mtl_compiler_get_stats(struct mtl_compiler_stats *stats);
++
+ /* Library */
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index e92e0fd..4973464 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -17,8 +17,15 @@
+ 
+ #include "util/macros.h"
+ 
++#define XXH_INLINE_ALL
++#include "util/xxhash.h"
++
++#include <ctype.h>
++#include <limits.h>
+ #include <objc/runtime.h>
+ #include <pthread.h>
++#include <sys/sysctl.h>
++#include <time.h>
+ #include <unistd.h>
+ 
+ /* Pipeline archives
+@@ -32,10 +39,33 @@
+  * So the compiler keeps the pipelines it builds in archives of the game's own:
+  * pipelines come from them when they are there, and the ones Metal builds are
+  * captured and written to a new archive every ARCHIVE_WRITE_EVERY pipelines,
+- * ARCHIVE_WRITE_IDLE seconds after the last one (at most every
+- * ARCHIVE_WRITE_GAP seconds), and when the last device goes, which Proton ends
+- * games without. Writing empties the capture and must not run while the
+- * compiler builds a pipeline (Metal crashes), hence the lock.
++ * ARCHIVE_WRITE_IDLE seconds after the last one or ARCHIVE_WRITE_BUSY seconds
++ * after the first unwritten one while the game keeps creating them (at most
++ * every ARCHIVE_WRITE_GAP seconds), when the last device goes and when the
++ * process exits, as Wine does when a game ends: games rarely destroy their
++ * devices, and Proton kills processes without exiting. Writing empties the
++ * capture and must not run while the compiler builds a pipeline (Metal
++ * crashes), hence the lock. Wine kills the process's other threads before it
++ * exits, maybe in the middle of a build, so the write at exit gives up when it
++ * doesn't get the lock soon.
++ *
++ * Metal leaves the working copy of each capture in the app's cache, which all
++ * of Wine's processes share, as large as the archive, and never uses it again:
++ * archives load without it, and captures, ours or other processes', write
++ * complete archives when it goes in the middle. A working copy is complete once
++ * it holds a metallib, small captures get theirs only then. So each write
++ * removes the working copies that completed while it ran, and a new compiler
++ * removes the ones nothing changed for COPY_STALE seconds, left by processes
++ * that ended while capturing, unless MESA_KK_KEEP_STALE_COPIES is set.
++ *
++ * Archived pipelines still need their functions, which Metal compiles from
++ * MSL, a frontend that took longer than the pipelines themselves once its own
++ * cache was full. The working copy holds the AIR of the functions captured,
++ * one metallib, which loads in no time and builds the same pipelines. So a
++ * write keeps it next to the archive NAME as NAME.K.air, and the compiler names
++ * each library's entry point after a hash of its MSL and options: a library
++ * whose entry point is in a kept metallib comes from there, others compile.
++ * The hash includes the macOS build, so a new MSL frontend compiles again.
+  *
+  * Archives only hold the binaries for the descriptors, functions and device
+  * they were built for, so stale ones only miss, and Metal can't add to one.
+@@ -47,6 +77,8 @@
+ #define ARCHIVE_WRITE_EVERY 1024
+ #define ARCHIVE_WRITE_IDLE 5
+ #define ARCHIVE_WRITE_GAP 30
++#define ARCHIVE_WRITE_BUSY 60
++#define COPY_STALE 600
+ #define ARCHIVE_COMPACT_FILES 32
+ #define ARCHIVE_MAX_FILES 128
+ #define ARCHIVE_MAX_BYTES (4ull << 30)
+@@ -54,7 +86,14 @@
+ @interface KKPipelineArchives : NSObject {
+ @public
+    NSString *dir;
++   /* Metal's working copies, and the ones there before the compiler */
++   NSString *copies;
++   NSSet<NSString *> *old_copies;
++   /* Seeds the hashes that name entry points */
++   uint64_t seed;
+    NSArray<id<MTL4Archive>> *archives;
++   /* Kept metallibs by the entry points they hold */
++   NSDictionary<NSString *, id<MTLLibrary>> *air;
+    id<MTL4PipelineDataSetSerializer> serializer;
+    /* Looks pipelines up in the archives through the compiler, which captures
+     * them, when compacting */
+@@ -65,15 +104,24 @@
+    uint32_t writing;
+    uint32_t written;
+    uint64_t last_built;
++   uint64_t first_unwritten;
+    uint64_t last_written;
+    dispatch_queue_t queue;
+    dispatch_source_t timer;
+ }
+ @end
+ 
++/* The archives of the process's compilers, written when it exits */
++#define MAX_LIVE_ARCHIVES 8
++static pthread_mutex_t live_lock = PTHREAD_MUTEX_INITIALIZER;
++static KKPipelineArchives *live_archives[MAX_LIVE_ARCHIVES];
++
++static void unlist_archives(KKPipelineArchives *archives);
++
+ @implementation KKPipelineArchives
+ - (void)dealloc
+ {
++   unlist_archives(self);
+    if (timer) {
+       dispatch_source_cancel(timer);
+       /* The timer's handler runs on the queue and does not retain self */
+@@ -82,7 +130,10 @@
+       dispatch_release(queue);
+    }
+    [dir release];
++   [copies release];
++   [old_copies release];
+    [archives release];
++   [air release];
+    [serializer release];
+    [capture_options release];
+    pthread_rwlock_destroy(&lock);
+@@ -90,16 +141,110 @@
+ }
+ @end
+ 
++/* A library with its entry point renamed */
++@interface KKLibrary : NSObject {
++@public
++   id<MTLLibrary> library;
++   NSString *entry_point;
++}
++@end
++
++@implementation KKLibrary
++- (void)dealloc
++{
++   [library release];
++   [entry_point release];
++   [super dealloc];
++}
++@end
++
++static void try_write_archive(KKPipelineArchives *archives, bool exiting);
++
++static void
++write_live_archives(void)
++{
++   /* A killed thread may hold it */
++   if (pthread_mutex_trylock(&live_lock))
++      return;
++   for (unsigned i = 0; i < MAX_LIVE_ARCHIVES; i++) {
++      @autoreleasepool {
++         if (live_archives[i])
++            try_write_archive(live_archives[i], true);
++      }
++   }
++   pthread_mutex_unlock(&live_lock);
++}
++
++static void
++write_live_archives_at_exit(void)
++{
++   atexit(write_live_archives);
++}
++
++static void
++list_archives(KKPipelineArchives *archives)
++{
++   static pthread_once_t once = PTHREAD_ONCE_INIT;
++   pthread_once(&once, write_live_archives_at_exit);
++   pthread_mutex_lock(&live_lock);
++   for (unsigned i = 0; i < MAX_LIVE_ARCHIVES; i++) {
++      if (!live_archives[i]) {
++         live_archives[i] = archives;
++         break;
++      }
++   }
++   pthread_mutex_unlock(&live_lock);
++}
++
++static void
++unlist_archives(KKPipelineArchives *archives)
++{
++   pthread_mutex_lock(&live_lock);
++   for (unsigned i = 0; i < MAX_LIVE_ARCHIVES; i++) {
++      if (live_archives[i] == archives)
++         live_archives[i] = nil;
++   }
++   pthread_mutex_unlock(&live_lock);
++}
++
+ static char kk_archives_key;
+ 
++static struct mtl_compiler_stats stats;
++
++static uint64_t
++now_ns(void)
++{
++   return clock_gettime_nsec_np(CLOCK_MONOTONIC);
++}
++
++void
++mtl_compiler_get_stats(struct mtl_compiler_stats *out)
++{
++   out->archived = __atomic_load_n(&stats.archived, __ATOMIC_RELAXED);
++   out->archived_ns = __atomic_load_n(&stats.archived_ns, __ATOMIC_RELAXED);
++   out->compiled = __atomic_load_n(&stats.compiled, __ATOMIC_RELAXED);
++   out->compiled_ns = __atomic_load_n(&stats.compiled_ns, __ATOMIC_RELAXED);
++   out->air_libraries = __atomic_load_n(&stats.air_libraries, __ATOMIC_RELAXED);
++}
++
++static void
++count_pipeline(bool archived, uint64_t start)
++{
++   uint64_t ns = now_ns() - start;
++   __atomic_add_fetch(archived ? &stats.archived : &stats.compiled, 1, __ATOMIC_RELAXED);
++   __atomic_add_fetch(archived ? &stats.archived_ns : &stats.compiled_ns, ns, __ATOMIC_RELAXED);
++}
++
+ static KKPipelineArchives *
+ archives_of(id<MTL4Compiler> compiler)
+ {
+    return objc_getAssociatedObject(compiler, &kk_archives_key);
+ }
+ 
++static NSString *gpuarchiver_dir(void);
++static void remove_stale_copies(NSString *copies);
+ static void start_idle_writes(KKPipelineArchives *archives);
+-static void write_archive(KKPipelineArchives *archives);
++static void write_archive(KKPipelineArchives *archives, bool exiting);
+ 
+ struct archive_file {
+    NSString *name;
+@@ -121,8 +266,22 @@ open_archives(KKPipelineArchives *archives, id<MTLDevice> dev)
+       [[fm contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)];
+    struct archive_file *files = calloc(names.count + 1, sizeof(*files));
+    unsigned n = 0, newest = 0;
++   /* An archive's metallibs, NAME.K.air, sort right after the archive NAME */
++   NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *airs = [NSMutableDictionary dictionary];
+    for (NSString *name in names) {
+       NSString *path = [dir stringByAppendingPathComponent:name];
++      if ([name hasSuffix:@".air"]) {
++         NSString *archive = [[name stringByDeletingPathExtension] stringByDeletingPathExtension];
++         if (n && [files[n - 1].name isEqualToString:archive]) {
++            if (!airs[archive])
++               airs[archive] = [NSMutableArray array];
++            [airs[archive] addObject:name];
++            files[n - 1].bytes += [[fm attributesOfItemAtPath:path error:nil] fileSize];
++         } else {
++            [fm removeItemAtPath:path error:nil];
++         }
++         continue;
++      }
+       unsigned gen, count;
+       long time;
+       int pid;
+@@ -159,10 +318,14 @@ open_archives(KKPipelineArchives *archives, id<MTLDevice> dev)
+       bytes -= files[first++].bytes;
+    if (n - first > ARCHIVE_MAX_FILES || bytes > ARCHIVE_MAX_BYTES)
+       first = n;
+-   for (unsigned i = 0; i < first; i++)
++   for (unsigned i = 0; i < first; i++) {
+       [fm removeItemAtPath:[dir stringByAppendingPathComponent:files[i].name] error:nil];
++      for (NSString *name in airs[files[i].name])
++         [fm removeItemAtPath:[dir stringByAppendingPathComponent:name] error:nil];
++   }
+ 
+    NSMutableArray<id<MTL4Archive>> *opened = [NSMutableArray array];
++   NSMutableDictionary<NSString *, id<MTLLibrary>> *air = [NSMutableDictionary dictionary];
+    for (unsigned i = n; i-- > first;) {
+       NSString *path = [dir stringByAppendingPathComponent:files[i].name];
+       id<MTL4Archive> archive = [dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:nil];
+@@ -172,10 +335,24 @@ open_archives(KKPipelineArchives *archives, id<MTLDevice> dev)
+       } else {
+          [fm removeItemAtPath:path error:nil];
+       }
++      for (NSString *name in airs[files[i].name]) {
++         NSString *air_path = [dir stringByAppendingPathComponent:name];
++         id<MTLLibrary> lib = archive ? [dev newLibraryWithURL:[NSURL fileURLWithPath:air_path] error:nil] : nil;
++         if (!lib) {
++            [fm removeItemAtPath:air_path error:nil];
++            continue;
++         }
++         for (NSString *function in lib.functionNames) {
++            if (!air[function])
++               air[function] = lib;
++         }
++         [lib release];
++      }
+    }
+    free(files);
+ 
+    archives->archives = [opened retain];
++   archives->air = [air copy];
+    archives->gen = newest;
+    if (opened.count > ARCHIVE_COMPACT_FILES) {
+       archives->gen = newest + 1;
+@@ -197,6 +374,13 @@ mtl_new_compiler(mtl_device *device, const char *archive_dir)
+       if (archive_dir) {
+          archives = [[KKPipelineArchives new] autorelease];
+          archives->dir = [@(archive_dir) retain];
++         archives->copies = [gpuarchiver_dir() retain];
++         archives->old_copies = [[NSSet alloc]
++            initWithArray:[[NSFileManager defaultManager] contentsOfDirectoryAtPath:archives->copies error:nil]];
++         char os[64] = "";
++         size_t os_size = sizeof(os);
++         sysctlbyname("kern.osversion", os, &os_size, NULL, 0);
++         archives->seed = XXH3_64bits(os, strnlen(os, sizeof(os)));
+          open_archives(archives, dev);
+          pthread_rwlock_init(&archives->lock, NULL);
+ 
+@@ -206,6 +390,16 @@ mtl_new_compiler(mtl_device *device, const char *archive_dir)
+          archives->serializer = [dev newPipelineDataSetSerializerWithDescriptor:sdesc];
+          desc.pipelineDataSetSerializer = archives->serializer;
+          start_idle_writes(archives);
++         /* Not on the queue of the writes: the first one may remove thousands
++          * of files */
++         NSString *copies = archives->copies;
++         if (!getenv("MESA_KK_KEEP_STALE_COPIES")) {
++            dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
++               @autoreleasepool {
++                  remove_stale_copies(copies);
++               }
++            });
++         }
+       }
+ 
+       NSError *error;
+@@ -215,6 +409,7 @@ mtl_new_compiler(mtl_device *device, const char *archive_dir)
+          fprintf(stderr, "Failed to create MTL4Compiler: %s\n", [error.localizedDescription UTF8String]);
+       } else if (archives) {
+          objc_setAssociatedObject(compiler, &kk_archives_key, archives, OBJC_ASSOCIATION_RETAIN);
++         list_archives(archives);
+       }
+ 
+       return compiler;
+@@ -222,10 +417,10 @@ mtl_new_compiler(mtl_device *device, const char *archive_dir)
+ }
+ 
+ static void
+-try_write_archive(KKPipelineArchives *archives)
++try_write_archive(KKPipelineArchives *archives, bool exiting)
+ {
+    if (!__atomic_exchange_n(&archives->writing, 1, __ATOMIC_ACQUIRE)) {
+-      write_archive(archives);
++      write_archive(archives, exiting);
+       __atomic_store_n(&archives->writing, 0, __ATOMIC_RELEASE);
+    }
+ }
+@@ -241,10 +436,12 @@ start_idle_writes(KKPipelineArchives *archives)
+       @autoreleasepool {
+          KKPipelineArchives *a = ptr;
+          int64_t now = time(NULL);
+-         if (__atomic_load_n(&a->unwritten, __ATOMIC_RELAXED) &&
+-             now - (int64_t)__atomic_load_n(&a->last_built, __ATOMIC_RELAXED) >= ARCHIVE_WRITE_IDLE &&
+-             now - (int64_t)__atomic_load_n(&a->last_written, __ATOMIC_RELAXED) >= ARCHIVE_WRITE_GAP)
+-            try_write_archive(a);
++         int64_t since_built = now - (int64_t)__atomic_load_n(&a->last_built, __ATOMIC_RELAXED);
++         int64_t since_first = now - (int64_t)__atomic_load_n(&a->first_unwritten, __ATOMIC_RELAXED);
++         int64_t since_written = now - (int64_t)__atomic_load_n(&a->last_written, __ATOMIC_RELAXED);
++         if (__atomic_load_n(&a->unwritten, __ATOMIC_RELAXED) && since_written >= ARCHIVE_WRITE_GAP &&
++             (since_built >= ARCHIVE_WRITE_IDLE || since_first >= ARCHIVE_WRITE_BUSY))
++            try_write_archive(a, false);
+       }
+    });
+    dispatch_source_set_timer(archives->timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+@@ -252,32 +449,157 @@ start_idle_writes(KKPipelineArchives *archives)
+    dispatch_resume(archives->timer);
+ }
+ 
++/* Where Metal keeps the working copies of the pipelines it captures */
++static NSString *
++gpuarchiver_dir(void)
++{
++   char cache[PATH_MAX];
++   if (!confstr(_CS_DARWIN_USER_CACHE_DIR, cache, sizeof(cache)))
++      return nil;
++   NSString *dir = @(cache);
++   NSString *bundle = [[NSBundle mainBundle] bundleIdentifier];
++   if (bundle)
++      dir = [dir stringByAppendingPathComponent:bundle];
++   return [dir stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
++}
++
++/* The AIR folders of a working copy */
++static NSArray<NSString *> *
++air_dirs(NSString *copy)
++{
++   NSMutableArray<NSString *> *dirs = [NSMutableArray array];
++   for (NSString *sub in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:copy error:nil]) {
++      if ([sub hasPrefix:@"air"])
++         [dirs addObject:[copy stringByAppendingPathComponent:sub]];
++   }
++   return dirs;
++}
++
++/* The metallibs of a complete working copy, the only files of its AIR folders
++ * that end so */
++static NSArray<NSString *> *
++copy_metallibs(NSString *copy)
++{
++   NSMutableArray<NSString *> *libs = [NSMutableArray array];
++   for (NSString *dir in air_dirs(copy)) {
++      for (NSString *name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil]) {
++         if ([name hasSuffix:@".metallib"])
++            [libs addObject:[dir stringByAppendingPathComponent:name]];
++      }
++   }
++   return libs;
++}
++
++/* Removes the working copies nothing changed for COPY_STALE seconds, neither
++ * the folder nor what it holds */
++static void
++remove_stale_copies(NSString *copies)
++{
++   NSFileManager *fm = [NSFileManager defaultManager];
++   NSDate *stale = [NSDate dateWithTimeIntervalSinceNow:-COPY_STALE];
++   for (NSString *name in [fm contentsOfDirectoryAtPath:copies error:nil]) {
++      if (![name hasPrefix:@"gpuarchiver-"])
++         continue;
++      NSString *copy = [copies stringByAppendingPathComponent:name];
++      NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithObject:copy];
++      for (NSString *sub in [fm contentsOfDirectoryAtPath:copy error:nil])
++         [paths addObject:[copy stringByAppendingPathComponent:sub]];
++      bool changed = false;
++      for (NSString *path in paths) {
++         NSDate *modified = [[fm attributesOfItemAtPath:path error:nil] fileModificationDate];
++         changed |= !modified || [modified compare:stale] == NSOrderedDescending;
++      }
++      if (!changed)
++         [fm removeItemAtPath:copy error:nil];
++   }
++}
++
++/* The complete working copies that appeared since the compiler came, ours and
++ * other processes' */
++static NSMutableSet<NSString *> *
++complete_copies(KKPipelineArchives *archives)
++{
++   NSMutableSet<NSString *> *copies = [NSMutableSet set];
++   for (NSString *name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:archives->copies error:nil]) {
++      if (![name hasPrefix:@"gpuarchiver-"] || [archives->old_copies containsObject:name])
++         continue;
++      NSString *copy = [archives->copies stringByAppendingPathComponent:name];
++      if (copy_metallibs(copy).count)
++         [copies addObject:copy];
++   }
++   return copies;
++}
++
++/* Removes the working copies a write completed, after moving their AIR next
++ * to the archive written as name, when there is one */
++static void
++remove_working_copies(KKPipelineArchives *archives, NSSet<NSString *> *completed, NSString *name)
++{
++   NSFileManager *fm = [NSFileManager defaultManager];
++   unsigned kept = 0;
++   for (NSString *copy in completed) {
++      NSArray<NSString *> *libs = copy_metallibs(copy);
++      if (!libs.count)
++         continue;
++      for (NSString *lib in name ? libs : nil) {
++         NSString *air = [NSString stringWithFormat:@"%@.%u.air", name, kept];
++         if ([fm moveItemAtPath:lib toPath:[archives->dir stringByAppendingPathComponent:air] error:nil])
++            kept++;
++      }
++      [fm removeItemAtPath:copy error:nil];
++   }
++}
++
++/* Waits for the builds to end, at exit a second at most: Wine killed the
++ * process's other threads, maybe in the middle of one */
++static bool
++lock_builds(KKPipelineArchives *archives, bool exiting)
++{
++   if (!exiting)
++      return !pthread_rwlock_wrlock(&archives->lock);
++   for (unsigned i = 0; i < 100; i++) {
++      if (!pthread_rwlock_trywrlock(&archives->lock))
++         return true;
++      usleep(10 * 1000);
++   }
++   return false;
++}
++
+ static void
+-write_archive(KKPipelineArchives *archives)
++write_archive(KKPipelineArchives *archives, bool exiting)
+ {
+-   pthread_rwlock_wrlock(&archives->lock);
++   if (!lock_builds(archives, exiting))
++      return;
+    uint32_t count = __atomic_load_n(&archives->unwritten, __ATOMIC_RELAXED);
++   NSString *written = nil;
++   NSMutableSet<NSString *> *completed = nil;
+    if (count) {
++      /* Small captures get their working copy only now. Another process's
++       * write may complete one meanwhile too. */
++      NSSet<NSString *> *complete = complete_copies(archives);
+       NSString *name = [NSString stringWithFormat:@"%04u-%010ld-%d-%u-%u.mtl4a", archives->gen,
+                                                   (long)time(NULL), getpid(), archives->written++, count];
+       NSString *path = [archives->dir stringByAppendingPathComponent:name];
+       NSString *tmp = [path stringByAppendingString:@".tmp"];
+       NSError *error = nil;
+-      struct timespec t0, t1;
+-      clock_gettime(CLOCK_MONOTONIC, &t0);
++      uint64_t start = now_ns();
+       BOOL ok = [archives->serializer serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&error];
++      completed = complete_copies(archives);
++      [completed minusSet:complete];
+       if (ok)
+          rename([tmp fileSystemRepresentation], [path fileSystemRepresentation]);
+       else
+          unlink([tmp fileSystemRepresentation]);
+-      clock_gettime(CLOCK_MONOTONIC, &t1);
+       if (getenv("MESA_KK_COMPILE_STATS"))
+          fprintf(stderr, "kk: %s %u pipelines to %s in %.2f s\n", ok ? "wrote" : "failed to write",
+-                 count, [name UTF8String], (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
++                 count, [name UTF8String], (now_ns() - start) / 1e9);
+       __atomic_store_n(&archives->unwritten, 0, __ATOMIC_RELAXED);
+       __atomic_store_n(&archives->last_written, (uint64_t)time(NULL), __ATOMIC_RELAXED);
++      written = ok ? name : nil;
+    }
+    pthread_rwlock_unlock(&archives->lock);
++   if (count)
++      remove_working_copies(archives, completed, written);
+ }
+ 
+ void
+@@ -286,7 +608,7 @@ mtl_compiler_write_archive(mtl_compiler *compiler)
+    @autoreleasepool {
+       KKPipelineArchives *archives = archives_of((id<MTL4Compiler>)compiler);
+       if (archives)
+-         try_write_archive(archives);
++         try_write_archive(archives, false);
+    }
+ }
+ 
+@@ -305,13 +627,18 @@ end_build(KKPipelineArchives *archives, bool captured)
+    if (!archives)
+       return;
+ 
++   /* Counted before a write gets the lock, which writes the pipeline */
++   uint32_t unwritten = 0;
++   if (captured) {
++      uint64_t now = time(NULL);
++      __atomic_store_n(&archives->last_built, now, __ATOMIC_RELAXED);
++      unwritten = __atomic_add_fetch(&archives->unwritten, 1, __ATOMIC_RELAXED);
++      if (unwritten == 1)
++         __atomic_store_n(&archives->first_unwritten, now, __ATOMIC_RELAXED);
++   }
+    pthread_rwlock_unlock(&archives->lock);
+-   if (!captured)
+-      return;
+-
+-   __atomic_store_n(&archives->last_built, (uint64_t)time(NULL), __ATOMIC_RELAXED);
+-   if (__atomic_add_fetch(&archives->unwritten, 1, __ATOMIC_RELAXED) >= ARCHIVE_WRITE_EVERY)
+-      try_write_archive(archives);
++   if (unwritten >= ARCHIVE_WRITE_EVERY)
++      try_write_archive(archives, false);
+ }
+ 
+ void
+@@ -327,6 +654,41 @@ mtl_compiler_end_build(mtl_compiler *compiler)
+ }
+ 
+ /* Library */
++
++/* The entry point libraries have, which their MSL names */
++#define ENTRY_POINT "main_entrypoint"
++
++static bool
++is_identifier_char(char c)
++{
++   return isalnum((unsigned char)c) || c == '_';
++}
++
++/* src with each ENTRY_POINT renamed to entry_point, nil when src is not ASCII */
++static NSString *
++rename_entry_point(const char *src, const char *entry_point)
++{
++   const size_t len = strlen(ENTRY_POINT), new_len = strlen(entry_point);
++   size_t hits = 0;
++   for (const char *p = src; (p = strstr(p, ENTRY_POINT)); p += len)
++      hits++;
++   char *out = malloc(strlen(src) + hits * (new_len - len) + 1), *o = out;
++   const char *p = src, *hit;
++   while ((hit = strstr(p, ENTRY_POINT))) {
++      const char *end = hit + len;
++      bool word = (hit == src || !is_identifier_char(hit[-1])) && !is_identifier_char(*end);
++      memcpy(o, p, hit - p);
++      o += hit - p;
++      memcpy(o, word ? entry_point : ENTRY_POINT, word ? new_len : len);
++      o += word ? new_len : len;
++      p = end;
++   }
++   strcpy(o, p);
++   NSString *renamed = [NSString stringWithCString:out encoding:NSASCIIStringEncoding];
++   free(out);
++   return renamed;
++}
++
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+                 enum mtl_language_version msl_version,
+@@ -335,7 +697,28 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+ {
+    @autoreleasepool {
+       id<MTL4Compiler> comp = (id<MTL4Compiler>)compiler;
+-      NSString *ns_src = [NSString stringWithCString:src encoding:NSASCIIStringEncoding];
++      KKPipelineArchives *archives = archives_of(comp);
++
++      /* Entry points named after the MSL and options, which kept AIR has */
++      KKLibrary *named = nil;
++      if (archives && strstr(src, ENTRY_POINT)) {
++         uint64_t seed = archives->seed ^ ((uint64_t)msl_version << 16 | (uint64_t)math_mode << 8 | (uint64_t)math_fp_fns);
++         named = [[KKLibrary new] autorelease];
++         named->entry_point = [[NSString alloc]
++            initWithFormat:@"%s_%016llx", ENTRY_POINT, (unsigned long long)XXH3_64bits_withSeed(src, strlen(src), seed)];
++         id<MTLLibrary> air = archives->air[named->entry_point];
++         if (air) {
++            named->library = [air retain];
++            __atomic_add_fetch(&stats.air_libraries, 1, __ATOMIC_RELAXED);
++            return [named retain];
++         }
++      }
++
++      NSString *ns_src = named ? rename_entry_point(src, named->entry_point.UTF8String) : nil;
++      if (!ns_src) {
++         named = nil;
++         ns_src = [NSString stringWithCString:src encoding:NSASCIIStringEncoding];
++      }
+ 
+       MTLCompileOptions *opts = [[MTLCompileOptions new] autorelease];
+       opts.languageVersion = (MTLLanguageVersion)msl_version;
+@@ -352,9 +735,13 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+ 
+       if (lib == nil) {
+          fprintf(stderr, "Failed to create MTLLibrary: %s\n", [error.localizedDescription UTF8String]);
++         return nil;
+       }
++      if (!named)
++         return lib;
+ 
+-      return lib;
++      named->library = lib;
++      return [named retain];
+    }
+ }
+ 
+@@ -362,10 +749,16 @@ mtl_function_descriptor *
+ mtl_new_library_function_descriptor(mtl_library *library, const char *entry_point)
+ {
+    @autoreleasepool {
+-      id<MTLLibrary> lib = (id<MTLLibrary>)library;
++      id lib = (id)library;
+       NSString *ns_entry_point = [NSString stringWithCString:entry_point encoding:NSASCIIStringEncoding];
+ 
+       MTL4LibraryFunctionDescriptor *desc = [MTL4LibraryFunctionDescriptor new];
++      if ([lib isKindOfClass:[KKLibrary class]]) {
++         KKLibrary *named = lib;
++         lib = named->library;
++         if (!strcmp(entry_point, ENTRY_POINT))
++            ns_entry_point = named->entry_point;
++      }
+       desc.name = ns_entry_point;
+       desc.library = lib;
+       return desc;
+@@ -388,6 +781,7 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+       NSError *error = nil;
+       KKPipelineArchives *archives = archives_of(comp);
+       begin_build(archives);
++      uint64_t start = now_ns();
+       id<MTLComputePipelineState> pipeline = nil;
+       MTL4CompilerTaskOptions *options = archives ? archives->capture_options : nil;
+       for (id<MTL4Archive> archive in archives && !options ? archives->archives : nil) {
+@@ -398,6 +792,7 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+       bool built = pipeline == nil;
+       if (built)
+          pipeline = [comp newComputePipelineStateWithDescriptor:desc compilerTaskOptions:options error:&error];
++      count_pipeline(!built, start);
+       end_build(archives, built && pipeline);
+ 
+       if (pipeline == nil) {
+@@ -499,6 +894,7 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+       NSError *error = nil;
+       KKPipelineArchives *archives = archives_of(comp);
+       begin_build(archives);
++      uint64_t start = now_ns();
+       id<MTLRenderPipelineState> pipeline = nil;
+       MTL4CompilerTaskOptions *options = archives ? archives->capture_options : nil;
+       for (id<MTL4Archive> archive in archives && !options ? archives->archives : nil) {
+@@ -509,6 +905,7 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+       bool built = pipeline == nil;
+       if (built)
+          pipeline = [comp newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:options error:&error];
++      count_pipeline(!built, start);
+       end_build(archives, built && pipeline);
+ 
+       if (pipeline == nil) {
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_compiler.c b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+index 08aafba..a5a7706 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_compiler.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+@@ -30,6 +30,12 @@ mtl_compiler_end_build(mtl_compiler *compiler)
+ {
+ }
+ 
++void
++mtl_compiler_get_stats(struct mtl_compiler_stats *stats)
++{
++   *stats = (struct mtl_compiler_stats){0};
++}
++
+ /* Library */
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index c020f0a..511e8fb 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -158,14 +158,18 @@ kk_stats_report(void)
+    if (now - last < 2000000000ull || !p_atomic_cmpxchg(&kk_stats.last_ns, last, now))
+       return;
+ 
++   struct mtl_compiler_stats mtl;
++   mtl_compiler_get_stats(&mtl);
+    fprintf(stderr,
+            "kk: %.0f s: %" PRIu64 " pipelines compiled, %" PRIu64
+            " from cache, %" PRIu64 " built by Metal; MSL %.1f s (CPU %.1f s),"
+-           " libraries %.1f s, pipelines %.1f s\n",
++           " libraries %.1f s (%" PRIu64 " from AIR), pipelines %.1f s (%" PRIu64
++           " archived %.1f s, %" PRIu64 " compiled %.1f s)\n",
+            (now - kk_stats.start_ns) / 1e9, kk_stats.compiled, kk_stats.cached,
+            kk_stats.built,
+            kk_stats.msl_ns / 1e9, kk_stats.msl_cpu_ns / 1e9,
+-           kk_stats.library_ns / 1e9, kk_stats.pipeline_ns / 1e9);
++           kk_stats.library_ns / 1e9, mtl.air_libraries, kk_stats.pipeline_ns / 1e9,
++           mtl.archived, mtl.archived_ns / 1e9, mtl.compiled, mtl.compiled_ns / 1e9);
+ }
+ 
+ static const nir_shader_compiler_options *
+-- 
+2.56.0
+
