@@ -1,0 +1,528 @@
+From c34cbfd4b2b583c7236189b2e64224bac5dfe516 Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Tue, 3 Nov 2026 19:49:55 +0100
+Subject: [PATCH] kk: Write pipeline archives without holding back pipeline
+ builds
+
+Writing an archive empties the capture of the compiler's serializer and
+crashes Metal when that compiler builds a pipeline meanwhile, so builds
+waited for every write: on a first start of Rise of the Tomb Raider the
+game's compile threads waited 194 s in all for 27 writes. Another
+compiler may build while one is written, though.
+
+So pipelines build with one of two compilers, each with a serializer
+and a lock of its own. A write switches the builds to the other
+compiler, waits only for the builds still in progress with the first and
+writes its capture; builds that still found the first one look again
+once they have its lock. The write every 1,024 pipelines runs on the
+queue of the writes instead of the thread that built the pipeline, and
+the write when the device goes waits for one in progress, which may
+have taken the other capture only. MESA_KK_COMPILE_STATS also prints
+how long builds waited for writes.
+
+Rise of the Tomb Raider filling its archives from scratch, one run
+each: builds waited 0.0 instead of 194 s for 26 writes, mean 21.5
+instead of 20.1 fps, Geothermal Valley 10.5 instead of 7.5 fps. Started
+again, it took all pipelines from the archives but the 675 it had built
+after the last write, before the test killed it.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/bridge/mtl_compiler.h       |  11 +-
+ src/kosmickrisp/bridge/mtl_compiler.m       | 229 +++++++++++++-------
+ src/kosmickrisp/bridge/mtl_upscale.m        |   6 +-
+ src/kosmickrisp/bridge/stubs/mtl_compiler.c |   5 +-
+ src/kosmickrisp/vulkan/kk_shader.c          |   5 +-
+ 5 files changed, 171 insertions(+), 85 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.h b/src/kosmickrisp/bridge/mtl_compiler.h
+index 6f1fed8..420be2f 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.h
++++ b/src/kosmickrisp/bridge/mtl_compiler.h
+@@ -21,16 +21,19 @@ mtl_compiler *mtl_new_compiler(mtl_device *device, const char *archive_dir);
+ /* Writes the pipelines built since the last write to a new archive */
+ void mtl_compiler_write_archive(mtl_compiler *compiler);
+ /* Bracket other pipeline builds with the compiler, which must not overlap
+- * writing an archive */
+-void mtl_compiler_begin_build(mtl_compiler *compiler);
+-void mtl_compiler_end_build(mtl_compiler *compiler);
++ * writing an archive; begin returns the compiler to build them with, which
++ * end takes */
++mtl_compiler *mtl_compiler_begin_build(mtl_compiler *compiler);
++void mtl_compiler_end_build(mtl_compiler *build_compiler);
+ 
+ /* Pipelines of the process that came from archives and that Metal compiled,
+- * how long they took in all, and libraries that came from kept AIR */
++ * how long they took in all, libraries that came from kept AIR, and how long
++ * builds waited for archive writes */
+ struct mtl_compiler_stats {
+    uint64_t archived, archived_ns;
+    uint64_t compiled, compiled_ns;
+    uint64_t air_libraries;
++   uint64_t blocked_ns;
+ };
+ void mtl_compiler_get_stats(struct mtl_compiler_stats *stats);
+ 
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index 4973464..db42b34 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -44,10 +44,13 @@
+  * every ARCHIVE_WRITE_GAP seconds), when the last device goes and when the
+  * process exits, as Wine does when a game ends: games rarely destroy their
+  * devices, and Proton kills processes without exiting. Writing empties the
+- * capture and must not run while the compiler builds a pipeline (Metal
+- * crashes), hence the lock. Wine kills the process's other threads before it
+- * exits, maybe in the middle of a build, so the write at exit gives up when it
+- * doesn't get the lock soon.
++ * capture and must not run while its compiler builds a pipeline (Metal
++ * crashes), but another compiler may build meanwhile. So pipelines build with
++ * one of two compilers, each with a capture and a lock of its own: a write
++ * switches the builds to the other compiler, waits for the ones still in
++ * progress with the first and writes its capture. Wine kills the process's
++ * other threads before it exits, maybe in the middle of a build, so the write
++ * at exit gives up when it doesn't get the lock soon.
+  *
+  * Metal leaves the working copy of each capture in the app's cache, which all
+  * of Wine's processes share, as large as the archive, and never uses it again:
+@@ -94,13 +97,20 @@
+    NSArray<id<MTL4Archive>> *archives;
+    /* Kept metallibs by the entry points they hold */
+    NSDictionary<NSString *, id<MTLLibrary>> *air;
+-   id<MTL4PipelineDataSetSerializer> serializer;
++   /* Pipelines build with compilers[active] into its serializer's capture,
++    * under the read lock of its locks, and count to its unwritten.
++    * compilers[0] is the one Mesa holds, which holds this, so it isn't
++    * retained here; compilers[1] is nil when there is just one. */
++   id<MTL4Compiler> compilers[2];
++   id<MTL4PipelineDataSetSerializer> serializers[2];
++   pthread_rwlock_t locks[2];
++   uint32_t unwritten[2];
++   unsigned active;
++   uint32_t write_queued;
+    /* Looks pipelines up in the archives through the compiler, which captures
+     * them, when compacting */
+    MTL4CompilerTaskOptions *capture_options;
+    unsigned gen;
+-   pthread_rwlock_t lock;
+-   uint32_t unwritten;
+    uint32_t writing;
+    uint32_t written;
+    uint64_t last_built;
+@@ -134,9 +144,12 @@ static void unlist_archives(KKPipelineArchives *archives);
+    [old_copies release];
+    [archives release];
+    [air release];
+-   [serializer release];
++   [compilers[1] release];
++   [serializers[0] release];
++   [serializers[1] release];
+    [capture_options release];
+-   pthread_rwlock_destroy(&lock);
++   pthread_rwlock_destroy(&locks[0]);
++   pthread_rwlock_destroy(&locks[1]);
+    [super dealloc];
+ }
+ @end
+@@ -158,7 +171,17 @@ static void unlist_archives(KKPipelineArchives *archives);
+ }
+ @end
+ 
+-static void try_write_archive(KKPipelineArchives *archives, bool exiting);
++enum write_mode {
++   /* Unless a write is in progress */
++   WRITE_NOW,
++   /* After the write in progress, when the device goes */
++   WRITE_LAST,
++   /* Like WRITE_LAST, but gives up after a few seconds: Wine killed the
++    * process's other threads */
++   WRITE_AT_EXIT,
++};
++
++static void try_write_archive(KKPipelineArchives *archives, enum write_mode mode);
+ 
+ static void
+ write_live_archives(void)
+@@ -169,7 +192,7 @@ write_live_archives(void)
+    for (unsigned i = 0; i < MAX_LIVE_ARCHIVES; i++) {
+       @autoreleasepool {
+          if (live_archives[i])
+-            try_write_archive(live_archives[i], true);
++            try_write_archive(live_archives[i], WRITE_AT_EXIT);
+       }
+    }
+    pthread_mutex_unlock(&live_lock);
+@@ -225,6 +248,7 @@ mtl_compiler_get_stats(struct mtl_compiler_stats *out)
+    out->compiled = __atomic_load_n(&stats.compiled, __ATOMIC_RELAXED);
+    out->compiled_ns = __atomic_load_n(&stats.compiled_ns, __ATOMIC_RELAXED);
+    out->air_libraries = __atomic_load_n(&stats.air_libraries, __ATOMIC_RELAXED);
++   out->blocked_ns = __atomic_load_n(&stats.blocked_ns, __ATOMIC_RELAXED);
+ }
+ 
+ static void
+@@ -382,13 +406,15 @@ mtl_new_compiler(mtl_device *device, const char *archive_dir)
+          sysctlbyname("kern.osversion", os, &os_size, NULL, 0);
+          archives->seed = XXH3_64bits(os, strnlen(os, sizeof(os)));
+          open_archives(archives, dev);
+-         pthread_rwlock_init(&archives->lock, NULL);
++         pthread_rwlock_init(&archives->locks[0], NULL);
++         pthread_rwlock_init(&archives->locks[1], NULL);
+ 
+          MTL4PipelineDataSetSerializerDescriptor *sdesc =
+             [[MTL4PipelineDataSetSerializerDescriptor new] autorelease];
+          sdesc.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
+-         archives->serializer = [dev newPipelineDataSetSerializerWithDescriptor:sdesc];
+-         desc.pipelineDataSetSerializer = archives->serializer;
++         for (unsigned i = 0; i < 2; i++)
++            archives->serializers[i] = [dev newPipelineDataSetSerializerWithDescriptor:sdesc];
++         desc.pipelineDataSetSerializer = archives->serializers[0];
+          start_idle_writes(archives);
+          /* Not on the queue of the writes: the first one may remove thousands
+           * of files */
+@@ -408,6 +434,13 @@ mtl_new_compiler(mtl_device *device, const char *archive_dir)
+       if (compiler == nil) {
+          fprintf(stderr, "Failed to create MTL4Compiler: %s\n", [error.localizedDescription UTF8String]);
+       } else if (archives) {
++         archives->compilers[0] = compiler;
++         MTL4CompilerDescriptor *desc1 = [[MTL4CompilerDescriptor new] autorelease];
++         desc1.pipelineDataSetSerializer = archives->serializers[1];
++         archives->compilers[1] = [dev newCompilerWithDescriptor:desc1 error:nil];
++         /* Builds end with either compiler */
++         if (archives->compilers[1])
++            objc_setAssociatedObject(archives->compilers[1], &kk_archives_key, archives, OBJC_ASSOCIATION_ASSIGN);
+          objc_setAssociatedObject(compiler, &kk_archives_key, archives, OBJC_ASSOCIATION_RETAIN);
+          list_archives(archives);
+       }
+@@ -417,14 +450,39 @@ mtl_new_compiler(mtl_device *device, const char *archive_dir)
+ }
+ 
+ static void
+-try_write_archive(KKPipelineArchives *archives, bool exiting)
++try_write_archive(KKPipelineArchives *archives, enum write_mode mode)
+ {
++   /* The write in progress may have taken the capture of the other compiler
++    * only */
++   for (unsigned i = 0; mode != WRITE_NOW && __atomic_load_n(&archives->writing, __ATOMIC_ACQUIRE); i++) {
++      if (mode == WRITE_AT_EXIT && i >= 300)
++         return;
++      usleep(10 * 1000);
++   }
+    if (!__atomic_exchange_n(&archives->writing, 1, __ATOMIC_ACQUIRE)) {
+-      write_archive(archives, exiting);
++      write_archive(archives, mode == WRITE_AT_EXIT);
+       __atomic_store_n(&archives->writing, 0, __ATOMIC_RELEASE);
+    }
+ }
+ 
++/* Writes on the queue of the writes, off the thread that built the pipeline */
++static void
++queue_write(KKPipelineArchives *archives)
++{
++   if (__atomic_exchange_n(&archives->write_queued, 1, __ATOMIC_ACQUIRE))
++      return;
++   /* Not an object pointer, which the block would retain: dealloc waits for
++    * the queue */
++   void *ptr = archives;
++   dispatch_async(archives->queue, ^{
++      @autoreleasepool {
++         KKPipelineArchives *a = ptr;
++         __atomic_store_n(&a->write_queued, 0, __ATOMIC_RELEASE);
++         try_write_archive(a, WRITE_NOW);
++      }
++   });
++}
++
+ static void
+ start_idle_writes(KKPipelineArchives *archives)
+ {
+@@ -439,9 +497,10 @@ start_idle_writes(KKPipelineArchives *archives)
+          int64_t since_built = now - (int64_t)__atomic_load_n(&a->last_built, __ATOMIC_RELAXED);
+          int64_t since_first = now - (int64_t)__atomic_load_n(&a->first_unwritten, __ATOMIC_RELAXED);
+          int64_t since_written = now - (int64_t)__atomic_load_n(&a->last_written, __ATOMIC_RELAXED);
+-         if (__atomic_load_n(&a->unwritten, __ATOMIC_RELAXED) && since_written >= ARCHIVE_WRITE_GAP &&
++         unsigned active = __atomic_load_n(&a->active, __ATOMIC_SEQ_CST);
++         if (__atomic_load_n(&a->unwritten[active], __ATOMIC_RELAXED) && since_written >= ARCHIVE_WRITE_GAP &&
+              (since_built >= ARCHIVE_WRITE_IDLE || since_first >= ARCHIVE_WRITE_BUSY))
+-            try_write_archive(a, false);
++            try_write_archive(a, WRITE_NOW);
+       }
+    });
+    dispatch_source_set_timer(archives->timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+@@ -550,56 +609,64 @@ remove_working_copies(KKPipelineArchives *archives, NSSet<NSString *> *completed
+    }
+ }
+ 
+-/* Waits for the builds to end, at exit a second at most: Wine killed the
+- * process's other threads, maybe in the middle of one */
++/* Waits for the builds with compiler i to end, at exit a second at most: Wine
++ * killed the process's other threads, maybe in the middle of one */
+ static bool
+-lock_builds(KKPipelineArchives *archives, bool exiting)
++lock_builds(KKPipelineArchives *archives, unsigned i, bool exiting)
+ {
+    if (!exiting)
+-      return !pthread_rwlock_wrlock(&archives->lock);
+-   for (unsigned i = 0; i < 100; i++) {
+-      if (!pthread_rwlock_trywrlock(&archives->lock))
++      return !pthread_rwlock_wrlock(&archives->locks[i]);
++   for (unsigned n = 0; n < 100; n++) {
++      if (!pthread_rwlock_trywrlock(&archives->locks[i]))
+          return true;
+       usleep(10 * 1000);
+    }
+    return false;
+ }
+ 
++/* One write at a time, which try_write_archive makes sure of */
+ static void
+ write_archive(KKPipelineArchives *archives, bool exiting)
+ {
+-   if (!lock_builds(archives, exiting))
++   unsigned i = __atomic_load_n(&archives->active, __ATOMIC_SEQ_CST);
++   if (!__atomic_load_n(&archives->unwritten[i], __ATOMIC_RELAXED))
+       return;
+-   uint32_t count = __atomic_load_n(&archives->unwritten, __ATOMIC_RELAXED);
+-   NSString *written = nil;
+-   NSMutableSet<NSString *> *completed = nil;
+-   if (count) {
+-      /* Small captures get their working copy only now. Another process's
+-       * write may complete one meanwhile too. */
+-      NSSet<NSString *> *complete = complete_copies(archives);
+-      NSString *name = [NSString stringWithFormat:@"%04u-%010ld-%d-%u-%u.mtl4a", archives->gen,
+-                                                  (long)time(NULL), getpid(), archives->written++, count];
+-      NSString *path = [archives->dir stringByAppendingPathComponent:name];
+-      NSString *tmp = [path stringByAppendingString:@".tmp"];
+-      NSError *error = nil;
+-      uint64_t start = now_ns();
+-      BOOL ok = [archives->serializer serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&error];
+-      completed = complete_copies(archives);
+-      [completed minusSet:complete];
+-      if (ok)
+-         rename([tmp fileSystemRepresentation], [path fileSystemRepresentation]);
+-      else
+-         unlink([tmp fileSystemRepresentation]);
+-      if (getenv("MESA_KK_COMPILE_STATS"))
+-         fprintf(stderr, "kk: %s %u pipelines to %s in %.2f s\n", ok ? "wrote" : "failed to write",
+-                 count, [name UTF8String], (now_ns() - start) / 1e9);
+-      __atomic_store_n(&archives->unwritten, 0, __ATOMIC_RELAXED);
+-      __atomic_store_n(&archives->last_written, (uint64_t)time(NULL), __ATOMIC_RELAXED);
+-      written = ok ? name : nil;
+-   }
+-   pthread_rwlock_unlock(&archives->lock);
+-   if (count)
+-      remove_working_copies(archives, completed, written);
++   /* With two compilers, new builds go to the other one right away, and the
++    * write only waits for the ones in progress; builds that still found this
++    * one look again once they have its lock */
++   bool two = archives->compilers[1];
++   if (two)
++      __atomic_store_n(&archives->active, i ^ 1, __ATOMIC_SEQ_CST);
++   if (!lock_builds(archives, i, exiting))
++      return;
++   uint32_t count = __atomic_exchange_n(&archives->unwritten[i], 0, __ATOMIC_RELAXED);
++   id<MTL4PipelineDataSetSerializer> serializer = archives->serializers[i];
++   if (two)
++      pthread_rwlock_unlock(&archives->locks[i]);
++
++   /* Small captures get their working copy only now. Another process's write
++    * may complete one meanwhile too. */
++   NSSet<NSString *> *complete = complete_copies(archives);
++   NSString *name = [NSString stringWithFormat:@"%04u-%010ld-%d-%u-%u.mtl4a", archives->gen,
++                                               (long)time(NULL), getpid(), archives->written++, count];
++   NSString *path = [archives->dir stringByAppendingPathComponent:name];
++   NSString *tmp = [path stringByAppendingString:@".tmp"];
++   NSError *error = nil;
++   uint64_t start = now_ns();
++   BOOL ok = [serializer serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&error];
++   NSMutableSet<NSString *> *completed = complete_copies(archives);
++   [completed minusSet:complete];
++   if (ok)
++      rename([tmp fileSystemRepresentation], [path fileSystemRepresentation]);
++   else
++      unlink([tmp fileSystemRepresentation]);
++   if (getenv("MESA_KK_COMPILE_STATS"))
++      fprintf(stderr, "kk: %s %u pipelines to %s in %.2f s\n", ok ? "wrote" : "failed to write",
++              count, [name UTF8String], (now_ns() - start) / 1e9);
++   __atomic_store_n(&archives->last_written, (uint64_t)time(NULL), __ATOMIC_RELAXED);
++   if (!two)
++      pthread_rwlock_unlock(&archives->locks[i]);
++   remove_working_copies(archives, completed, ok ? name : nil);
+ }
+ 
+ void
+@@ -608,49 +675,63 @@ mtl_compiler_write_archive(mtl_compiler *compiler)
+    @autoreleasepool {
+       KKPipelineArchives *archives = archives_of((id<MTL4Compiler>)compiler);
+       if (archives)
+-         try_write_archive(archives, false);
++         try_write_archive(archives, WRITE_LAST);
+    }
+ }
+ 
+-static void
+-begin_build(KKPipelineArchives *archives)
++/* Holds back writing the capture the build goes to until end_build, returns
++ * the compiler to build with */
++static id<MTL4Compiler>
++begin_build(KKPipelineArchives *archives, id<MTL4Compiler> compiler)
+ {
+-   if (archives)
+-      pthread_rwlock_rdlock(&archives->lock);
++   if (!archives)
++      return compiler;
++   uint64_t start = now_ns();
++   for (;;) {
++      unsigned i = __atomic_load_n(&archives->active, __ATOMIC_SEQ_CST);
++      pthread_rwlock_rdlock(&archives->locks[i]);
++      /* Unless a write switched to the other one meanwhile */
++      if (__atomic_load_n(&archives->active, __ATOMIC_SEQ_CST) == i) {
++         __atomic_add_fetch(&stats.blocked_ns, now_ns() - start, __ATOMIC_RELAXED);
++         return archives->compilers[i];
++      }
++      pthread_rwlock_unlock(&archives->locks[i]);
++   }
+ }
+ 
+-/* Ends a pipeline build, with captured set when the pipeline went to the
+- * capture */
++/* Ends a pipeline build with the compiler begin_build returned, with captured
++ * set when the pipeline went to the capture */
+ static void
+-end_build(KKPipelineArchives *archives, bool captured)
++end_build(KKPipelineArchives *archives, id<MTL4Compiler> compiler, bool captured)
+ {
+    if (!archives)
+       return;
+ 
+    /* Counted before a write gets the lock, which writes the pipeline */
++   unsigned i = compiler == archives->compilers[1];
+    uint32_t unwritten = 0;
+    if (captured) {
+       uint64_t now = time(NULL);
+       __atomic_store_n(&archives->last_built, now, __ATOMIC_RELAXED);
+-      unwritten = __atomic_add_fetch(&archives->unwritten, 1, __ATOMIC_RELAXED);
++      unwritten = __atomic_add_fetch(&archives->unwritten[i], 1, __ATOMIC_RELAXED);
+       if (unwritten == 1)
+          __atomic_store_n(&archives->first_unwritten, now, __ATOMIC_RELAXED);
+    }
+-   pthread_rwlock_unlock(&archives->lock);
++   pthread_rwlock_unlock(&archives->locks[i]);
+    if (unwritten >= ARCHIVE_WRITE_EVERY)
+-      try_write_archive(archives, false);
++      queue_write(archives);
+ }
+ 
+-void
++mtl_compiler *
+ mtl_compiler_begin_build(mtl_compiler *compiler)
+ {
+-   begin_build(archives_of((id<MTL4Compiler>)compiler));
++   return begin_build(archives_of((id<MTL4Compiler>)compiler), (id<MTL4Compiler>)compiler);
+ }
+ 
+ void
+-mtl_compiler_end_build(mtl_compiler *compiler)
++mtl_compiler_end_build(mtl_compiler *build_compiler)
+ {
+-   end_build(archives_of((id<MTL4Compiler>)compiler), false);
++   end_build(archives_of((id<MTL4Compiler>)build_compiler), (id<MTL4Compiler>)build_compiler, false);
+ }
+ 
+ /* Library */
+@@ -780,7 +861,7 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+ 
+       NSError *error = nil;
+       KKPipelineArchives *archives = archives_of(comp);
+-      begin_build(archives);
++      comp = begin_build(archives, comp);
+       uint64_t start = now_ns();
+       id<MTLComputePipelineState> pipeline = nil;
+       MTL4CompilerTaskOptions *options = archives ? archives->capture_options : nil;
+@@ -793,7 +874,7 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+       if (built)
+          pipeline = [comp newComputePipelineStateWithDescriptor:desc compilerTaskOptions:options error:&error];
+       count_pipeline(!built, start);
+-      end_build(archives, built && pipeline);
++      end_build(archives, comp, built && pipeline);
+ 
+       if (pipeline == nil) {
+          fprintf(stderr, "Failed to create MTLComputePipelineState: %s\n", [error.localizedDescription UTF8String]);
+@@ -893,7 +974,7 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+ 
+       NSError *error = nil;
+       KKPipelineArchives *archives = archives_of(comp);
+-      begin_build(archives);
++      comp = begin_build(archives, comp);
+       uint64_t start = now_ns();
+       id<MTLRenderPipelineState> pipeline = nil;
+       MTL4CompilerTaskOptions *options = archives ? archives->capture_options : nil;
+@@ -906,7 +987,7 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+       if (built)
+          pipeline = [comp newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:options error:&error];
+       count_pipeline(!built, start);
+-      end_build(archives, built && pipeline);
++      end_build(archives, comp, built && pipeline);
+ 
+       if (pipeline == nil) {
+          fprintf(stderr, "Failed to create MTLRenderPipelineState: %s\n", [error.localizedDescription UTF8String]);
+diff --git a/src/kosmickrisp/bridge/mtl_upscale.m b/src/kosmickrisp/bridge/mtl_upscale.m
+index 1131324..a1b1ae1 100644
+--- a/src/kosmickrisp/bridge/mtl_upscale.m
++++ b/src/kosmickrisp/bridge/mtl_upscale.m
+@@ -79,9 +79,9 @@ create_scaler(struct mtl_upscaler *upscaler, id<MTLDevice> dev,
+    else
+       desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+ 
+-   mtl_compiler_begin_build(compiler);
+-   upscaler->scaler = [desc newSpatialScalerWithDevice:dev compiler:compiler];
+-   mtl_compiler_end_build(compiler);
++   id<MTL4Compiler> build_compiler = (id<MTL4Compiler>)mtl_compiler_begin_build(compiler);
++   upscaler->scaler = [desc newSpatialScalerWithDevice:dev compiler:build_compiler];
++   mtl_compiler_end_build(build_compiler);
+    if (!upscaler->scaler)
+       return false;
+ 
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_compiler.c b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+index a5a7706..a575776 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_compiler.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+@@ -20,13 +20,14 @@ mtl_compiler_write_archive(mtl_compiler *compiler)
+ {
+ }
+ 
+-void
++mtl_compiler *
+ mtl_compiler_begin_build(mtl_compiler *compiler)
+ {
++   return compiler;
+ }
+ 
+ void
+-mtl_compiler_end_build(mtl_compiler *compiler)
++mtl_compiler_end_build(mtl_compiler *build_compiler)
+ {
+ }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 511e8fb..221ed23 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -164,12 +164,13 @@ kk_stats_report(void)
+            "kk: %.0f s: %" PRIu64 " pipelines compiled, %" PRIu64
+            " from cache, %" PRIu64 " built by Metal; MSL %.1f s (CPU %.1f s),"
+            " libraries %.1f s (%" PRIu64 " from AIR), pipelines %.1f s (%" PRIu64
+-           " archived %.1f s, %" PRIu64 " compiled %.1f s)\n",
++           " archived %.1f s, %" PRIu64 " compiled %.1f s), waiting for writes %.1f s\n",
+            (now - kk_stats.start_ns) / 1e9, kk_stats.compiled, kk_stats.cached,
+            kk_stats.built,
+            kk_stats.msl_ns / 1e9, kk_stats.msl_cpu_ns / 1e9,
+            kk_stats.library_ns / 1e9, mtl.air_libraries, kk_stats.pipeline_ns / 1e9,
+-           mtl.archived, mtl.archived_ns / 1e9, mtl.compiled, mtl.compiled_ns / 1e9);
++           mtl.archived, mtl.archived_ns / 1e9, mtl.compiled, mtl.compiled_ns / 1e9,
++           mtl.blocked_ns / 1e9);
+ }
+ 
+ static const nir_shader_compiler_options *
+-- 
+2.56.0
+
