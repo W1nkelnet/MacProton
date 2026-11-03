@@ -1,0 +1,587 @@
+From fecfcabb448c7100b9cba6f7a5bd80b78b50e01a Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Tue, 3 Nov 2026 06:55:06 +0100
+Subject: [PATCH] kk: Keep the pipelines Metal builds in archives of each
+ game's
+
+Metal keeps the pipelines it builds in a cache of each app's, Wine's
+for every game, which stays at about 2.4 GB. Rise of the Tomb Raider
+creates its 13,659 pipelines at every start; after another game or
+driver build Metal built them all again, about 2,000 s on the compile
+threads, during the game's own benchmark.
+
+Keep them in Metal 4 archives in kosmickrisp_pipelines/<process> next
+to Mesa's shader cache instead: pipelines come from the archives when
+they are there, and the ones Metal builds are captured and written to
+a new archive every 1,024 pipelines, 5 s after the last one and when
+the last device goes. Writing must not overlap pipeline builds, Metal
+crashes, so they wait for it. Metal can't add to an archive: with more
+than 32 of them, the next process captures every pipeline it creates
+into a new generation, and the one after drops the older generations.
+MESA_KK_PIPELINE_ARCHIVES=0 turns them off.
+
+Rise of the Tomb Raider after a run with another driver: pipelines
+take 37 instead of 1,900 s on the compile threads, the benchmark 125
+instead of 227 s, the mean is 22.3 instead of 19.0 fps.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/bridge/mtl_compiler.h       |  11 +-
+ src/kosmickrisp/bridge/mtl_compiler.m       | 328 +++++++++++++++++++-
+ src/kosmickrisp/bridge/mtl_upscale.m        |   3 +
+ src/kosmickrisp/bridge/stubs/mtl_compiler.c |  17 +-
+ src/kosmickrisp/vulkan/kk_device.c          |   9 +-
+ src/kosmickrisp/vulkan/kk_physical_device.c |  11 +
+ src/kosmickrisp/vulkan/kk_physical_device.h |   4 +
+ 7 files changed, 372 insertions(+), 11 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.h b/src/kosmickrisp/bridge/mtl_compiler.h
+index d097653..523900b 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.h
++++ b/src/kosmickrisp/bridge/mtl_compiler.h
+@@ -15,8 +15,15 @@
+ /* Bridge enums */
+ enum mtl_pixel_format;
+ 
+-/* Compiler */
+-mtl_compiler *mtl_new_compiler(mtl_device *device);
++/* Compiler, which keeps the pipelines it builds in archives in archive_dir
++ * unless that is NULL */
++mtl_compiler *mtl_new_compiler(mtl_device *device, const char *archive_dir);
++/* Writes the pipelines built since the last write to a new archive */
++void mtl_compiler_write_archive(mtl_compiler *compiler);
++/* Bracket other pipeline builds with the compiler, which must not overlap
++ * writing an archive */
++void mtl_compiler_begin_build(mtl_compiler *compiler);
++void mtl_compiler_end_build(mtl_compiler *compiler);
+ 
+ /* Library */
+ mtl_library *
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index f0f6a61..e92e0fd 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -7,32 +7,325 @@
+ #include "mtl_compiler.h"
+ #include "mtl_format.h"
+ 
++#include <Metal/MTL4Archive.h>
+ #include <Metal/MTL4ComputePipeline.h>
+ #include <Metal/MTL4LibraryDescriptor.h>
+ #include <Metal/MTL4LibraryFunctionDescriptor.h>
++#include <Metal/MTL4PipelineDataSetSerializer.h>
+ #include <Metal/MTL4RenderPipeline.h>
+ #include <Metal/MTLDevice.h>
+ 
++#include "util/macros.h"
++
++#include <objc/runtime.h>
++#include <pthread.h>
++#include <unistd.h>
++
++/* Pipeline archives
++ *
++ * Metal keeps the pipelines it builds in a cache of each app's, Wine's for
++ * every game, which holds a little over 2 GB. Rise of the Tomb Raider creates
++ * 13,659 pipelines at every start: when another game or driver build ran in
++ * between, Metal built them again for 4 minutes of all cores, during the
++ * game's own benchmark, and even started right after itself missed a part.
++ *
++ * So the compiler keeps the pipelines it builds in archives of the game's own:
++ * pipelines come from them when they are there, and the ones Metal builds are
++ * captured and written to a new archive every ARCHIVE_WRITE_EVERY pipelines,
++ * ARCHIVE_WRITE_IDLE seconds after the last one (at most every
++ * ARCHIVE_WRITE_GAP seconds), and when the last device goes, which Proton ends
++ * games without. Writing empties the capture and must not run while the
++ * compiler builds a pipeline (Metal crashes), hence the lock.
++ *
++ * Archives only hold the binaries for the descriptors, functions and device
++ * they were built for, so stale ones only miss, and Metal can't add to one.
++ * Once there are more than ARCHIVE_COMPACT_FILES, a process captures every
++ * pipeline it creates, archived or not, into a new generation of archives,
++ * and the next one drops the older generations when the new one holds at
++ * least half as many pipelines.
++ */
++#define ARCHIVE_WRITE_EVERY 1024
++#define ARCHIVE_WRITE_IDLE 5
++#define ARCHIVE_WRITE_GAP 30
++#define ARCHIVE_COMPACT_FILES 32
++#define ARCHIVE_MAX_FILES 128
++#define ARCHIVE_MAX_BYTES (4ull << 30)
++
++@interface KKPipelineArchives : NSObject {
++@public
++   NSString *dir;
++   NSArray<id<MTL4Archive>> *archives;
++   id<MTL4PipelineDataSetSerializer> serializer;
++   /* Looks pipelines up in the archives through the compiler, which captures
++    * them, when compacting */
++   MTL4CompilerTaskOptions *capture_options;
++   unsigned gen;
++   pthread_rwlock_t lock;
++   uint32_t unwritten;
++   uint32_t writing;
++   uint32_t written;
++   uint64_t last_built;
++   uint64_t last_written;
++   dispatch_queue_t queue;
++   dispatch_source_t timer;
++}
++@end
++
++@implementation KKPipelineArchives
++- (void)dealloc
++{
++   if (timer) {
++      dispatch_source_cancel(timer);
++      /* The timer's handler runs on the queue and does not retain self */
++      dispatch_sync(queue, ^{});
++      dispatch_release(timer);
++      dispatch_release(queue);
++   }
++   [dir release];
++   [archives release];
++   [serializer release];
++   [capture_options release];
++   pthread_rwlock_destroy(&lock);
++   [super dealloc];
++}
++@end
++
++static char kk_archives_key;
++
++static KKPipelineArchives *
++archives_of(id<MTL4Compiler> compiler)
++{
++   return objc_getAssociatedObject(compiler, &kk_archives_key);
++}
++
++static void start_idle_writes(KKPipelineArchives *archives);
++static void write_archive(KKPipelineArchives *archives);
++
++struct archive_file {
++   NSString *name;
++   unsigned gen, count;
++   uint64_t bytes;
++};
++
++/* Opens the archives in dir, newest first, after dropping the generations a
++ * newer one replaces, and picks the generation new archives go to */
++static void
++open_archives(KKPipelineArchives *archives, id<MTLDevice> dev)
++{
++   NSFileManager *fm = [NSFileManager defaultManager];
++   NSString *dir = archives->dir;
++   [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
++
++   /* Named GEN-TIME-PID-SEQ-COUNT.mtl4a, so they sort oldest first */
++   NSArray<NSString *> *names =
++      [[fm contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)];
++   struct archive_file *files = calloc(names.count + 1, sizeof(*files));
++   unsigned n = 0, newest = 0;
++   for (NSString *name in names) {
++      NSString *path = [dir stringByAppendingPathComponent:name];
++      unsigned gen, count;
++      long time;
++      int pid;
++      unsigned seq;
++      if (![name hasSuffix:@".mtl4a"] ||
++          sscanf([name UTF8String], "%u-%ld-%d-%u-%u.mtl4a", &gen, &time, &pid, &seq, &count) != 5) {
++         /* Left over by a process that ended while writing, or not ours */
++         if ([name hasSuffix:@".tmp"] || [name hasSuffix:@".mtl4a"])
++            [fm removeItemAtPath:path error:nil];
++         continue;
++      }
++      files[n++] = (struct archive_file){
++         .name = name, .gen = gen, .count = count,
++         .bytes = [[fm attributesOfItemAtPath:path error:nil] fileSize],
++      };
++      newest = MAX2(newest, gen);
++   }
++
++   uint64_t newest_count = 0, older_count = 0;
++   for (unsigned i = 0; i < n; i++)
++      *(files[i].gen == newest ? &newest_count : &older_count) += files[i].count;
++
++   /* Oldest first, the files to keep start at first */
++   unsigned first = 0;
++   if (older_count && newest_count * 2 >= older_count) {
++      while (first < n && files[first].gen != newest)
++         first++;
++   }
++   uint64_t bytes = 0;
++   for (unsigned i = first; i < n; i++)
++      bytes += files[i].bytes;
++   while (first < n && files[first].gen != newest &&
++          (n - first > ARCHIVE_MAX_FILES || bytes > ARCHIVE_MAX_BYTES))
++      bytes -= files[first++].bytes;
++   if (n - first > ARCHIVE_MAX_FILES || bytes > ARCHIVE_MAX_BYTES)
++      first = n;
++   for (unsigned i = 0; i < first; i++)
++      [fm removeItemAtPath:[dir stringByAppendingPathComponent:files[i].name] error:nil];
++
++   NSMutableArray<id<MTL4Archive>> *opened = [NSMutableArray array];
++   for (unsigned i = n; i-- > first;) {
++      NSString *path = [dir stringByAppendingPathComponent:files[i].name];
++      id<MTL4Archive> archive = [dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:nil];
++      if (archive) {
++         [opened addObject:archive];
++         [archive release];
++      } else {
++         [fm removeItemAtPath:path error:nil];
++      }
++   }
++   free(files);
++
++   archives->archives = [opened retain];
++   archives->gen = newest;
++   if (opened.count > ARCHIVE_COMPACT_FILES) {
++      archives->gen = newest + 1;
++      archives->capture_options = [MTL4CompilerTaskOptions new];
++      archives->capture_options.lookupArchives = opened;
++   }
++}
++
+ /* Compiler */
+ mtl_compiler *
+-mtl_new_compiler(mtl_device *device)
++mtl_new_compiler(mtl_device *device, const char *archive_dir)
+ {
+    @autoreleasepool {
+       id<MTLDevice> dev = (id<MTLDevice>)device;
+ 
+       MTL4CompilerDescriptor *desc = [[MTL4CompilerDescriptor new] autorelease];
+ 
++      KKPipelineArchives *archives = nil;
++      if (archive_dir) {
++         archives = [[KKPipelineArchives new] autorelease];
++         archives->dir = [@(archive_dir) retain];
++         open_archives(archives, dev);
++         pthread_rwlock_init(&archives->lock, NULL);
++
++         MTL4PipelineDataSetSerializerDescriptor *sdesc =
++            [[MTL4PipelineDataSetSerializerDescriptor new] autorelease];
++         sdesc.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
++         archives->serializer = [dev newPipelineDataSetSerializerWithDescriptor:sdesc];
++         desc.pipelineDataSetSerializer = archives->serializer;
++         start_idle_writes(archives);
++      }
++
+       NSError *error;
+       id<MTL4Compiler> compiler = [dev newCompilerWithDescriptor:desc error:&error];
+ 
+       if (compiler == nil) {
+          fprintf(stderr, "Failed to create MTL4Compiler: %s\n", [error.localizedDescription UTF8String]);
++      } else if (archives) {
++         objc_setAssociatedObject(compiler, &kk_archives_key, archives, OBJC_ASSOCIATION_RETAIN);
+       }
+ 
+       return compiler;
+    }
+ }
+ 
++static void
++try_write_archive(KKPipelineArchives *archives)
++{
++   if (!__atomic_exchange_n(&archives->writing, 1, __ATOMIC_ACQUIRE)) {
++      write_archive(archives);
++      __atomic_store_n(&archives->writing, 0, __ATOMIC_RELEASE);
++   }
++}
++
++static void
++start_idle_writes(KKPipelineArchives *archives)
++{
++   archives->queue = dispatch_queue_create("kk.pipeline_archives", DISPATCH_QUEUE_SERIAL);
++   archives->timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, archives->queue);
++   /* Not an object pointer, which the block would retain */
++   void *ptr = archives;
++   dispatch_source_set_event_handler(archives->timer, ^{
++      @autoreleasepool {
++         KKPipelineArchives *a = ptr;
++         int64_t now = time(NULL);
++         if (__atomic_load_n(&a->unwritten, __ATOMIC_RELAXED) &&
++             now - (int64_t)__atomic_load_n(&a->last_built, __ATOMIC_RELAXED) >= ARCHIVE_WRITE_IDLE &&
++             now - (int64_t)__atomic_load_n(&a->last_written, __ATOMIC_RELAXED) >= ARCHIVE_WRITE_GAP)
++            try_write_archive(a);
++      }
++   });
++   dispatch_source_set_timer(archives->timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
++                             NSEC_PER_SEC, NSEC_PER_SEC / 2);
++   dispatch_resume(archives->timer);
++}
++
++static void
++write_archive(KKPipelineArchives *archives)
++{
++   pthread_rwlock_wrlock(&archives->lock);
++   uint32_t count = __atomic_load_n(&archives->unwritten, __ATOMIC_RELAXED);
++   if (count) {
++      NSString *name = [NSString stringWithFormat:@"%04u-%010ld-%d-%u-%u.mtl4a", archives->gen,
++                                                  (long)time(NULL), getpid(), archives->written++, count];
++      NSString *path = [archives->dir stringByAppendingPathComponent:name];
++      NSString *tmp = [path stringByAppendingString:@".tmp"];
++      NSError *error = nil;
++      struct timespec t0, t1;
++      clock_gettime(CLOCK_MONOTONIC, &t0);
++      BOOL ok = [archives->serializer serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&error];
++      if (ok)
++         rename([tmp fileSystemRepresentation], [path fileSystemRepresentation]);
++      else
++         unlink([tmp fileSystemRepresentation]);
++      clock_gettime(CLOCK_MONOTONIC, &t1);
++      if (getenv("MESA_KK_COMPILE_STATS"))
++         fprintf(stderr, "kk: %s %u pipelines to %s in %.2f s\n", ok ? "wrote" : "failed to write",
++                 count, [name UTF8String], (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
++      __atomic_store_n(&archives->unwritten, 0, __ATOMIC_RELAXED);
++      __atomic_store_n(&archives->last_written, (uint64_t)time(NULL), __ATOMIC_RELAXED);
++   }
++   pthread_rwlock_unlock(&archives->lock);
++}
++
++void
++mtl_compiler_write_archive(mtl_compiler *compiler)
++{
++   @autoreleasepool {
++      KKPipelineArchives *archives = archives_of((id<MTL4Compiler>)compiler);
++      if (archives)
++         try_write_archive(archives);
++   }
++}
++
++static void
++begin_build(KKPipelineArchives *archives)
++{
++   if (archives)
++      pthread_rwlock_rdlock(&archives->lock);
++}
++
++/* Ends a pipeline build, with captured set when the pipeline went to the
++ * capture */
++static void
++end_build(KKPipelineArchives *archives, bool captured)
++{
++   if (!archives)
++      return;
++
++   pthread_rwlock_unlock(&archives->lock);
++   if (!captured)
++      return;
++
++   __atomic_store_n(&archives->last_built, (uint64_t)time(NULL), __ATOMIC_RELAXED);
++   if (__atomic_add_fetch(&archives->unwritten, 1, __ATOMIC_RELAXED) >= ARCHIVE_WRITE_EVERY)
++      try_write_archive(archives);
++}
++
++void
++mtl_compiler_begin_build(mtl_compiler *compiler)
++{
++   begin_build(archives_of((id<MTL4Compiler>)compiler));
++}
++
++void
++mtl_compiler_end_build(mtl_compiler *compiler)
++{
++   end_build(archives_of((id<MTL4Compiler>)compiler), false);
++}
++
+ /* Library */
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+@@ -53,6 +346,7 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+       desc.source = ns_src;
+       desc.options = opts;
+ 
++      /* Unlike pipelines, libraries build fine while an archive is written */
+       NSError *error;
+       id<MTLLibrary> lib = [comp newLibraryWithDescriptor:desc error:&error];
+ 
+@@ -91,9 +385,20 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+       desc.computeFunctionDescriptor = (MTL4FunctionDescriptor *)function;
+       desc.maxTotalThreadsPerThreadgroup = max_total_threads_per_threadgroup;
+ 
+-      NSError *error;
+-      id<MTLComputePipelineState> pipeline = [comp newComputePipelineStateWithDescriptor:desc compilerTaskOptions:nil
+-                                                                                   error:&error];
++      NSError *error = nil;
++      KKPipelineArchives *archives = archives_of(comp);
++      begin_build(archives);
++      id<MTLComputePipelineState> pipeline = nil;
++      MTL4CompilerTaskOptions *options = archives ? archives->capture_options : nil;
++      for (id<MTL4Archive> archive in archives && !options ? archives->archives : nil) {
++         pipeline = [archive newComputePipelineStateWithDescriptor:desc error:nil];
++         if (pipeline)
++            break;
++      }
++      bool built = pipeline == nil;
++      if (built)
++         pipeline = [comp newComputePipelineStateWithDescriptor:desc compilerTaskOptions:options error:&error];
++      end_build(archives, built && pipeline);
+ 
+       if (pipeline == nil) {
+          fprintf(stderr, "Failed to create MTLComputePipelineState: %s\n", [error.localizedDescription UTF8String]);
+@@ -192,8 +497,19 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+       MTL4RenderPipelineDescriptor *desc = (MTL4RenderPipelineDescriptor *)descriptor;
+ 
+       NSError *error = nil;
+-      id<MTLRenderPipelineState> pipeline = [comp newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil
+-                                                                                 error:&error];
++      KKPipelineArchives *archives = archives_of(comp);
++      begin_build(archives);
++      id<MTLRenderPipelineState> pipeline = nil;
++      MTL4CompilerTaskOptions *options = archives ? archives->capture_options : nil;
++      for (id<MTL4Archive> archive in archives && !options ? archives->archives : nil) {
++         pipeline = [archive newRenderPipelineStateWithDescriptor:desc error:nil];
++         if (pipeline)
++            break;
++      }
++      bool built = pipeline == nil;
++      if (built)
++         pipeline = [comp newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:options error:&error];
++      end_build(archives, built && pipeline);
+ 
+       if (pipeline == nil) {
+          fprintf(stderr, "Failed to create MTLRenderPipelineState: %s\n", [error.localizedDescription UTF8String]);
+diff --git a/src/kosmickrisp/bridge/mtl_upscale.m b/src/kosmickrisp/bridge/mtl_upscale.m
+index fcb7349..1131324 100644
+--- a/src/kosmickrisp/bridge/mtl_upscale.m
++++ b/src/kosmickrisp/bridge/mtl_upscale.m
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include "mtl_upscale.h"
++#include "mtl_compiler.h"
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -78,7 +79,9 @@ create_scaler(struct mtl_upscaler *upscaler, id<MTLDevice> dev,
+    else
+       desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+ 
++   mtl_compiler_begin_build(compiler);
+    upscaler->scaler = [desc newSpatialScalerWithDevice:dev compiler:compiler];
++   mtl_compiler_end_build(compiler);
+    if (!upscaler->scaler)
+       return false;
+ 
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_compiler.c b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+index 11af4e7..08aafba 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_compiler.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+@@ -10,11 +10,26 @@
+ 
+ /* Compiler */
+ mtl_compiler *
+-mtl_new_compiler(mtl_device *device)
++mtl_new_compiler(mtl_device *device, const char *archive_dir)
+ {
+    return NULL;
+ }
+ 
++void
++mtl_compiler_write_archive(mtl_compiler *compiler)
++{
++}
++
++void
++mtl_compiler_begin_build(mtl_compiler *compiler)
++{
++}
++
++void
++mtl_compiler_end_build(mtl_compiler *compiler)
++{
++}
++
+ /* Library */
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index 27dd269..3c2e1fc 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -55,8 +55,11 @@ kk_acquire_compiler(struct kk_device *dev)
+ {
+    /* KK_WORKAROUND_11 */
+    struct kk_physical_device *pdev = kk_device_physical(dev);
++   const char *archive_dir = pdev->settings.pipeline_archive_dir[0]
++                                ? pdev->settings.pipeline_archive_dir
++                                : NULL;
+    if (pdev->settings.disabled_workarounds & BITFIELD64_BIT(11)) {
+-      return mtl_new_compiler(dev->mtl_handle);
++      return mtl_new_compiler(dev->mtl_handle, archive_dir);
+    }
+ 
+    call_once(&compilers_ht_once, kk_init_compiler_table);
+@@ -73,7 +76,7 @@ kk_acquire_compiler(struct kk_device *dev)
+          return NULL;
+       }
+ 
+-      compiler->handle = mtl_new_compiler(dev->mtl_handle);
++      compiler->handle = mtl_new_compiler(dev->mtl_handle, archive_dir);
+       if (compiler->handle == NULL) {
+          ralloc_free(compiler);
+          simple_mtx_unlock(&compilers_ht_lock);
+@@ -97,6 +100,7 @@ kk_release_compiler(struct kk_device *dev)
+    /* KK_WORKAROUND_11 */
+    struct kk_physical_device *pdev = kk_device_physical(dev);
+    if (pdev->settings.disabled_workarounds & BITFIELD64_BIT(11)) {
++      mtl_compiler_write_archive(dev->mtl_compiler_handle);
+       mtl_release(dev->mtl_compiler_handle);
+       return;
+    }
+@@ -111,6 +115,7 @@ kk_release_compiler(struct kk_device *dev)
+ 
+       if (compiler->refcount == 0) {
+          _mesa_hash_table_remove(&compilers_ht, ent);
++         mtl_compiler_write_archive(compiler->handle);
+          mtl_release(compiler->handle);
+          ralloc_free(compiler);
+       }
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index aaa4f1b..fc1c6b4 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -23,6 +23,7 @@
+ #include "util/hex.h"
+ #include "util/mesa-blake3.h"
+ #include "util/simple_mtx.h"
++#include "util/u_process.h"
+ #include "git_sha1.h"
+ 
+ #include "vulkan/wsi/wsi_common.h"
+@@ -1140,6 +1141,16 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
+    settings->null_textures =
+       debug_get_bool_option("MESA_KK_NULL_TEXTURES", true);
+ 
++   const char *cache_dir = getenv("MESA_SHADER_CACHE_DIR");
++   const char *process = util_get_process_name();
++   if (debug_get_bool_option("MESA_KK_PIPELINE_ARCHIVES", true) &&
++       !debug_get_bool_option("MESA_SHADER_CACHE_DISABLE", false) &&
++       cache_dir && *cache_dir && process && *process) {
++      snprintf(settings->pipeline_archive_dir,
++               sizeof(settings->pipeline_archive_dir),
++               "%s/kosmickrisp_pipelines/%s", cache_dir, process);
++   }
++
+    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
+    const char *all_workarounds = "all";
+    const size_t all_len = strlen(all_workarounds);
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.h b/src/kosmickrisp/vulkan/kk_physical_device.h
+index d7b7f9e..c482c44 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -61,6 +61,10 @@ struct kk_env_settings {
+     * textures instead of branching around every access, see
+     * kk_nir_lower_null_images. MESA_KK_NULL_TEXTURES=0 branches. */
+    bool null_textures;
++   /* Where Metal's compiler keeps the pipelines it builds for this process,
++    * see mtl_compiler.m; empty with MESA_KK_PIPELINE_ARCHIVES=0 or without a
++    * shader cache */
++   char pipeline_archive_dir[PATH_MAX];
+ };
+ 
+ struct kk_physical_device {
+-- 
+2.56.0
+
