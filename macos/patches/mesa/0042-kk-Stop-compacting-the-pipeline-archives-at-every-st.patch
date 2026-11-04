@@ -1,0 +1,126 @@
+From e6ee4d77f37839a344a50bf37ea8c82f9a6cc88e Mon Sep 17 00:00:00 2001
+From: W1nkelm4nn <mrmarkap61@gmail.com>
+Date: Wed, 4 Nov 2026 07:11:04 +0100
+Subject: [PATCH] kk: Stop compacting the pipeline archives at every start
+
+Once there are more than 32 archives, a process captures every pipeline
+it creates into a new generation, and the next one dropped the older
+generations when the new one held at least half as many pipelines as
+all of them together. Each generation holds the pipelines again, though,
+so the older ones kept outgrowing the new one, and every start compacted
+once more. Games also create several devices, and each one started a
+generation of its own: Rise of the Tomb Raider four per start, the
+newest one that of its last device.
+
+So the first compiler of a process picks the generation for all of
+them, and the older generations go when the newest holds at least half
+as many pipelines as the one before it.
+
+Rise of the Tomb Raider's archives had grown to 104 files in 24
+generations, 5.0 GB, and every start captured its 14,503 pipelines
+again and wrote them to 16-18 new archives. The next start dropped the
+older generations, leaving 12 archives and 860 MB, and every start since
+took all pipelines and all 28,030 libraries from them and wrote none:
+benchmark 87-90 s, mean 27.8-28.0 fps, three runs each, compacting at
+every start 99-103 s and 27.2-27.5 fps.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/bridge/mtl_compiler.m | 49 ++++++++++++++++++++++-----
+ 1 file changed, 41 insertions(+), 8 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index db42b34..3267de7 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -75,7 +75,12 @@
+  * Once there are more than ARCHIVE_COMPACT_FILES, a process captures every
+  * pipeline it creates, archived or not, into a new generation of archives,
+  * and the next one drops the older generations when the new one holds at
+- * least half as many pipelines.
++ * least half as many pipelines as the one before it. Each generation holds
++ * the pipelines again, so all older ones together would keep outgrowing the
++ * new one, and every start would compact once more. Games create several
++ * devices, so the first compiler of a process picks its generation for all:
++ * one each would leave the last device's, maybe a few pipelines, as the
++ * newest.
+  */
+ #define ARCHIVE_WRITE_EVERY 1024
+ #define ARCHIVE_WRITE_IDLE 5
+@@ -276,11 +281,21 @@ struct archive_file {
+    uint64_t bytes;
+ };
+ 
++/* The generation the process's archives go to and whether it captures every
++ * pipeline, which its first compiler picks */
++static pthread_mutex_t gen_lock = PTHREAD_MUTEX_INITIALIZER;
++static bool gen_picked, gen_compacts;
++static unsigned process_gen;
++
+ /* Opens the archives in dir, newest first, after dropping the generations a
+  * newer one replaces, and picks the generation new archives go to */
+ static void
+ open_archives(KKPipelineArchives *archives, id<MTLDevice> dev)
+ {
++   pthread_mutex_lock(&gen_lock);
++   /* Later compilers may find the process's own generation, written so far,
++    * as the newest */
++   bool first_compiler = !gen_picked;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = archives->dir;
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+@@ -324,13 +339,26 @@ open_archives(KKPipelineArchives *archives, id<MTLDevice> dev)
+       newest = MAX2(newest, gen);
+    }
+ 
+-   uint64_t newest_count = 0, older_count = 0;
+-   for (unsigned i = 0; i < n; i++)
+-      *(files[i].gen == newest ? &newest_count : &older_count) += files[i].count;
++   /* The pipelines of the newest generation and of the one before it */
++   unsigned before = 0;
++   bool has_before = false;
++   for (unsigned i = 0; i < n; i++) {
++      if (files[i].gen != newest) {
++         before = MAX2(before, files[i].gen);
++         has_before = true;
++      }
++   }
++   uint64_t newest_count = 0, before_count = 0;
++   for (unsigned i = 0; i < n; i++) {
++      if (files[i].gen == newest)
++         newest_count += files[i].count;
++      else if (files[i].gen == before)
++         before_count += files[i].count;
++   }
+ 
+    /* Oldest first, the files to keep start at first */
+    unsigned first = 0;
+-   if (older_count && newest_count * 2 >= older_count) {
++   if (first_compiler && has_before && newest_count * 2 >= before_count) {
+       while (first < n && files[first].gen != newest)
+          first++;
+    }
+@@ -377,12 +405,17 @@ open_archives(KKPipelineArchives *archives, id<MTLDevice> dev)
+ 
+    archives->archives = [opened retain];
+    archives->air = [air copy];
+-   archives->gen = newest;
+-   if (opened.count > ARCHIVE_COMPACT_FILES) {
+-      archives->gen = newest + 1;
++   if (first_compiler) {
++      gen_picked = true;
++      gen_compacts = opened.count > ARCHIVE_COMPACT_FILES;
++      process_gen = gen_compacts ? newest + 1 : newest;
++   }
++   archives->gen = process_gen;
++   if (gen_compacts) {
+       archives->capture_options = [MTL4CompilerTaskOptions new];
+       archives->capture_options.lookupArchives = opened;
+    }
++   pthread_mutex_unlock(&gen_lock);
+ }
+ 
+ /* Compiler */
+-- 
+2.56.0
+
